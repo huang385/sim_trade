@@ -1,0 +1,172 @@
+import json
+from dataclasses import dataclass
+from typing import Mapping
+
+from sqlalchemy.orm import Session
+
+from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.infrastructure.active_order_index import ActiveOrderIndex
+from app.repositories.order_repository import OrderRepository
+
+
+class OrderEventValidationError(ValueError):
+    """订单事件格式不合法，消息应保留并按失败策略重试。"""
+
+
+class UnsupportedOrderEventError(OrderEventValidationError):
+    """当前 Consumer 不支持的事件类型，可以直接转入死信。"""
+
+
+@dataclass(frozen=True)
+class ParsedOrderEvent:
+    """完成基础校验后的 ORDER_ACCEPTED 事件。"""
+
+    event_id: str
+    event_type: str
+    order_id: str
+    account_id: str
+    exchange_id: str
+    symbol: str
+    payload: dict
+
+
+@dataclass(frozen=True)
+class AcceptedOrderProcessResult:
+    """单条订单事件的业务处理结果。"""
+
+    event_id: str
+    order_id: str
+    action: str
+
+
+class AcceptedOrderEventService:
+    """
+    校验 ORDER_ACCEPTED 事件并维护 Redis 活动订单索引。
+
+    事件仅用于定位订单，是否注册以及写入哪些字段全部以 PostgreSQL 中的
+    orders 最新记录为准。本服务不会修改账户、订单状态、成交或持仓。
+    """
+
+    ACTIVE_STATUSES = {
+        OrderStatus.ACCEPTED.value,
+        OrderStatus.PARTIALLY_FILLED.value,
+    }
+    TERMINAL_STATUSES = {
+        OrderStatus.FILLED.value,
+        OrderStatus.CANCELLED.value,
+        OrderStatus.PARTIALLY_CANCELLED.value,
+        OrderStatus.REJECTED.value,
+    }
+
+    def __init__(
+        self,
+        *,
+        order_repository: OrderRepository,
+        active_order_index: ActiveOrderIndex,
+        processed_ttl_seconds: int,
+    ):
+        self.order_repository = order_repository
+        self.active_order_index = active_order_index
+        self.processed_ttl_seconds = processed_ttl_seconds
+
+    @staticmethod
+    def parse_event(fields: Mapping[str, str]) -> ParsedOrderEvent:
+        """解析并校验 Redis Stream 中的基础事件结构。"""
+
+        event_id = fields.get("event_id", "").strip()
+        event_type = fields.get("event_type", "").strip()
+        if not event_id:
+            raise OrderEventValidationError("事件缺少event_id")
+        if not event_type:
+            raise OrderEventValidationError("事件缺少event_type")
+        if event_type != "ORDER_ACCEPTED":
+            raise UnsupportedOrderEventError(
+                f"不支持的订单事件类型: {event_type}"
+            )
+
+        raw_payload = fields.get("payload")
+        try:
+            payload = json.loads(raw_payload)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise OrderEventValidationError("payload不是合法JSON") from exc
+        if not isinstance(payload, dict):
+            raise OrderEventValidationError("payload必须是JSON对象")
+
+        required_fields = ("order_id", "account_id", "exchange_id", "symbol")
+        missing = [
+            name
+            for name in required_fields
+            if not isinstance(payload.get(name), str)
+            or not payload[name].strip()
+        ]
+        if missing:
+            raise OrderEventValidationError(
+                f"payload缺少必要字段: {','.join(missing)}"
+            )
+
+        return ParsedOrderEvent(
+            event_id=event_id,
+            event_type=event_type,
+            order_id=payload["order_id"].strip(),
+            account_id=payload["account_id"].strip(),
+            exchange_id=payload["exchange_id"].strip(),
+            symbol=payload["symbol"].strip(),
+            payload=payload,
+        )
+
+    def process(
+        self,
+        db: Session,
+        fields: Mapping[str, str],
+    ) -> AcceptedOrderProcessResult:
+        """处理一条事件，返回动作说明；异常由 Worker 决定重试或死信。"""
+
+        event = self.parse_event(fields)
+        order = self.order_repository.get_by_order_id(db, event.order_id)
+
+        # Outbox 和订单原子提交，正常情况下不会缺失；若确实找不到，Redis
+        # 不创建任何索引，消息可安全 ACK，数据库仍是最终事实来源。
+        if order is None:
+            return AcceptedOrderProcessResult(
+                event_id=event.event_id,
+                order_id=event.order_id,
+                action="ORDER_NOT_FOUND",
+            )
+
+        if order.order_id != event.order_id:
+            raise OrderEventValidationError("数据库订单编号与事件不一致")
+        if order.account_id != event.account_id:
+            raise OrderEventValidationError("事件账户与数据库订单账户不一致")
+
+        should_remove = (
+            order.status in self.TERMINAL_STATUSES
+            or order.remaining_volume <= 0
+            or order.status not in self.ACTIVE_STATUSES
+            or order.order_type != OrderType.LIMIT.value
+            or order.offset_flag != OffsetFlag.OPEN.value
+        )
+        if should_remove:
+            self.active_order_index.remove_active_order(
+                order_id=order.order_id,
+                account_id=order.account_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
+                event_id=event.event_id,
+                processed_ttl_seconds=self.processed_ttl_seconds,
+            )
+            return AcceptedOrderProcessResult(
+                event_id=event.event_id,
+                order_id=event.order_id,
+                action="REMOVED",
+            )
+
+        written = self.active_order_index.add_active_order(
+            order,
+            event_id=event.event_id,
+            processed_ttl_seconds=self.processed_ttl_seconds,
+        )
+        return AcceptedOrderProcessResult(
+            event_id=event.event_id,
+            order_id=event.order_id,
+            action="REGISTERED" if written else "DUPLICATE",
+        )

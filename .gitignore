@@ -1,0 +1,18 @@
+# 本地环境配置与派生配置
+.env
+.env.*
+!.env.example
+
+# Python字节码和测试缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 本地虚拟环境
+.venv/
+venv/
+
+# 编辑器本地配置
+.vscode/

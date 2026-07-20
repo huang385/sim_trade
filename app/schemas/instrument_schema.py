@@ -1,0 +1,86 @@
+from datetime import date, datetime
+from decimal import Decimal
+from app.enums.market_enums import MarketType
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class InstrumentCreate(BaseModel):
+    """
+    创建或人工补录合约的请求参数。
+
+    正常情况下，合约信息主要由 RQData 同步；
+    该结构主要用于开发测试和人工补录。
+    """
+
+    # RQData标准合约代码，例如 RB2610
+    order_book_id: str = Field(min_length=1, max_length=64)
+
+    # 系统内部合约代码
+    symbol: str = Field(min_length=1, max_length=64)
+
+    # 交易所代码，例如 SHFE
+    exchange_id: str = Field(min_length=1, max_length=32)
+
+    # 合约中文名称
+    instrument_name: str | None = Field(default=None, max_length=128)
+
+    # 品种代码，例如 RB、CU
+    product_id: str | None = Field(default=None, max_length=64)
+
+    # 市场类型，第一版固定期货
+    market_type: MarketType = MarketType.FUTURES
+    # 合约乘数，必须大于 0
+    contract_multiplier: Decimal = Field(gt=0)
+
+    # 最小变动价位，必须大于 0
+    price_tick: Decimal = Field(gt=0)
+
+    # 最小下单量
+    min_volume: int = Field(default=1, gt=0)
+
+    # 最大下单量
+    max_volume: int = Field(default=1_000_000, gt=0)
+
+    # 上市日期
+    listed_date: date | None = None
+
+    # 到期日期
+    expire_date: date | None = None
+
+    # 是否允许交易
+    is_active: bool = True
+
+    # 数据来源
+    data_source: str = "MANUAL"
+
+
+class InstrumentResponse(BaseModel):
+    """
+    合约信息返回结构。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    order_book_id: str
+    symbol: str
+    exchange_id: str
+
+    instrument_name: str | None
+    product_id: str | None
+    market_type: MarketType = MarketType.FUTURES
+
+    contract_multiplier: Decimal
+    price_tick: Decimal
+
+    min_volume: int
+    max_volume: int
+
+    listed_date: date | None
+    expire_date: date | None
+    is_active: bool
+
+    data_source: str
+    synced_at: datetime | None
+    created_at: datetime
+    updated_at: datetime

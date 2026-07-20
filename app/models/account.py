@@ -1,0 +1,197 @@
+from datetime import date, datetime, timezone
+from decimal import Decimal
+
+from sqlalchemy import Date, DateTime, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+
+def utc_now() -> datetime:
+    """
+    返回带时区的 UTC 时间。
+
+    数据库存储统一时间，展示时再转换为本地时间。
+    """
+    return datetime.now(timezone.utc)
+
+
+class Account(Base):
+    """
+    模拟交易账户资金表。
+
+    该表保存账户当前资金快照。
+
+    核心原则：
+    1. 下单时只冻结资金或保证金；
+    2. 订单成交后，才根据 Trade 更新实际保证金、手续费和盈亏；
+    3. 行情变化只更新浮动盈亏、动态权益和风险率；
+    4. 账户资金变化不能由客户端直接修改。
+    """
+
+    __tablename__ = "account"
+
+    # 数据库内部自增主键
+    id: Mapped[int] = mapped_column(
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    # 交易账户编号，例如 092001
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
+    # 用户编号，一个用户可以拥有多个交易账户
+    user_id: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        index=True,
+    )
+
+    # 账户名称，例如：测试期货账户
+    account_name: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+    )
+
+    # 账户类型，第一版主要使用 FUTURES
+    account_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+    )
+
+    # 创建账户时设置的初始资金
+    initial_cash: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前现金余额
+    #
+    # 手续费扣除和平仓盈亏会影响该字段。
+    cash_balance: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前可用于下单的资金
+    available_cash: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 下单后、成交前被冻结的普通资金
+    frozen_cash: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 动态权益
+    #
+    # 一般可以理解为：
+    # 现金余额 + 浮动盈亏
+    equity: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 已成交持仓实际占用的保证金
+    used_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 未成交开仓订单预冻结的保证金
+    frozen_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 平仓成交后已经实现的盈亏
+    realized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前持仓根据最新行情计算出的浮动盈亏
+    unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前交易日累计盈亏
+    daily_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 成交后已经实际扣除的手续费
+    used_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 未成交订单预冻结的手续费
+    frozen_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 账户风险率
+    #
+    # 第一版可以使用：
+    # risk_ratio = used_margin / equity
+    risk_ratio: Mapped[Decimal] = mapped_column(
+        Numeric(18, 8),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 账户状态：
+    # NORMAL      正常
+    # DISABLED    禁止交易
+    # LIQUIDATION 强平中
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="NORMAL",
+    )
+
+    # 当前账户所属交易日
+    trading_day: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        index=True,
+    )
+
+    # 创建时间
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+    )
+
+    # 最后更新时间
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=utc_now,
+        onupdate=utc_now,
+    )
