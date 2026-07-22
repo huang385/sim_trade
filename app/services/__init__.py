@@ -17,6 +17,16 @@ from app.services.active_order_rebuild_service import (
     ActiveOrderRebuildResult,
     ActiveOrderRebuildService,
 )
+from app.services.market_data_service import (
+    MarketInstrumentSnapshot,
+    MarketDataProcessResult,
+    MarketDataService,
+)
+from app.services.market_subscription_service import MarketSubscriptionService
+from app.services.market_tick_normalizer import MarketTickNormalizer
+from app.services.market_tick_validation_service import (
+    MarketTickValidationService,
+)
 
 
 __all__ = [
@@ -36,4 +46,10 @@ __all__ = [
     "AcceptedOrderEventService",
     "ActiveOrderRebuildService",
     "ActiveOrderRebuildResult",
+    "MarketDataService",
+    "MarketDataProcessResult",
+    "MarketInstrumentSnapshot",
+    "MarketSubscriptionService",
+    "MarketTickNormalizer",
+    "MarketTickValidationService",
 ]

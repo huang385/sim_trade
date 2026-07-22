@@ -28,6 +28,33 @@ class InstrumentRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def get_by_order_book_id(
+        db: Session,
+        order_book_id: str,
+    ) -> Instrument | None:
+        """按行情和参考数据统一使用的标准合约编号查询合约。"""
+
+        statement = select(Instrument).where(
+            Instrument.order_book_id == order_book_id
+        )
+        return db.scalar(statement)
+
+    @staticmethod
+    def list_by_order_book_ids(
+        db: Session,
+        order_book_ids: set[str] | frozenset[str] | list[str],
+    ) -> Sequence[Instrument]:
+        """一次SQL批量读取订阅集合对应的合约，避免逐合约往返数据库。"""
+
+        normalized_ids = sorted(set(order_book_ids))
+        if not normalized_ids:
+            return []
+        statement = select(Instrument).where(
+            Instrument.order_book_id.in_(normalized_ids)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def list_all(
         db: Session,
         *,

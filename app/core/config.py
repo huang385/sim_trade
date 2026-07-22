@@ -42,6 +42,23 @@ class Settings(BaseSettings):
     # PostgreSQL活动订单游标分页重建批次大小
     active_order_rebuild_batch_size: int = 500
 
+    # 优美利FeedHub行情服务。真实地址和凭证只允许通过.env或环境变量提供。
+    remote_market_data_base_url: str = ""
+    remote_market_data_api_user: str = ""
+    remote_market_data_api_token: str = ""
+    remote_market_data_timeout_seconds: float = 3.0
+    remote_market_data_verify_ssl: bool = True
+
+    # 行情订阅、重连、本地队列和Redis派生数据配置。
+    remote_market_data_subscription_refresh_seconds: float = 1.0
+    remote_market_data_subscription_debounce_seconds: float = 3.0
+    remote_market_data_reconnect_initial_seconds: float = 1.0
+    remote_market_data_reconnect_max_seconds: float = 30.0
+    remote_market_data_queue_size: int = 10_000
+    remote_market_data_stale_threshold_seconds: float = 10.0
+    market_tick_stream_name: str = "stream:market-ticks"
+    market_tick_processed_ttl_seconds: int = 86_400
+
     @property
     def database_url(self) -> str:
         return (
