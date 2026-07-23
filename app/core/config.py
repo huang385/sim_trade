@@ -55,9 +55,8 @@ class Settings(BaseSettings):
     remote_market_data_reconnect_initial_seconds: float = 1.0
     remote_market_data_reconnect_max_seconds: float = 30.0
     remote_market_data_queue_size: int = 10_000
-    remote_market_data_stale_threshold_seconds: float = 10.0
+    remote_market_data_shutdown_drain_timeout_seconds: float = 10.0
     market_tick_stream_name: str = "stream:market-ticks"
-    market_tick_processed_ttl_seconds: int = 86_400
 
     @property
     def database_url(self) -> str:

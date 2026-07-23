@@ -18,6 +18,7 @@ from app.services.active_order_rebuild_service import (
     ActiveOrderRebuildService,
 )
 from app.services.market_data_service import (
+    MarketDataProcessAction,
     MarketInstrumentSnapshot,
     MarketDataProcessResult,
     MarketDataService,
@@ -48,6 +49,7 @@ __all__ = [
     "ActiveOrderRebuildResult",
     "MarketDataService",
     "MarketDataProcessResult",
+    "MarketDataProcessAction",
     "MarketInstrumentSnapshot",
     "MarketSubscriptionService",
     "MarketTickNormalizer",

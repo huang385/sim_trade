@@ -50,3 +50,78 @@ def test_add_and_remove_changes_wait_for_debounce():
     assert service.observe(frozenset(), now=5) is None
     change = service.observe(frozenset(), now=8)
     assert change.codes == frozenset()
+
+
+def test_partial_subscription_receipt_tracks_success_and_failure_reasons():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        debounce_seconds=3,
+    )
+    generation = service.mark_requested(
+        frozenset({"OK", "MISSING", "NOTLIVE", "FAILED"})
+    )
+
+    state = service.apply_subscription_report(
+        {
+            "contracts": {
+                "OK": {"exists": True, "is_live": True, "subscribed": True},
+                "MISSING": {"exists": False, "is_live": False, "subscribed": False},
+                "NOTLIVE": {"exists": True, "is_live": False, "subscribed": False},
+                "FAILED": {"exists": True, "is_live": True, "subscribed": False},
+            }
+        },
+        generation=generation,
+    )
+
+    assert state.subscribed_codes == frozenset({"OK"})
+    assert state.failure_reasons == {
+        "MISSING": "CONTRACT_NOT_FOUND",
+        "NOTLIVE": "CONTRACT_NOT_LIVE",
+        "FAILED": "SUBSCRIBE_FAILED",
+    }
+
+
+def test_duplicate_and_out_of_order_receipts_keep_success_monotonic():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        debounce_seconds=3,
+    )
+    generation = service.mark_requested(frozenset({"AG2609"}))
+    failure = {
+        "contracts": {
+            "AG2609": {"exists": True, "is_live": True, "subscribed": False}
+        }
+    }
+    success = {
+        "contracts": {
+            "AG2609": {"exists": True, "is_live": True, "subscribed": True}
+        }
+    }
+
+    service.apply_subscription_report(failure, generation=generation)
+    service.apply_subscription_report(success, generation=generation)
+    state = service.apply_subscription_report(failure, generation=generation)
+
+    assert state.all_subscribed is True
+    assert state.failed_codes == frozenset()
+
+
+def test_old_generation_receipt_does_not_change_new_request():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        debounce_seconds=3,
+    )
+    old_generation = service.mark_requested(frozenset({"OLD"}))
+    service.mark_requested(frozenset({"NEW"}))
+
+    state = service.apply_subscription_report(
+        {
+            "contracts": {
+                "OLD": {"exists": True, "is_live": True, "subscribed": True}
+            }
+        },
+        generation=old_generation,
+    )
+
+    assert state.requested_codes == frozenset({"NEW"})
+    assert state.subscribed_codes == frozenset()

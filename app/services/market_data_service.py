@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 from threading import RLock
 from typing import Any
 
@@ -10,7 +11,7 @@ from app.infrastructure.market_data.market_tick_store import (
     MarketTickStoreResult,
 )
 from app.repositories.instrument_repository import InstrumentRepository
-from app.schemas.market_tick_schema import MarketTick
+from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.services.market_tick_normalizer import MarketTickNormalizer
 from app.services.market_tick_validation_service import (
     MarketTickValidationError,
@@ -18,15 +19,22 @@ from app.services.market_tick_validation_service import (
 )
 
 
+class MarketDataProcessAction(str, Enum):
+    """行情业务处理结果；REST 快照不会进入实时撮合 Stream。"""
+
+    PUBLISHED = "PUBLISHED"
+    REST_IGNORED = "REST_IGNORED"
+
+
 @dataclass(frozen=True)
 class MarketDataProcessResult:
-    action: MarketTickStoreResult
+    action: MarketDataProcessAction
     tick: MarketTick
 
 
 @dataclass(frozen=True)
 class MarketInstrumentSnapshot:
-    """从ORM对象复制出的只读合约快照，可安全跨Session和线程使用。"""
+    """从 ORM 对象复制出的只读合约快照，可安全跨 Session 和线程使用。"""
 
     order_book_id: str
     exchange_id: str
@@ -35,7 +43,7 @@ class MarketInstrumentSnapshot:
 
 
 class MarketDataService:
-    """协调合约查询、标准化、校验和Redis发布，不写PostgreSQL。"""
+    """协调合约查询、标准化、必要校验和 WebSocket 行情发布。"""
 
     def __init__(
         self,
@@ -49,13 +57,9 @@ class MarketDataService:
         self.normalizer = normalizer
         self.validation_service = validation_service
         self.tick_store = tick_store
-        # 缓存生命周期与订阅生命周期一致，不按时间过期，不在Tick路径反复查库。
-        # None代表合约在最近一次订阅预热或首次查询时不存在，用于负缓存。
-        self._instrument_cache: dict[
-            str,
-            MarketInstrumentSnapshot | None,
-        ] = {}
-        # 主线程会在订阅变化时预热，Tick消费线程同时读取，因此必须加锁。
+
+        # 缓存与 Worker 生命周期一致，不按时间过期；None 表示负缓存。
+        self._instrument_cache: dict[str, MarketInstrumentSnapshot | None] = {}
         self._instrument_cache_lock = RLock()
 
     @staticmethod
@@ -71,8 +75,6 @@ class MarketDataService:
         self,
         order_book_id: str,
     ) -> tuple[bool, MarketInstrumentSnapshot | None]:
-        """返回(是否命中, 快照)；不存在的负缓存同样算命中。"""
-
         with self._instrument_cache_lock:
             if order_book_id not in self._instrument_cache:
                 return False, None
@@ -93,26 +95,16 @@ class MarketDataService:
         db: Session,
         order_book_ids: set[str] | frozenset[str] | list[str],
     ) -> None:
-        """
-        订阅建立前用一次SQL批量预热全部合约，并为缺失合约写入负缓存。
-
-        这里只更新传入编号，不清空其他仍可能被消费线程处理的缓存项。
-        """
+        """订阅建立前用一次 SQL 批量预热合约和负缓存。"""
 
         normalized_ids = {normalize_code(code) for code in order_book_ids}
         instruments = self.instrument_repository.list_by_order_book_ids(
             db,
             normalized_ids,
         )
-        by_id = {
-            instrument.order_book_id: instrument
-            for instrument in instruments
-        }
+        by_id = {instrument.order_book_id: instrument for instrument in instruments}
         for order_book_id in normalized_ids:
-            self._cache_instrument(
-                order_book_id,
-                by_id.get(order_book_id),
-            )
+            self._cache_instrument(order_book_id, by_id.get(order_book_id))
 
     def _load_instrument(
         self,
@@ -131,6 +123,7 @@ class MarketDataService:
         data: dict[str, Any],
         raw: dict[str, Any],
         instrument: MarketInstrumentSnapshot | None,
+        ingest_type: MarketTickIngestType,
     ) -> MarketDataProcessResult:
         if instrument is None:
             raise MarketTickValidationError("合约不存在")
@@ -138,12 +131,21 @@ class MarketDataService:
             data=data,
             raw=raw,
             instrument=instrument,
+            ingest_type=ingest_type,
         )
         self.validation_service.validate(tick=tick, instrument=instrument)
-        return MarketDataProcessResult(
-            action=self.tick_store.publish(tick),
-            tick=tick,
-        )
+
+        if ingest_type == MarketTickIngestType.REST_SNAPSHOT:
+            # REST 只用于订阅启动阶段观察行情源是否有快照，不得触发撮合。
+            return MarketDataProcessResult(
+                action=MarketDataProcessAction.REST_IGNORED,
+                tick=tick,
+            )
+
+        store_result = self.tick_store.publish(tick)
+        if store_result != MarketTickStoreResult.PUBLISHED:
+            raise RuntimeError(f"未知行情存储结果: {store_result}")
+        return MarketDataProcessResult(action=MarketDataProcessAction.PUBLISHED, tick=tick)
 
     def process(
         self,
@@ -151,6 +153,7 @@ class MarketDataService:
         *,
         data: dict[str, Any],
         raw: dict[str, Any],
+        ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
     ) -> MarketDataProcessResult:
         self.validation_service.validate_envelope(data=data, raw=raw)
         order_book_id = normalize_code(str(data.get("code") or ""))
@@ -161,6 +164,7 @@ class MarketDataService:
             data=data,
             raw=raw,
             instrument=instrument,
+            ingest_type=ingest_type,
         )
 
     def process_with_session_factory(
@@ -169,13 +173,9 @@ class MarketDataService:
         *,
         data: dict[str, Any],
         raw: dict[str, Any],
+        ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
     ) -> MarketDataProcessResult:
-        """
-        Tick线程专用入口：缓存命中时完全不创建数据库Session。
-
-        只有首次看到未预热合约时，才创建Session并执行一次按order_book_id
-        查询。缓存不按时间过期，后续Tick全部走内存。
-        """
+        """Tick 线程入口：缓存命中时完全不创建数据库 Session。"""
 
         self.validation_service.validate_envelope(data=data, raw=raw)
         order_book_id = normalize_code(str(data.get("code") or ""))
@@ -187,4 +187,5 @@ class MarketDataService:
             data=data,
             raw=raw,
             instrument=instrument,
+            ingest_type=ingest_type,
         )

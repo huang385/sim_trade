@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -94,6 +94,27 @@ def test_pandas_timestamps_become_python_datetime_and_trading_date():
     assert type(tick.event_time) is datetime
     assert type(tick.local_recv_time) is datetime
     assert type(tick.trading_day) is date
+    assert tick.event_time.utcoffset().total_seconds() == 8 * 3600
+
+
+def test_aware_utc_time_is_converted_to_asia_shanghai():
+    tick = normalize(
+        make_data(event_time=datetime(2026, 7, 22, 1, 32, 8, tzinfo=timezone.utc))
+    )
+
+    assert tick.event_time.isoformat() == "2026-07-22T09:32:08+08:00"
+
+
+def test_trading_day_comes_from_source_instead_of_event_time():
+    tick = normalize(
+        make_data(
+            trading_day="20260723",
+            event_time=datetime(2026, 7, 22, 21, 5),
+        )
+    )
+
+    assert tick.trading_day == date(2026, 7, 23)
+    assert tick.event_time.date() == date(2026, 7, 22)
 
 
 def test_local_receive_time_before_event_time_is_valid():

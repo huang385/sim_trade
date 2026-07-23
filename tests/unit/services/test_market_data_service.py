@@ -3,7 +3,9 @@ from unittest.mock import Mock
 import pytest
 
 from app.infrastructure.market_data.market_tick_store import MarketTickStoreResult
+from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import (
+    MarketDataProcessAction,
     MarketDataService,
     MarketInstrumentSnapshot,
 )
@@ -56,7 +58,7 @@ def test_valid_tick_is_validated_and_published():
 
     result = service.process(Mock(), data=make_data(), raw=make_raw())
 
-    assert result.action == MarketTickStoreResult.PUBLISHED
+    assert result.action == MarketDataProcessAction.PUBLISHED
     validation.validate.assert_called_once_with(
         tick=tick,
         instrument=MarketInstrumentSnapshot(
@@ -67,6 +69,44 @@ def test_valid_tick_is_validated_and_published():
         ),
     )
     store.publish.assert_called_once_with(tick)
+
+
+def test_old_event_time_from_live_callback_is_not_filtered():
+    service, repository, normalizer, _validation, store = make_service()
+    repository.get_by_order_book_id.return_value = make_instrument()
+    normalizer.normalize.return_value = normalize()
+    store.publish.return_value = MarketTickStoreResult.PUBLISHED
+
+    result = service.process(
+        Mock(),
+        data=make_data(),
+        raw=make_raw(),
+        ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+    )
+
+    assert result.action == MarketDataProcessAction.PUBLISHED
+    assert result.tick.ingest_type == MarketTickIngestType.LIVE_CALLBACK
+    store.publish.assert_called_once_with(result.tick)
+
+
+def test_rest_snapshot_is_explicitly_ignored_and_never_published():
+    service, repository, normalizer, _validation, store = make_service()
+    repository.get_by_order_book_id.return_value = make_instrument()
+    rest_tick = normalize().model_copy(
+        update={"ingest_type": MarketTickIngestType.REST_SNAPSHOT}
+    )
+    normalizer.normalize.return_value = rest_tick
+
+    result = service.process(
+        Mock(),
+        data=make_data(),
+        raw=make_raw(),
+        ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+    )
+
+    assert result.action == MarketDataProcessAction.REST_IGNORED
+    assert result.tick.ingest_type == MarketTickIngestType.REST_SNAPSHOT
+    store.publish.assert_not_called()
 
 
 def test_repeated_ticks_for_same_contract_query_repository_only_once():

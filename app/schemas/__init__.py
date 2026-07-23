@@ -27,7 +27,7 @@ from app.schemas.reference_sync_log_schema import (
     ReferenceSyncLogResponse,
 )
 from app.schemas.order_schema import OrderCreateRequest, OrderResponse
-from app.schemas.market_tick_schema import MarketTick
+from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 
 
 __all__ = [
@@ -48,4 +48,5 @@ __all__ = [
     "OrderCreateRequest",
     "OrderResponse",
     "MarketTick",
+    "MarketTickIngestType",
 ]

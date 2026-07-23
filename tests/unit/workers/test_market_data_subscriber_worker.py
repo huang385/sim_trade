@@ -1,12 +1,15 @@
 from contextlib import nullcontext
 import logging
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.infrastructure.market_data.market_tick_store import MarketTickStoreResult
+from app.services.market_data_service import MarketDataProcessAction
 from app.services.market_subscription_service import MarketSubscriptionService
 from app.services.market_tick_validation_service import MarketTickValidationError
 from app.workers.market_data_subscriber_worker import (
+    MarketDataSourceStatus,
     MarketDataSubscriberWorker,
     QueuedTick,
 )
@@ -38,7 +41,13 @@ class FakeSubscription:
         self.join_called += 1
 
 
-def make_worker(*, details=None, queue_size=10, clock=None):
+def make_worker(
+    *,
+    details=None,
+    queue_size=10,
+    clock=None,
+    shutdown_drain_timeout_seconds=10,
+):
     details = details if details is not None else {}
     index = Mock()
     index.list_all_order_ids.side_effect = lambda: set(details)
@@ -63,6 +72,7 @@ def make_worker(*, details=None, queue_size=10, clock=None):
         refresh_seconds=1,
         reconnect_initial_seconds=1,
         reconnect_max_seconds=30,
+        shutdown_drain_timeout_seconds=shutdown_drain_timeout_seconds,
         monotonic=clock,
     )
     return worker, feed_client, market_data_service, subscription_service, clock
@@ -78,6 +88,7 @@ def test_on_quote_only_enqueues_tick_messages():
     assert stats.received_count == 2
     assert stats.enqueued_count == 1
     assert worker.tick_queue.qsize() == 1
+    assert worker.last_tick_at is not None
 
 
 def test_queue_full_never_blocks_and_increments_drop_count():
@@ -92,7 +103,7 @@ def test_queue_full_never_blocks_and_increments_drop_count():
 def test_valid_queue_item_updates_publish_counter():
     worker, _feed, market_data_service, *_ = make_worker()
     market_data_service.process_with_session_factory.return_value = SimpleNamespace(
-        action=MarketTickStoreResult.PUBLISHED,
+        action=MarketDataProcessAction.PUBLISHED,
         tick=normalize(),
     )
 
@@ -101,21 +112,7 @@ def test_valid_queue_item_updates_publish_counter():
     stats = worker.stats_snapshot()
     assert stats.processed_count == 1
     assert stats.published_count == 1
-
-
-def test_duplicate_and_stale_queue_items_update_separate_counters():
-    worker, _feed, market_data_service, *_ = make_worker()
-    market_data_service.process_with_session_factory.side_effect = [
-        SimpleNamespace(action=MarketTickStoreResult.DUPLICATE, tick=normalize()),
-        SimpleNamespace(action=MarketTickStoreResult.STALE, tick=normalize()),
-    ]
-
-    worker._process_queued_tick(QueuedTick(make_data(), make_raw()))
-    worker._process_queued_tick(QueuedTick(make_data(), make_raw()))
-
-    stats = worker.stats_snapshot()
-    assert stats.duplicate_count == 1
-    assert stats.stale_count == 1
+    assert worker.last_published_at is not None
 
 
 def test_bad_tick_does_not_escape_processing_loop():
@@ -137,21 +134,18 @@ def test_no_active_orders_does_not_open_empty_subscription():
     feed_client.start_tick_callbacks.assert_not_called()
 
 
-def test_new_active_contract_gets_snapshot_then_tick_subscription_after_debounce():
+def test_new_active_contract_starts_websocket_after_debounce_without_rest():
     details = {"O1": {"order_book_id": "AG2609"}}
     worker, feed_client, _service, subscriptions, clock = make_worker(
         details=details
     )
-    feed_client.get_latest_ticks.return_value = {"AG2609": None}
-
     worker.run_once()
     clock.value = 3
     worker.run_once()
 
-    feed_client.get_latest_ticks.assert_called_once_with(frozenset({"AG2609"}))
+    feed_client.get_latest_ticks.assert_not_called()
     feed_client.start_tick_callbacks.assert_called_once()
     assert subscriptions.current_codes == frozenset({"AG2609"})
-    assert worker.stats_snapshot().no_tick_count == 1
 
 
 def test_added_and_removed_contract_rebuilds_subscription():
@@ -184,7 +178,8 @@ def test_added_and_removed_contract_rebuilds_subscription():
 
 
 def test_subscription_receipt_idle_is_not_error():
-    worker, *_ = make_worker()
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    subscriptions.mark_requested(frozenset({"AG2609"}))
 
     worker.on_subscribe(
         {
@@ -203,7 +198,8 @@ def test_subscription_receipt_idle_is_not_error():
 
 
 def test_subscription_receipt_records_contract_and_subscription_failures(caplog):
-    worker, *_ = make_worker()
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    subscriptions.mark_requested(frozenset({"MISSING", "FAILED"}))
 
     with caplog.at_level(logging.WARNING):
         worker.on_subscribe(
@@ -227,6 +223,118 @@ def test_subscription_receipt_records_contract_and_subscription_failures(caplog)
 
     assert "CONTRACT_NOT_FOUND" in caplog.text
     assert "SUBSCRIBE_FAILED" in caplog.text
+
+
+def test_partial_failure_is_degraded_and_retried_after_backoff():
+    details = {
+        "O1": {"order_book_id": "AG2609"},
+        "O2": {"order_book_id": "AU2608"},
+    }
+    worker, feed_client, _service, subscriptions, clock = make_worker(details=details)
+    worker.run_once()
+    clock.value = 3
+    worker.run_once()
+    callback = feed_client.start_tick_callbacks.call_args.kwargs["on_subscribe"]
+    callback(
+        {
+            "contracts": {
+                "AG2609": {"exists": True, "is_live": True, "subscribed": True},
+                "AU2608": {"exists": True, "is_live": True, "subscribed": False},
+            }
+        }
+    )
+
+    worker._publish_source_status()
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert subscriptions.state_snapshot().failed_codes == frozenset({"AU2608"})
+    assert mapping["status"] == MarketDataSourceStatus.DEGRADED.value
+
+    clock.value = 3.9
+    worker.run_once()
+    assert feed_client.start_tick_callbacks.call_count == 1
+    clock.value = 4
+    worker.run_once()
+    assert feed_client.start_tick_callbacks.call_count == 2
+
+    second_callback = feed_client.start_tick_callbacks.call_args.kwargs["on_subscribe"]
+    second_callback(
+        {
+            "contracts": {
+                "AG2609": {"exists": True, "is_live": True, "subscribed": True},
+                "AU2608": {"exists": True, "is_live": True, "subscribed": False},
+            }
+        }
+    )
+    clock.value = 5.9
+    worker.run_once()
+    assert feed_client.start_tick_callbacks.call_count == 2
+    clock.value = 6
+    worker.run_once()
+    assert feed_client.start_tick_callbacks.call_count == 3
+
+
+def test_all_confirmed_subscription_is_running():
+    details = {"O1": {"order_book_id": "AG2609"}}
+    worker, feed_client, *_rest, clock = make_worker(details=details)
+    worker.run_once()
+    clock.value = 3
+    worker.run_once()
+    callback = feed_client.start_tick_callbacks.call_args.kwargs["on_subscribe"]
+    callback(
+        {
+            "contracts": {
+                "AG2609": {"exists": True, "is_live": True, "subscribed": True}
+            }
+        }
+    )
+
+    worker._publish_source_status()
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert mapping["status"] == MarketDataSourceStatus.RUNNING.value
+    assert mapping["last_successful_subscribe_at"] is not None
+
+
+def test_idle_and_disconnected_statuses_are_published():
+    worker, _feed, *_ = make_worker(details={})
+    worker.run_once()
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert mapping["status"] == MarketDataSourceStatus.IDLE.value
+
+    details = {"O1": {"order_book_id": "AG2609"}}
+    worker, _feed, _service, _subscriptions, clock = make_worker(details=details)
+    worker.run_once()
+    clock.value = 3
+    worker.run_once()
+    worker._subscription.alive = False
+    clock.value = 4
+    worker.run_once()
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert mapping["status"] == MarketDataSourceStatus.DISCONNECTED.value
+
+
+def test_status_hash_is_sorted_and_contains_no_sensitive_fields():
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    subscriptions.mark_requested(frozenset({"ZZ", "AA"}))
+    worker._publish_source_status()
+
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert mapping["requested_codes"] == "AA,ZZ"
+    assert mapping["queue_capacity"] == 10
+    assert not any(
+        word in key.lower()
+        for key in mapping
+        for word in ("token", "password", "api_user", "url")
+    )
+
+
+def test_temporary_redis_status_failure_does_not_break_next_worker_cycle():
+    worker, _feed, *_ = make_worker(details={})
+    worker.tick_store.update_source_status.side_effect = [RuntimeError("redis"), None]
+
+    worker.run_once()
+    worker.run_once()
+
+    assert worker.tick_store.update_source_status.call_count == 2
 
 
 def test_ingestion_stopped_is_not_recorded_as_failure():
@@ -268,3 +376,52 @@ def test_request_stop_and_shutdown_stop_subscription_and_consumer_thread():
     assert worker.stop_event.is_set()
     assert subscription.stop_called == 1
     assert subscription.join_called == 1
+    mapping = worker.tick_store.update_source_status.call_args.args[0]
+    assert mapping["status"] == MarketDataSourceStatus.STOPPED.value
+
+
+def test_shutdown_drains_queue_and_consumer_thread_exits():
+    worker, _feed, market_data_service, *_ = make_worker()
+    market_data_service.process_with_session_factory.return_value = SimpleNamespace(
+        action=MarketDataProcessAction.PUBLISHED,
+        tick=normalize(),
+    )
+    worker.start_consumer_thread()
+    worker.on_quote(make_data(), make_raw())
+
+    worker.shutdown()
+
+    assert worker.tick_queue.empty()
+    assert not worker._consumer_thread.is_alive()
+    assert worker.stats_snapshot().shutdown_drop_count == 0
+
+
+def test_shutdown_timeout_drops_remaining_queue_and_joins_consumer():
+    worker, _feed, market_data_service, *_ = make_worker(
+        shutdown_drain_timeout_seconds=0.01
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_process(*_args, **_kwargs):
+        entered.set()
+        release.wait(timeout=2)
+        return SimpleNamespace(
+            action=MarketDataProcessAction.PUBLISHED,
+            tick=normalize(),
+        )
+
+    market_data_service.process_with_session_factory.side_effect = slow_process
+    worker.start_consumer_thread()
+    worker.on_quote(make_data(), make_raw())
+    assert entered.wait(timeout=1)
+    worker.on_quote(make_data(sequence_id=834), make_raw())
+    shutdown_thread = threading.Thread(target=worker.shutdown)
+    shutdown_thread.start()
+    time.sleep(0.05)
+    release.set()
+    shutdown_thread.join(timeout=2)
+
+    assert not shutdown_thread.is_alive()
+    assert not worker._consumer_thread.is_alive()
+    assert worker.stats_snapshot().shutdown_drop_count == 1

@@ -1,8 +1,16 @@
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+
+class MarketTickIngestType(str, Enum):
+    """行情进入主交易程序的方式。"""
+
+    REST_SNAPSHOT = "REST_SNAPSHOT"
+    LIVE_CALLBACK = "LIVE_CALLBACK"
 
 
 class MarketTick(BaseModel):
@@ -12,6 +20,7 @@ class MarketTick(BaseModel):
 
     source_event_id: str
     source: Literal["YML_FEEDHUB"] = "YML_FEEDHUB"
+    ingest_type: MarketTickIngestType
 
     order_book_id: str
     exchange_id: str
