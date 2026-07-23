@@ -7,6 +7,8 @@ from app.enums.order_enums import (
     OrderSubmitStatus,
     OrderType,
     OutboxStatus,
+    PositionDirection,
+    PositionDetailStatus,
 )
 from app.enums.reference_data_enums import (
     CommissionType,
@@ -27,4 +29,6 @@ __all__ = [
     "OrderStatus",
     "OrderSubmitStatus",
     "OutboxStatus",
+    "PositionDirection",
+    "PositionDetailStatus",
 ]

@@ -11,6 +11,8 @@ ORDER_EVENT_DEAD_LETTER_STREAM = settings.order_dead_letter_stream
 ACTIVE_ORDERS_ALL_KEY = "active_orders:all"
 
 MARKET_TICK_STREAM = settings.market_tick_stream_name
+MARKET_MATCHING_CONSUMER_GROUP = settings.market_matching_consumer_group
+MARKET_MATCHING_DEAD_LETTER_STREAM = settings.market_matching_dead_letter_stream
 YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
 
 
@@ -48,3 +50,9 @@ def market_latest_key(exchange_id: str, symbol: str) -> str:
     """返回指定交易所、合约的最新标准化行情 Hash 键名。"""
 
     return f"market:latest:{exchange_id}:{symbol}"
+
+
+def market_matching_failure_key(message_id: str) -> str:
+    """返回行情撮合消息的失败次数键名。"""
+
+    return f"market_matching_failure:{message_id}"

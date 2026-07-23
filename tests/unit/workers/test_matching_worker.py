@@ -1,0 +1,192 @@
+import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from app.services.market_tick_matching_service import (
+    UnsupportedMarketTickEventError,
+)
+from app.workers.matching_worker import MatchingWorker
+
+
+FIELDS = {
+    "event_id": "TICK-1",
+    "event_type": "MARKET_TICK",
+    "exchange_id": "SHFE",
+    "symbol": "AG2609",
+    "payload": "{}",
+}
+
+
+def make_worker(*, side_effect=None, failure_count=1):
+    consumer = Mock()
+    consumer.consumer_name = "matching-1"
+    consumer.increment_failure.return_value = failure_count
+    consumer.claim_stale_messages.return_value = []
+    consumer.read_new_messages.return_value = []
+    service = Mock()
+    if side_effect is None:
+        service.process.return_value = SimpleNamespace(
+            candidate_count=1,
+            matched_count=1,
+            settled_count=1,
+            idempotent_count=0,
+        )
+    else:
+        service.process.side_effect = side_effect
+    worker = MatchingWorker(
+        stream_consumer=consumer,
+        matching_service=service,
+        batch_size=10,
+        block_ms=1,
+        pending_idle_ms=60000,
+        max_retries=10,
+        retry_interval_seconds=0,
+    )
+    return worker, consumer, service
+
+
+def test_success_acknowledges_and_database_failure_does_not_ack():
+    worker, consumer, _ = make_worker()
+    assert worker.handle_message("1-0", FIELDS) == "acknowledged"
+    consumer.acknowledge.assert_called_once_with("1-0")
+
+    worker, consumer, _ = make_worker(side_effect=RuntimeError("postgres down"))
+    assert worker.handle_message("2-0", FIELDS) == "retry"
+    consumer.acknowledge.assert_not_called()
+
+
+def test_new_settlement_logs_info(caplog):
+    """本轮产生新成交时应保留INFO日志，方便交易监控。"""
+
+    worker, _, _ = make_worker()
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="app.workers.matching_worker",
+    ):
+        result = worker.handle_message("1-0", FIELDS)
+
+    assert result == "acknowledged"
+    assert any(
+        record.levelno == logging.INFO
+        and "行情撮合产生成交" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_no_match_logs_debug_without_info(caplog):
+    """普通未成交Tick只记录DEBUG，默认INFO级别下不会刷屏。"""
+
+    worker, _, service = make_worker()
+    service.process.return_value = SimpleNamespace(
+        candidate_count=3,
+        matched_count=0,
+        settled_count=0,
+        idempotent_count=0,
+    )
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="app.workers.matching_worker",
+    ):
+        result = worker.handle_message("2-0", FIELDS)
+
+    assert result == "acknowledged"
+    assert any(
+        record.levelno == logging.DEBUG
+        and "未产生新成交" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno == logging.INFO
+        and "行情撮合" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_idempotent_replay_without_new_settlement_logs_debug(caplog):
+    """幂等重放没有新增成交时不得重复打印INFO成交日志。"""
+
+    worker, _, service = make_worker()
+    service.process.return_value = SimpleNamespace(
+        candidate_count=1,
+        matched_count=1,
+        settled_count=0,
+        idempotent_count=1,
+    )
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="app.workers.matching_worker",
+    ):
+        result = worker.handle_message("3-0", FIELDS)
+
+    assert result == "acknowledged"
+    assert any(
+        record.levelno == logging.DEBUG
+        and "idempotent=1" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any(
+        record.levelno == logging.INFO
+        and "行情撮合产生成交" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_database_failure_logs_warning_and_does_not_ack(caplog):
+    """暂时性数据库异常继续保留WARNING并让原消息留在Pending。"""
+
+    worker, consumer, _ = make_worker(
+        side_effect=RuntimeError("postgres down")
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="app.workers.matching_worker",
+    ):
+        result = worker.handle_message("4-0", FIELDS)
+
+    assert result == "retry"
+    consumer.acknowledge.assert_not_called()
+    assert any(
+        record.levelno == logging.WARNING
+        and "保留Pending" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_unknown_event_goes_to_dead_letter_before_ack():
+    worker, consumer, _ = make_worker(
+        side_effect=UnsupportedMarketTickEventError("unsupported")
+    )
+    assert worker.handle_message("1-0", FIELDS) == "dead_lettered"
+    consumer.publish_dead_letter.assert_called_once()
+    consumer.acknowledge.assert_called_once_with("1-0")
+
+
+def test_max_retry_dead_letter_failure_keeps_original_pending():
+    worker, consumer, _ = make_worker(
+        side_effect=RuntimeError("postgres down"), failure_count=10
+    )
+    consumer.publish_dead_letter.side_effect = ConnectionError("redis down")
+    assert worker.handle_message("1-0", FIELDS) == "retry"
+    consumer.acknowledge.assert_not_called()
+
+
+def test_pending_and_new_messages_are_both_processed_and_stop_is_graceful():
+    worker, consumer, _ = make_worker()
+    consumer.claim_stale_messages.return_value = [("1-0", FIELDS)]
+    consumer.read_new_messages.return_value = [("2-0", FIELDS)]
+    result = worker.run_once()
+    assert result.received == 2
+    assert result.acknowledged == 2
+    worker.request_stop()
+    assert worker.stop_event.is_set()
+
+
+def test_deleted_pending_tombstone_is_acknowledged_without_matching():
+    worker, consumer, service = make_worker()
+    assert worker.handle_message("1-0", None) == "acknowledged"
+    service.process.assert_not_called()
+    consumer.acknowledge.assert_called_once_with("1-0")

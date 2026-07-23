@@ -33,6 +33,20 @@ class OrderRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def get_by_order_id_for_update(
+        db: Session,
+        order_id: str,
+    ) -> Order | None:
+        """锁定订单行，防止同一订单被并发 Tick 重复结算。"""
+
+        statement = (
+            select(Order)
+            .where(Order.order_id == order_id)
+            .with_for_update()
+        )
+        return db.scalar(statement)
+
+    @staticmethod
     def get_by_client_order_id(
         db: Session,
         account_id: str,

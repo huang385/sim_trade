@@ -14,6 +14,9 @@ from app.models.instrument import Instrument
 from app.models.margin_rule import MarginRule
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
+from app.models.trade import Trade
+from app.models.position import Position
+from app.models.position_detail import PositionDetail
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -123,6 +126,18 @@ def integration_context():
                 Order.account_id == context.account_id
             )
         ).all()
+        trade_ids = db.scalars(
+            select(Trade.trade_id).where(
+                Trade.account_id == context.account_id
+            )
+        ).all()
+        if trade_ids:
+            db.execute(
+                delete(OutboxEvent).where(
+                    OutboxEvent.aggregate_type == "TRADE",
+                    OutboxEvent.aggregate_id.in_(trade_ids),
+                )
+            )
         if order_ids:
             db.execute(
                 delete(OutboxEvent).where(
@@ -130,6 +145,15 @@ def integration_context():
                     OutboxEvent.aggregate_id.in_(order_ids),
                 )
             )
+        db.execute(
+            delete(PositionDetail).where(
+                PositionDetail.account_id == context.account_id
+            )
+        )
+        db.execute(
+            delete(Position).where(Position.account_id == context.account_id)
+        )
+        db.execute(delete(Trade).where(Trade.account_id == context.account_id))
         db.execute(delete(Order).where(Order.account_id == context.account_id))
         db.execute(
             delete(FeeRule).where(

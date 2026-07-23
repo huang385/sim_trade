@@ -1,0 +1,64 @@
+from typing import Sequence
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.trade import Trade
+
+
+class TradeRepository:
+    """
+    成交数据库仓储。
+
+    Repository只负责构造SQL和把对象加入Session，不计算成交额、不修改
+    账户和持仓，也不执行commit或rollback。事务统一由结算Service管理。
+    """
+
+    @staticmethod
+    def get_by_trade_id(db: Session, trade_id: str) -> Trade | None:
+        """根据对外成交编号查询一条成交。"""
+
+        return db.scalar(select(Trade).where(Trade.trade_id == trade_id))
+
+    @staticmethod
+    def get_by_order_market_event(
+        db: Session,
+        *,
+        order_id: str,
+        market_event_id: str,
+    ) -> Trade | None:
+        """按数据库唯一幂等键查询成交。"""
+
+        return db.scalar(
+            select(Trade).where(
+                Trade.order_id == order_id,
+                Trade.market_event_id == market_event_id,
+            )
+        )
+
+    @staticmethod
+    def list(
+        db: Session,
+        *,
+        account_id: str | None = None,
+        order_id: str | None = None,
+    ) -> Sequence[Trade]:
+        """
+        按账户或订单组合查询成交。
+
+        当前数据量较小先按自增主键稳定排序；后续增加游标分页时可以直接
+        在本方法上增加last_id和limit，而不需要修改API业务逻辑。
+        """
+
+        statement = select(Trade)
+        if account_id is not None:
+            statement = statement.where(Trade.account_id == account_id)
+        if order_id is not None:
+            statement = statement.where(Trade.order_id == order_id)
+        return db.scalars(statement.order_by(Trade.id)).all()
+
+    @staticmethod
+    def add(db: Session, trade: Trade) -> None:
+        """把成交加入当前Session，是否提交由成交结算服务决定。"""
+
+        db.add(trade)

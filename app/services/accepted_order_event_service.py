@@ -19,7 +19,7 @@ class UnsupportedOrderEventError(OrderEventValidationError):
 
 @dataclass(frozen=True)
 class ParsedOrderEvent:
-    """完成基础校验后的 ORDER_ACCEPTED 事件。"""
+    """完成基础校验后的订单或成交事件。"""
 
     event_id: str
     event_type: str
@@ -41,7 +41,7 @@ class AcceptedOrderProcessResult:
 
 class AcceptedOrderEventService:
     """
-    校验 ORDER_ACCEPTED 事件并维护 Redis 活动订单索引。
+    校验订单状态事件并维护 Redis 活动订单索引。
 
     事件仅用于定位订单，是否注册以及写入哪些字段全部以 PostgreSQL 中的
     orders 最新记录为准。本服务不会修改账户、订单状态、成交或持仓。
@@ -57,6 +57,14 @@ class AcceptedOrderEventService:
         OrderStatus.PARTIALLY_CANCELLED.value,
         OrderStatus.REJECTED.value,
     }
+    INDEX_EVENT_TYPES = {
+        "ORDER_ACCEPTED",
+        "ORDER_PARTIALLY_FILLED",
+        "ORDER_FILLED",
+    }
+    # TRADE_CREATED 与订单状态事件发布到同一 Stream。活动订单消费者只需
+    # 安全确认它，不维护成交派生数据，避免把合法成交事件误送入死信。
+    PASSTHROUGH_EVENT_TYPES = {"TRADE_CREATED"}
 
     def __init__(
         self,
@@ -79,7 +87,10 @@ class AcceptedOrderEventService:
             raise OrderEventValidationError("事件缺少event_id")
         if not event_type:
             raise OrderEventValidationError("事件缺少event_type")
-        if event_type != "ORDER_ACCEPTED":
+        if event_type not in (
+            AcceptedOrderEventService.INDEX_EVENT_TYPES
+            | AcceptedOrderEventService.PASSTHROUGH_EVENT_TYPES
+        ):
             raise UnsupportedOrderEventError(
                 f"不支持的订单事件类型: {event_type}"
             )
@@ -91,6 +102,8 @@ class AcceptedOrderEventService:
             raise OrderEventValidationError("payload不是合法JSON") from exc
         if not isinstance(payload, dict):
             raise OrderEventValidationError("payload必须是JSON对象")
+        if "event_type" in payload and payload.get("event_type") != event_type:
+            raise OrderEventValidationError("event_type与payload不一致")
 
         required_fields = ("order_id", "account_id", "exchange_id", "symbol")
         missing = [
@@ -122,6 +135,12 @@ class AcceptedOrderEventService:
         """处理一条事件，返回动作说明；异常由 Worker 决定重试或死信。"""
 
         event = self.parse_event(fields)
+        if event.event_type in self.PASSTHROUGH_EVENT_TYPES:
+            return AcceptedOrderProcessResult(
+                event_id=event.event_id,
+                order_id=event.order_id,
+                action="IGNORED_TRADE_EVENT",
+            )
         order = self.order_repository.get_by_order_id(db, event.order_id)
 
         # Outbox 和订单原子提交，正常情况下不会缺失；若确实找不到，Redis
@@ -168,5 +187,11 @@ class AcceptedOrderEventService:
         return AcceptedOrderProcessResult(
             event_id=event.event_id,
             order_id=event.order_id,
-            action="REGISTERED" if written else "DUPLICATE",
+            action=(
+                "UPDATED"
+                if written and event.event_type == "ORDER_PARTIALLY_FILLED"
+                else "REGISTERED"
+                if written
+                else "DUPLICATE"
+            ),
         )

@@ -64,6 +64,44 @@ def test_accepted_order_is_registered():
     active_index.remove_active_order.assert_not_called()
 
 
+def test_partial_fill_event_updates_active_index_from_database_truth():
+    service, _, active_index = make_service(
+        make_order(status="PARTIALLY_FILLED", remaining_volume=1)
+    )
+    fields = make_fields(event_type="ORDER_PARTIALLY_FILLED")
+    fields["event_type"] = "ORDER_PARTIALLY_FILLED"
+
+    result = service.process(Mock(), fields)
+
+    assert result.action == "UPDATED"
+    active_index.add_active_order.assert_called_once()
+
+
+def test_filled_event_removes_all_active_indexes():
+    service, _, active_index = make_service(
+        make_order(status="FILLED", remaining_volume=0)
+    )
+    fields = make_fields(event_type="ORDER_FILLED")
+    fields["event_type"] = "ORDER_FILLED"
+
+    result = service.process(Mock(), fields)
+
+    assert result.action == "REMOVED"
+    active_index.remove_active_order.assert_called_once()
+
+
+def test_trade_created_is_known_passthrough_event():
+    service, repository, active_index = make_service(make_order())
+    fields = make_fields(event_type="TRADE_CREATED")
+    fields["event_type"] = "TRADE_CREATED"
+
+    result = service.process(Mock(), fields)
+
+    assert result.action == "IGNORED_TRADE_EVENT"
+    repository.get_by_order_id.assert_not_called()
+    active_index.add_active_order.assert_not_called()
+
+
 def test_partially_filled_order_with_remaining_volume_is_registered():
     service, _, active_index = make_service(
         make_order(status="PARTIALLY_FILLED", remaining_volume=1)

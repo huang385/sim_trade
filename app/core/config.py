@@ -58,6 +58,17 @@ class Settings(BaseSettings):
     remote_market_data_shutdown_drain_timeout_seconds: float = 10.0
     market_tick_stream_name: str = "stream:market-ticks"
 
+    # 行情撮合 Consumer Group。首次创建使用 $，只消费建组后的实时 Tick。
+    market_matching_consumer_group: str = "group:matching-engine"
+    market_matching_consumer_name: str | None = None
+    market_matching_batch_size: int = 100
+    market_matching_block_ms: int = 5000
+    market_matching_pending_idle_ms: int = 60000
+    market_matching_max_retries: int = 10
+    market_matching_failure_ttl_seconds: int = 604800
+    market_matching_dead_letter_stream: str = "stream:market-ticks:dead-letter"
+    market_matching_retry_interval_seconds: float = 1.0
+
     @property
     def database_url(self) -> str:
         return (

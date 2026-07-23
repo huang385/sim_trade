@@ -28,6 +28,9 @@ from app.schemas.reference_sync_log_schema import (
 )
 from app.schemas.order_schema import OrderCreateRequest, OrderResponse
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
+from app.schemas.matching_schema import MatchResult, MatchableOrder
+from app.schemas.trade_schema import TradeResponse
+from app.schemas.position_schema import PositionResponse
 
 
 __all__ = [
@@ -49,4 +52,8 @@ __all__ = [
     "OrderResponse",
     "MarketTick",
     "MarketTickIngestType",
+    "MatchResult",
+    "MatchableOrder",
+    "TradeResponse",
+    "PositionResponse",
 ]

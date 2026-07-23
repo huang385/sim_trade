@@ -12,6 +12,7 @@ redis_client = redis.Redis.from_url(
     socket_timeout=max(
         settings.redis_socket_timeout_seconds,
         settings.order_consumer_block_ms / 1000 + 1,
+        settings.market_matching_block_ms / 1000 + 1,
     ),
 )
 

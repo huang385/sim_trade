@@ -46,10 +46,12 @@ class ConsumerRunResult:
 
 class OrderEventConsumerWorker:
     """
-    消费订单 Stream，并把数据库确认后的订单注册为 Redis 活动订单。
+    消费订单 Stream，并按数据库最新状态维护 Redis 活动订单。
 
     Worker 只协调 Session、ACK、重试、Pending 恢复和退出信号；业务判断
     由 AcceptedOrderEventService 完成，Redis Group 操作由基础设施层完成。
+    ORDER_ACCEPTED 和部分成交会新增或更新索引，FILLED 等终态会删除索引；
+    同一 Stream 中的 TRADE_CREATED 是已知透传事件，不会误入死信。
     """
 
     def __init__(

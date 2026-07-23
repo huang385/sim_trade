@@ -20,6 +20,9 @@ from app.models.fee_rule_daily import FeeRuleDaily
 from app.models.reference_sync_log import ReferenceSyncLog
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
+from app.models.trade import Trade
+from app.models.position import Position
+from app.models.position_detail import PositionDetail
 
 
 __all__ = [
@@ -32,4 +35,7 @@ __all__ = [
     "ReferenceSyncLog",
     "Order",
     "OutboxEvent",
+    "Trade",
+    "Position",
+    "PositionDetail",
 ]

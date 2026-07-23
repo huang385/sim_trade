@@ -103,6 +103,20 @@ class OrderSubmitStatus(str, Enum):
     REJECTED = "REJECTED"
 
 
+class PositionDirection(str, Enum):
+    """持仓方向；买入开仓形成多头，卖出开仓形成空头。"""
+
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+
+class PositionDetailStatus(str, Enum):
+    """逐笔持仓明细状态，本阶段只会创建 OPEN 明细。"""
+
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+
+
 class OutboxStatus(str, Enum):
     """
     事务 Outbox 事件的处理状态。
