@@ -68,6 +68,8 @@ class Settings(BaseSettings):
     market_matching_failure_ttl_seconds: int = 604800
     market_matching_dead_letter_stream: str = "stream:market-ticks:dead-letter"
     market_matching_retry_interval_seconds: float = 1.0
+    # 撮合算法由注册器按名称创建；未知名称会让 Worker 在启动阶段失败。
+    matching_engine_name: str = "VN"
 
     @property
     def database_url(self) -> str:

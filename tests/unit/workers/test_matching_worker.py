@@ -1,11 +1,12 @@
 import logging
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from app.core.config import settings
 from app.services.market_tick_matching_service import (
     UnsupportedMarketTickEventError,
 )
-from app.workers.matching_worker import MatchingWorker
+from app.workers.matching_worker import MatchingWorker, build_matching_worker
 
 
 FIELDS = {
@@ -190,3 +191,18 @@ def test_deleted_pending_tombstone_is_acknowledged_without_matching():
     assert worker.handle_message("1-0", None) == "acknowledged"
     service.process.assert_not_called()
     consumer.acknowledge.assert_called_once_with("1-0")
+
+
+def test_worker_is_built_with_engine_created_by_registry():
+    """Worker 启动时只通过 Registry 创建一次引擎并注入编排服务。"""
+
+    fake_engine = Mock()
+
+    with patch(
+        "app.workers.matching_worker.create_matching_engine",
+        return_value=fake_engine,
+    ) as create_engine:
+        worker = build_matching_worker()
+
+    create_engine.assert_called_once_with(settings.matching_engine_name)
+    assert worker.matching_service.matching_engine is fake_engine

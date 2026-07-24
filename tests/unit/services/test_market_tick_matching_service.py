@@ -6,12 +6,13 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
-from app.schemas.matching_schema import SettlementResult
+from app.matching.base import MatchingEngine
+from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
 from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
     UnsupportedMarketTickEventError,
 )
-from app.services.vn_matching_engine import VNMatchingEngine
+from app.services.trade_settlement_service import SettlementResult
 
 
 def make_fields(*, ingest_type="LIVE_CALLBACK"):
@@ -23,7 +24,9 @@ def make_fields(*, ingest_type="LIVE_CALLBACK"):
         "exchange_id": "SHFE",
         "symbol": "AG2609",
         "trading_day": date(2026, 7, 23).isoformat(),
-        "event_time": datetime(2026, 7, 23, 1, tzinfo=timezone.utc).isoformat(),
+        "event_time": datetime(
+            2026, 7, 23, 1, tzinfo=timezone.utc
+        ).isoformat(),
         "sequence_id": 1,
         "cumulative_volume": 10,
         "bid_price_1": "14598",
@@ -40,21 +43,65 @@ def make_fields(*, ingest_type="LIVE_CALLBACK"):
     }
 
 
-def make_order(order_id):
-    return SimpleNamespace(
-        order_id=order_id,
-        status="ACCEPTED",
-        remaining_volume=5,
-        order_type="LIMIT",
-        offset_flag="OPEN",
-        exchange_id="SHFE",
-        symbol="AG2609",
-        direction="BUY",
-        limit_price=Decimal("14600"),
-    )
+def make_order(order_id, **overrides):
+    values = {
+        "order_id": order_id,
+        "status": "ACCEPTED",
+        "remaining_volume": 5,
+        "order_type": "LIMIT",
+        "offset_flag": "OPEN",
+        "exchange_id": "SHFE",
+        "symbol": "AG2609",
+        "direction": "BUY",
+        "limit_price": Decimal("14600"),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
 
 
-def make_service(*, settlement_side_effect=None):
+class FakeMatchingEngine:
+    """可注入的结构化 Fake，证明 Service 不依赖 VN 具体类型。"""
+
+    name = "FAKE"
+    version = "test"
+
+    def __init__(self, matched=True):
+        self.matched = matched
+        self.calls: list[tuple[MatchingOrder, MatchingMarketData]] = []
+
+    def match(
+        self,
+        order: MatchingOrder,
+        market: MatchingMarketData,
+    ) -> MatchResult:
+        self.calls.append((order, market))
+        return MatchResult(
+            matched=self.matched,
+            order_id=order.order_id,
+            market_event_id=market.event_id,
+            market_stream_message_id=market.stream_message_id,
+            fill_price=market.ask_price_1 if self.matched else None,
+            fill_volume=min(
+                order.remaining_volume,
+                market.ask_volume_1,
+            )
+            if self.matched
+            else 0,
+            tick_event_time=market.event_time,
+            tick_sequence_id=market.sequence_id,
+            reason=None if self.matched else "FAKE_NOT_MATCHED",
+            engine_name=self.name,
+            engine_version=self.version,
+        )
+
+
+def make_service(
+    *,
+    orders=None,
+    matched=True,
+    settlement_side_effect=None,
+):
+    orders = orders or [make_order("O-1"), make_order("O-2")]
     session_factory = Mock()
 
     def context():
@@ -64,52 +111,125 @@ def make_service(*, settlement_side_effect=None):
 
     session_factory.side_effect = context
     active_index = Mock()
-    active_index.list_instrument_order_ids.return_value = {"O-1", "O-2"}
+    active_index.list_instrument_order_ids.return_value = {
+        order.order_id for order in orders
+    }
     repository = Mock()
-    repository.get_by_order_id.side_effect = [make_order("O-1"), make_order("O-2")]
+    repository.get_by_order_id.side_effect = orders
     settlement = Mock()
     if settlement_side_effect is None:
         settlement.settle.side_effect = [
-            SettlementResult("T-1", "O-1", "SETTLED"),
-            SettlementResult("T-2", "O-2", "SETTLED"),
+            SettlementResult(f"T-{index}", order.order_id, "SETTLED")
+            for index, order in enumerate(orders, start=1)
         ]
     else:
         settlement.settle.side_effect = settlement_side_effect
+    engine = FakeMatchingEngine(matched=matched)
     service = MarketTickMatchingService(
         session_factory=session_factory,
         active_order_index=active_index,
         order_repository=repository,
-        matching_engine=VNMatchingEngine(),
+        matching_engine=engine,
         settlement_service=settlement,
     )
-    return service, settlement
+    return service, engine, settlement
+
+
+def test_fake_engine_conforms_to_matching_engine_interface():
+    assert isinstance(FakeMatchingEngine(), MatchingEngine)
 
 
 def test_rest_snapshot_never_triggers_matching():
-    service, settlement = make_service()
+    service, engine, settlement = make_service()
+
     with pytest.raises(UnsupportedMarketTickEventError):
-        service.process(stream_message_id="1-0", fields=make_fields(ingest_type="REST_SNAPSHOT"))
+        service.process(
+            stream_message_id="1-0",
+            fields=make_fields(ingest_type="REST_SNAPSHOT"),
+        )
+
+    assert engine.calls == []
     settlement.settle.assert_not_called()
 
 
-def test_one_tick_settles_multiple_orders_with_independent_liquidity():
-    service, settlement = make_service()
+def test_limit_open_orders_each_call_injected_engine_and_settle():
+    service, engine, settlement = make_service()
+
     result = service.process(stream_message_id="1-0", fields=make_fields())
+
     assert result.candidate_count == 2
     assert result.matched_count == 2
     assert result.settled_count == 2
+    assert result.skipped_count == 0
+    assert len(engine.calls) == 2
     assert settlement.settle.call_count == 2
-    assert [call.args[1].fill_volume for call in settlement.settle.call_args_list] == [3, 3]
+    assert all(
+        isinstance(order, MatchingOrder)
+        and isinstance(market, MatchingMarketData)
+        for order, market in engine.calls
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"offset_flag": "CLOSE"},
+        {"offset_flag": "CLOSE_TODAY"},
+        {"order_type": "MARKET"},
+    ],
+)
+def test_unsupported_order_is_filtered_before_engine(overrides):
+    service, engine, settlement = make_service(
+        orders=[make_order("O-1", **overrides)]
+    )
+
+    result = service.process(stream_message_id="1-0", fields=make_fields())
+
+    assert result.candidate_count == 1
+    assert result.matched_count == 0
+    assert result.skipped_count == 1
+    assert engine.calls == []
+    settlement.settle.assert_not_called()
+
+
+def test_not_matched_result_does_not_call_settlement():
+    service, engine, settlement = make_service(
+        orders=[make_order("O-1")],
+        matched=False,
+    )
+
+    result = service.process(stream_message_id="1-0", fields=make_fields())
+
+    assert len(engine.calls) == 1
+    assert result.matched_count == 0
+    assert result.settled_count == 0
+    assert result.skipped_count == 1
+    settlement.settle.assert_not_called()
+
+
+def test_matched_result_is_passed_to_settlement():
+    service, engine, settlement = make_service(orders=[make_order("O-1")])
+
+    result = service.process(stream_message_id="1-0", fields=make_fields())
+
+    assert len(engine.calls) == 1
+    settlement.settle.assert_called_once()
+    settled_result = settlement.settle.call_args.args[1]
+    assert settled_result.engine_name == "FAKE"
+    assert result.settled_count == 1
 
 
 def test_one_order_failure_does_not_stop_later_order_but_tick_retries():
-    service, settlement = make_service(
+    service, engine, settlement = make_service(
         settlement_side_effect=[
             RuntimeError("temporary database error"),
             SettlementResult("T-2", "O-2", "SETTLED"),
         ]
     )
+
     with pytest.raises(RuntimeError, match="temporary database error"):
         service.process(stream_message_id="1-0", fields=make_fields())
+
     # 第二笔仍先完成；整条 Tick 不 ACK，重试时第一笔继续处理，第二笔走幂等。
+    assert len(engine.calls) == 2
     assert settlement.settle.call_count == 2

@@ -14,7 +14,7 @@ from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.trade import Trade
-from app.schemas.matching_schema import MatchResult
+from app.matching.models import MatchResult
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.trade_repository import TradeRepository
@@ -108,6 +108,9 @@ def match(event_id, price, volume):
         fill_volume=volume,
         tick_event_time=datetime(2026, 7, 23, 2, tzinfo=timezone.utc),
         tick_sequence_id=1,
+        reason=None,
+        engine_name="VN",
+        engine_version="1.0",
     )
 
 
@@ -195,6 +198,34 @@ def test_filled_order_is_skipped_even_if_redis_candidate_remains():
     assert result.action == "ORDER_INACTIVE"
     with factory() as db:
         assert len(db.scalars(select(Trade)).all()) == 1
+
+
+def test_settlement_caps_oversized_match_result_at_database_remaining_volume():
+    """
+    行锁后的数据库剩余量是最终上限。
+
+    即使并发或过期快照给出 10 手拟成交，数据库只剩 5 手时也只能创建
+    5 手 Trade，并保持成交量守恒且 remaining_volume 不会变成负数。
+    """
+
+    factory = make_session_factory()
+    seed(factory)
+
+    with factory() as db:
+        result = TradeSettlementService().settle(
+            db,
+            match("TICK-OVERSIZED", "14599", 10),
+        )
+
+    assert result.action == "SETTLED"
+    with factory() as db:
+        order = db.scalar(select(Order))
+        trade = db.scalar(select(Trade))
+        assert trade.trade_volume == 5
+        assert order.traded_volume == order.total_volume == 5
+        assert order.remaining_volume == 0
+        assert order.traded_volume <= order.total_volume
+        assert order.traded_volume + order.remaining_volume == order.total_volume
 
 
 class FailingTradeRepository(TradeRepository):

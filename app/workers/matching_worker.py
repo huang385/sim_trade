@@ -14,6 +14,7 @@ from app.infrastructure.market_tick_stream_consumer import (
     MarketStreamMessage,
     MarketTickStreamConsumer,
 )
+from app.matching.registry import create_matching_engine
 from app.repositories.order_repository import OrderRepository
 from app.services.market_tick_matching_service import (
     MarketTickEventValidationError,
@@ -21,7 +22,6 @@ from app.services.market_tick_matching_service import (
     UnsupportedMarketTickEventError,
 )
 from app.services.trade_settlement_service import TradeSettlementService
-from app.services.vn_matching_engine import VNMatchingEngine
 
 
 logger = logging.getLogger(__name__)
@@ -244,10 +244,15 @@ class MatchingWorker:
                 self.stop_event.wait(self.retry_interval_seconds)
 
 
-def main() -> None:
-    """命令行入口：python -m app.workers.matching_worker。"""
+def build_matching_worker() -> MatchingWorker:
+    """
+    根据配置创建完整的撮合 Worker。
 
-    setup_logging()
+    撮合引擎通过 Registry 在进程启动阶段创建一次并注入编排服务，
+    后续每条 Tick 都复用同一实例。未知引擎名称会在这里明确抛错，
+    避免 Worker 带着错误配置进入消费循环。
+    """
+
     consumer_name = settings.market_matching_consumer_name or generate_consumer_name()
     consumer = MarketTickStreamConsumer(
         redis_client,
@@ -261,10 +266,10 @@ def main() -> None:
         session_factory=SessionLocal,
         active_order_index=ActiveOrderIndex(redis_client),
         order_repository=OrderRepository(),
-        matching_engine=VNMatchingEngine(),
+        matching_engine=create_matching_engine(settings.matching_engine_name),
         settlement_service=TradeSettlementService(),
     )
-    worker = MatchingWorker(
+    return MatchingWorker(
         stream_consumer=consumer,
         matching_service=matching_service,
         batch_size=settings.market_matching_batch_size,
@@ -273,6 +278,13 @@ def main() -> None:
         max_retries=settings.market_matching_max_retries,
         retry_interval_seconds=settings.market_matching_retry_interval_seconds,
     )
+
+
+def main() -> None:
+    """命令行入口：python -m app.workers.matching_worker。"""
+
+    setup_logging()
+    worker = build_matching_worker()
     signal.signal(signal.SIGINT, worker.request_stop)
     signal.signal(signal.SIGTERM, worker.request_stop)
     try:

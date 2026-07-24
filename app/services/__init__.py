@@ -28,9 +28,9 @@ from app.services.market_tick_normalizer import MarketTickNormalizer
 from app.services.market_tick_validation_service import (
     MarketTickValidationService,
 )
-from app.services.vn_matching_engine import VNMatchingEngine
 from app.services.trade_settlement_service import (
     PositionQueryService,
+    SettlementResult,
     TradeQueryService,
     TradeSettlementService,
 )
@@ -61,8 +61,8 @@ __all__ = [
     "MarketSubscriptionService",
     "MarketTickNormalizer",
     "MarketTickValidationService",
-    "VNMatchingEngine",
     "TradeSettlementService",
+    "SettlementResult",
     "TradeQueryService",
     "PositionQueryService",
     "MarketTickMatchingService",

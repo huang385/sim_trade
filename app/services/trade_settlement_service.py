@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Sequence
 from uuid import uuid4
@@ -17,6 +18,7 @@ from app.enums.order_enums import (
     PositionDetailStatus,
     PositionDirection,
 )
+from app.matching.models import MatchResult
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.trade import Trade
@@ -26,7 +28,20 @@ from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.trade_repository import TradeRepository
-from app.schemas.matching_schema import MatchResult, SettlementResult
+
+
+@dataclass(frozen=True)
+class SettlementResult:
+    """
+    成交事务处理结果。
+
+    该类型属于结算服务而不是纯撮合领域。幂等重放时返回原成交编号，
+    订单失效或不存在时通过 action 向编排层说明无需继续处理。
+    """
+
+    trade_id: str | None
+    order_id: str
+    action: str
 
 
 ACTIVE_ORDER_STATUSES = {

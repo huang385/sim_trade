@@ -7,9 +7,9 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.account import Account
+from app.matching.models import MatchResult
 from app.models.position import Position
 from app.models.trade import Trade
-from app.schemas.matching_schema import MatchResult
 from app.services.trade_settlement_service import TradeSettlementService
 from tests.integration.conftest import make_order_service, make_request
 
@@ -45,6 +45,9 @@ def test_same_account_concurrent_fills_preserve_funds_and_position(
             fill_volume=1,
             tick_event_time=datetime(2026, 7, 23, 1, tzinfo=timezone.utc),
             tick_sequence_id=index + 1,
+            reason=None,
+            engine_name="VN",
+            engine_version="1.0",
         )
         with SessionLocal() as db:
             return TradeSettlementService().settle(db, result).action

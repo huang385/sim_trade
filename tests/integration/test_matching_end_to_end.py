@@ -29,12 +29,12 @@ from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.trade import Trade
+from app.matching.engines.vn import VnMatchingEngine
 from app.repositories.order_repository import OrderRepository
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.services.accepted_order_event_service import AcceptedOrderEventService
 from app.services.market_tick_matching_service import MarketTickMatchingService
 from app.services.trade_settlement_service import TradeSettlementService
-from app.services.vn_matching_engine import VNMatchingEngine
 from app.workers.matching_worker import MatchingWorker
 from app.workers.order_event_consumer_worker import OrderEventConsumerWorker
 from tests.integration.conftest import make_order_service, make_request
@@ -117,7 +117,7 @@ def test_real_postgres_redis_partial_then_full_matching(integration_context):
             session_factory=SessionLocal,
             active_order_index=active_index,
             order_repository=OrderRepository(),
-            matching_engine=VNMatchingEngine(),
+            matching_engine=VnMatchingEngine(),
             settlement_service=TradeSettlementService(),
         ),
         batch_size=100,

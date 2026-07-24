@@ -4,16 +4,19 @@ from typing import Callable, Mapping
 
 from sqlalchemy.orm import Session
 
-from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderDirection,
+    OrderStatus,
+    OrderType,
+)
 from app.infrastructure.active_order_index import ActiveOrderIndex
+from app.matching.base import MatchingEngine
+from app.matching.models import MatchingMarketData, MatchingOrder
 from app.repositories.order_repository import OrderRepository
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
-from app.schemas.matching_schema import (
-    MarketTickMatchResult,
-    MatchableOrder,
-)
+from app.schemas.matching_schema import MarketTickMatchResult
 from app.services.trade_settlement_service import TradeSettlementService
-from app.services.vn_matching_engine import VNMatchingEngine
 
 
 class MarketTickEventValidationError(ValueError):
@@ -57,7 +60,7 @@ class MarketTickMatchingService:
         session_factory: Callable[[], Session],
         active_order_index: ActiveOrderIndex,
         order_repository: OrderRepository,
-        matching_engine: VNMatchingEngine,
+        matching_engine: MatchingEngine,
         settlement_service: TradeSettlementService,
     ):
         # Session工厂而不是单个Session被注入，因为每笔候选订单必须使用
@@ -146,6 +149,18 @@ class MarketTickMatchingService:
                 event.exchange_id, event.symbol
             )
         )
+        # 同一条 Tick 的所有候选订单共享一份不可变行情快照，避免在高频
+        # 循环中重复构造对象，同时仍保持 VN 模式下盘口量互不扣减的语义。
+        market_snapshot = MatchingMarketData(
+            event_id=event.event_id,
+            stream_message_id=stream_message_id,
+            bid_price_1=event.tick.bid_price_1,
+            bid_volume_1=event.tick.bid_volume_1,
+            ask_price_1=event.tick.ask_price_1,
+            ask_volume_1=event.tick.ask_volume_1,
+            event_time=event.tick.event_time,
+            sequence_id=event.tick.sequence_id,
+        )
         matched = settled = idempotent = skipped = 0
         first_error: Exception | None = None
 
@@ -158,18 +173,17 @@ class MarketTickMatchingService:
                     if not self._database_order_is_candidate(order, event):
                         skipped += 1
                         continue
-                    snapshot = MatchableOrder(
+                    order_snapshot = MatchingOrder(
                         order_id=order.order_id,
-                        direction=order.direction,
-                        offset_flag=order.offset_flag,
-                        order_type=order.order_type,
+                        direction=OrderDirection(order.direction),
+                        offset_flag=OffsetFlag(order.offset_flag),
+                        order_type=OrderType(order.order_type),
                         limit_price=order.limit_price,
                         remaining_volume=order.remaining_volume,
                     )
-                match_result = self.matching_engine.match_limit_open_order(
-                    order=snapshot,
-                    tick=event.tick,
-                    market_stream_message_id=stream_message_id,
+                match_result = self.matching_engine.match(
+                    order_snapshot,
+                    market_snapshot,
                 )
                 if not match_result.matched:
                     # 价格未触达或盘口量为0是正常结果，不需要重试该Tick。
