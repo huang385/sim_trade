@@ -40,6 +40,7 @@ def make_order(**overrides):
         "submit_status": "ACCEPTED",
         "frozen_margin": Decimal("20000"),
         "frozen_commission": Decimal("100"),
+        "frozen_position_volume": 0,
         "cancelled_at": None,
         "accepted_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
         "updated_at": datetime(2026, 7, 24, tzinfo=timezone.utc),
@@ -171,7 +172,7 @@ def test_partially_filled_order_cancels_only_remaining_and_keeps_trade_values():
 
 
 @pytest.mark.parametrize("status", ["CANCELLED", "PARTIALLY_CANCELLED"])
-def test_repeated_cancel_is_idempotent_without_account_lock_or_outbox(status):
+def test_repeated_cancel_ends_transaction_without_second_business_change(status):
     original_time = datetime(2026, 7, 24, 1, tzinfo=timezone.utc)
     order = make_order(
         status=status,
@@ -182,15 +183,95 @@ def test_repeated_cancel_is_idempotent_without_account_lock_or_outbox(status):
         cancelled_at=original_time,
     )
     service, _, account_repository, outbox = make_service(order)
+    service.freeze_service = Mock(spec=OrderFreezeService)
     db = Mock()
 
     assert cancel(service, db) is order
 
     assert order.cancelled_volume == 10
+    assert order.remaining_volume == 0
+    assert order.frozen_margin == Decimal("0")
+    assert order.frozen_commission == Decimal("0")
     assert order.cancelled_at == original_time
     account_repository.get_by_account_id_for_update.assert_not_called()
+    service.freeze_service.release_open_order_frozen_resources.assert_not_called()
+    outbox.create_event.assert_not_called()
+    db.commit.assert_called_once()
+    db.refresh.assert_called_once_with(order)
+    db.rollback.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("order_type", "MARKET"),
+        ("offset_flag", "CLOSE"),
+    ],
+)
+def test_non_limit_or_non_open_order_is_rejected_before_account_lock(
+    field,
+    value,
+):
+    order = make_order(**{field: value})
+    service, _, account_repository, outbox = make_service(order)
+    service.freeze_service = Mock(spec=OrderFreezeService)
+    db = Mock()
+
+    with pytest.raises(ResourceConflictError) as exc_info:
+        cancel(service, db)
+
+    assert exc_info.value.error_code == "ORDER_NOT_CANCELLABLE"
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    service.freeze_service.release_open_order_frozen_resources.assert_not_called()
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
+    db.rollback.assert_called_once()
+
+
+def test_open_order_with_frozen_position_is_consistency_error_without_changes():
+    order = make_order(frozen_position_volume=2)
+    account = make_account()
+    original_order = (
+        order.status,
+        order.remaining_volume,
+        order.cancelled_volume,
+        order.frozen_margin,
+        order.frozen_commission,
+        order.cancelled_at,
+        order.updated_at,
+    )
+    original_account = (
+        account.available_cash,
+        account.frozen_margin,
+        account.frozen_commission,
+    )
+    service, _, account_repository, outbox = make_service(order, account)
+    service.freeze_service = Mock(spec=OrderFreezeService)
+    db = Mock()
+
+    with pytest.raises(DataAccessError) as exc_info:
+        cancel(service, db)
+
+    assert exc_info.value.error_code == "CANCEL_ORDER_STATE_INCONSISTENT"
+    assert (
+        order.status,
+        order.remaining_volume,
+        order.cancelled_volume,
+        order.frozen_margin,
+        order.frozen_commission,
+        order.cancelled_at,
+        order.updated_at,
+    ) == original_order
+    assert (
+        account.available_cash,
+        account.frozen_margin,
+        account.frozen_commission,
+    ) == original_account
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    service.freeze_service.release_open_order_frozen_resources.assert_not_called()
+    outbox.create_event.assert_not_called()
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once()
 
 
 @pytest.mark.parametrize("status", ["FILLED", "REJECTED", "NEW"])

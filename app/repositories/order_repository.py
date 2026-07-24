@@ -150,10 +150,10 @@ class OrderRepository:
             order_type=order_type,
             limit_price=limit_price,
             total_volume=total_volume,
-            # 当前阶段不做撮合，成交数量和平均价保持初始值。
+            # 新订单尚未撮合，成交数量从0开始，平均成交价暂时为空。
             traded_volume=0,
             remaining_volume=total_volume,
-            # 当前阶段不实现撤单，新订单撤销量固定为0。
+            # 新订单尚未撤销；后续主动撤单只累计当时的剩余数量。
             cancelled_volume=0,
             average_price=None,
             status=status,

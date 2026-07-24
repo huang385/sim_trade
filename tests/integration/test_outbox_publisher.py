@@ -2,6 +2,10 @@ import json
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    TimeoutError as RedisTimeoutError,
+)
 from sqlalchemy import select
 
 from app.common.time_utils import utc_now
@@ -21,8 +25,8 @@ def test_pending_outbox_event_reaches_redis_and_becomes_sent(
 ):
     try:
         redis_client.ping()
-    except Exception as exc:
-        pytest.skip(f"Redis不可用: {exc}")
+    except (RedisConnectionError, RedisTimeoutError) as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
 
     event_id = f"EVT-IT-{uuid4().hex.upper()}"
     stream_name = f"stream:it:outbox:{uuid4().hex}"

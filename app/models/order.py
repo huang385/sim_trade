@@ -138,13 +138,13 @@ class Order(Base):
         Integer,
         nullable=False,
     )
-    # 已成交数量；当前阶段始终为0
+    # 已成交数量；由撮合结算按每次实际成交量累计
     traded_volume: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
         default=0,
     )
-    # 剩余未成交数量；新订单等于委托总数量
+    # 剩余未成交数量；成交时递减，主动撤销剩余数量后归零
     remaining_volume: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -156,7 +156,7 @@ class Order(Base):
         default=0,
         server_default="0",
     )
-    # 平均成交价格；尚未成交时为0
+    # 按成交数量加权计算的平均成交价格；尚未成交时为空
     average_price: Mapped[Decimal | None] = mapped_column(
         Numeric(24, 6),
         nullable=True,

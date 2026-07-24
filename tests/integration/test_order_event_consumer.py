@@ -2,6 +2,10 @@ import json
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    TimeoutError as RedisTimeoutError,
+)
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -30,13 +34,19 @@ from app.workers.outbox_publisher_worker import OutboxPublisherWorker
 pytestmark = pytest.mark.integration
 
 
-def test_api_outbox_stream_consumer_registers_active_order(integration_context):
-    """验证 HTTP 下单到 Redis 活动订单索引的完整关键链路。"""
+def require_redis_connection():
+    """仅在Redis确实无法建立连接或响应超时时跳过集成测试。"""
 
     try:
         redis_client.ping()
-    except Exception as exc:
-        pytest.skip(f"Redis不可用: {exc}")
+    except (RedisConnectionError, RedisTimeoutError) as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
+
+
+def test_api_outbox_stream_consumer_registers_active_order(integration_context):
+    """验证 HTTP 下单到 Redis 活动订单索引的完整关键链路。"""
+
+    require_redis_connection()
 
     suffix = uuid4().hex[:12]
     stream_name = f"stream:it:orders:{suffix}"
@@ -190,6 +200,7 @@ def test_api_outbox_stream_consumer_registers_active_order(integration_context):
 def test_group_created_after_message_reads_history_and_keeps_position():
     """0-0创建Group应读取历史消息，BUSYGROUP不能重置已有位置。"""
 
+    require_redis_connection()
     suffix = uuid4().hex[:12]
     stream_name = f"stream:it:group-history:{suffix}"
     group_name = f"group:it:history:{suffix}"
@@ -235,6 +246,7 @@ def test_group_created_after_message_reads_history_and_keeps_position():
 def test_redis5_pending_message_is_recovered_with_compatibility_fallback():
     """本机 Redis 5 不支持 XAUTOCLAIM 时，XPENDING + XCLAIM 仍可恢复。"""
 
+    require_redis_connection()
     suffix = uuid4().hex[:12]
     stream_name = f"stream:it:pending:{suffix}"
     group_name = f"group:it:pending:{suffix}"

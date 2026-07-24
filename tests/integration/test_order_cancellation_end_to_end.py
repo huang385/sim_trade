@@ -3,8 +3,12 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import (
+    ConnectionError as RedisConnectionError,
+    TimeoutError as RedisTimeoutError,
+)
 from fastapi.testclient import TestClient
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -31,13 +35,20 @@ from app.models.trade import Trade
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.services.accepted_order_event_service import AcceptedOrderEventService
+from app.services.order_cancellation_service import (
+    get_order_cancellation_service,
+)
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
 )
 from app.workers.order_event_consumer_worker import OrderEventConsumerWorker
 from app.workers.outbox_publisher_worker import OutboxPublisherWorker
-from tests.integration.conftest import make_order_service, make_request
+from tests.integration.conftest import (
+    make_cancellation_service,
+    make_order_service,
+    make_request,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -48,6 +59,19 @@ class ScopedOutboxRepository(OutboxRepository):
 
     def __init__(self):
         self.event_ids: set[str] = set()
+
+    def create_event(self, db, **kwargs):
+        """
+        创建测试专属事件并延后普通Worker的可领取时间。
+
+        测试专用仓储会忽略该时间，只领取event_ids中的记录。这样即使本机
+        正在运行正式Outbox Worker，也不会抢走本测试尚未模拟发布的事件。
+        """
+
+        event = super().create_event(db, **kwargs)
+        event.next_retry_at = utc_now() + timedelta(days=1)
+        self.event_ids.add(event.event_id)
+        return event
 
     def claim_pending_events(
         self,
@@ -65,10 +89,6 @@ class ScopedOutboxRepository(OutboxRepository):
             .where(
                 OutboxEvent.event_id.in_(self.event_ids),
                 OutboxEvent.status == OutboxStatus.PENDING.value,
-                or_(
-                    OutboxEvent.next_retry_at.is_(None),
-                    OutboxEvent.next_retry_at <= current_time,
-                ),
             )
             .order_by(OutboxEvent.id)
             .limit(batch_size)
@@ -105,8 +125,8 @@ def test_partial_fill_cancel_outbox_consumer_removes_active_index(
 
     try:
         redis_client.ping()
-    except Exception as exc:
-        pytest.skip(f"Redis不可用: {exc}")
+    except (RedisConnectionError, RedisTimeoutError) as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
 
     suffix = uuid4().hex[:10]
     stream_name = f"stream:it:cancel:{suffix}"
@@ -152,7 +172,10 @@ def test_partial_fill_cancel_outbox_consumer_removes_active_index(
 
     try:
         with SessionLocal() as db:
-            order = make_order_service(integration_context).create_order(
+            order = make_order_service(
+                integration_context,
+                outbox_repository=scoped_outbox_repository,
+            ).create_order(
                 db,
                 make_request(
                     integration_context,
@@ -201,10 +224,23 @@ def test_partial_fill_cancel_outbox_consumer_removes_active_index(
             )
             assert settlement.action == "SETTLED"
 
-        cancel_response = TestClient(app).post(
-            f"/api/orders/{order_id}/cancel",
-            json={"account_id": integration_context.account_id},
+        # 撤单API仍走真实服务，只把Outbox仓储替换为测试专属实例，
+        # 防止本机正式发布Worker抢走刚提交的测试事件。
+        app.dependency_overrides[get_order_cancellation_service] = (
+            lambda: make_cancellation_service(
+                outbox_repository=scoped_outbox_repository
+            )
         )
+        try:
+            cancel_response = TestClient(app).post(
+                f"/api/orders/{order_id}/cancel",
+                json={"account_id": integration_context.account_id},
+            )
+        finally:
+            app.dependency_overrides.pop(
+                get_order_cancellation_service,
+                None,
+            )
         assert cancel_response.status_code == 200
         assert cancel_response.json()["status"] == "PARTIALLY_CANCELLED"
 
@@ -260,18 +296,6 @@ def test_partial_fill_cancel_outbox_consumer_removes_active_index(
             assert order_after_failure.status == "PARTIALLY_CANCELLED"
             assert cancel_event_after_failure.status == "PENDING"
             assert cancel_event_after_failure.retry_count == 1
-            # 模拟退避时间到达后Redis恢复，允许真实发布Worker立即补发。
-            for event in db.scalars(
-                select(OutboxEvent).where(
-                    OutboxEvent.event_id.in_(
-                        scoped_outbox_repository.event_ids
-                    ),
-                    OutboxEvent.status == OutboxStatus.PENDING.value,
-                )
-            ).all():
-                event.next_retry_at = utc_now()
-            db.commit()
-
         # Redis恢复：Outbox发布成功后，Consumer按PostgreSQL终态删索引。
         publish_result = publisher_worker.run_once()
         consume_result = consumer_worker.run_once()

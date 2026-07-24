@@ -14,7 +14,7 @@ from app.common.exceptions import (
     ResourceNotFoundError,
 )
 from app.common.time_utils import utc_now
-from app.enums.order_enums import OrderStatus
+from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
 from app.models.order import Order
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
@@ -97,9 +97,32 @@ class OrderCancellationService:
                     error_code="ORDER_ACCOUNT_MISMATCH",
                 )
 
+            # 当前服务只实现“限价开仓订单”的资金释放。这里必须再次校验
+            # 数据库中的订单类型和开平标志，不能仅依赖下单入口的校验，
+            # 否则未来平仓订单进入活动状态后可能误用开仓撤单流程。
+            if (
+                order.order_type != OrderType.LIMIT.value
+                or order.offset_flag != OffsetFlag.OPEN.value
+            ):
+                raise ResourceConflictError(
+                    "当前撤单服务仅支持限价开仓订单",
+                    error_code="ORDER_NOT_CANCELLABLE",
+                )
+
+            # 开仓订单只冻结资金，不应冻结任何已有持仓。非零值表示订单
+            # 数据已经违反业务约束，必须中止并回滚，不能通过清零掩盖问题。
+            if order.frozen_position_volume != 0:
+                raise DataAccessError(
+                    "开仓订单冻结持仓数量不为0",
+                    error_code="CANCEL_ORDER_STATE_INCONSISTENT",
+                )
+
             # 已撤销终态直接幂等返回，不锁账户、不释放资金、不创建新事件，
-            # cancelled_at 也保持第一次撤单写入的值。
+            # cancelled_at 也保持第一次撤单写入的值。订单查询使用了
+            # SELECT FOR UPDATE，因此返回前必须主动提交并刷新，及时释放行锁。
             if order.status in self.IDEMPOTENT_STATUSES:
+                db.commit()
+                db.refresh(order)
                 return order
             if order.status not in self.CANCELLABLE_STATUSES:
                 raise ResourceConflictError(

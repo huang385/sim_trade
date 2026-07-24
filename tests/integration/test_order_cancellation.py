@@ -377,3 +377,12 @@ def test_cancel_outbox_failure_rolls_back_order_and_account(
         assert account.available_cash == Decimal("57970.000000")
         assert account.frozen_margin == Decimal("42000.000000")
         assert account.frozen_commission == Decimal("30.000000")
+        cancel_event_count = db.scalar(
+            select(func.count(OutboxEvent.id)).where(
+                OutboxEvent.aggregate_id == order.order_id,
+                OutboxEvent.event_type.in_(
+                    ["ORDER_CANCELLED", "ORDER_PARTIALLY_CANCELLED"]
+                ),
+            )
+        )
+        assert cancel_event_count == 0
