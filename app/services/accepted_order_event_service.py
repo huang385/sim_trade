@@ -61,6 +61,8 @@ class AcceptedOrderEventService:
         "ORDER_ACCEPTED",
         "ORDER_PARTIALLY_FILLED",
         "ORDER_FILLED",
+        "ORDER_CANCELLED",
+        "ORDER_PARTIALLY_CANCELLED",
     }
     # TRADE_CREATED 与订单状态事件发布到同一 Stream。活动订单消费者只需
     # 安全确认它，不维护成交派生数据，避免把合法成交事件误送入死信。

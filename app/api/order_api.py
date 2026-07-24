@@ -2,7 +2,15 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.schemas.order_schema import OrderCreateRequest, OrderResponse
+from app.schemas.order_schema import (
+    OrderCancelRequest,
+    OrderCreateRequest,
+    OrderResponse,
+)
+from app.services.order_cancellation_service import (
+    OrderCancellationService,
+    get_order_cancellation_service,
+)
 from app.services.order_service import OrderService, get_order_service
 
 
@@ -29,6 +37,29 @@ def create_order(
     """
 
     return service.create_order(db=db, request=request)
+
+
+@router.post("/{order_id}/cancel", response_model=OrderResponse)
+def cancel_order(
+    order_id: str,
+    request: OrderCancelRequest,
+    db: Session = Depends(get_db),
+    service: OrderCancellationService = Depends(
+        get_order_cancellation_service
+    ),
+):
+    """
+    撤销限价开仓订单的全部剩余未成交数量。
+
+    API 层不修改订单、账户或 Redis；资金释放、状态更新、Outbox 写入和
+    PostgreSQL 事务全部由 OrderCancellationService 负责。
+    """
+
+    return service.cancel_order(
+        db=db,
+        order_id=order_id,
+        request=request,
+    )
 
 
 @router.get("/{order_id}", response_model=OrderResponse)

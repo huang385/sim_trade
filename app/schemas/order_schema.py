@@ -67,6 +67,26 @@ class OrderCreateRequest(BaseModel):
         return value.strip()
 
 
+class OrderCancelRequest(BaseModel):
+    """
+    主动撤销订单请求。
+
+    account_id 仅用于确认订单归属，不代表完整权限认证；后续接入身份系统后，
+    应改为从认证上下文校验账户操作权限。
+    """
+
+    account_id: str = Field(min_length=1, max_length=64)
+
+    @field_validator("account_id", mode="before")
+    @classmethod
+    def strip_account_id(cls, value: str) -> str:
+        """去除账户编号首尾空格，空字符串由 Field 长度校验拒绝。"""
+
+        if not isinstance(value, str):
+            return value
+        return value.strip()
+
+
 class OrderResponse(BaseModel):
     """
     订单响应结构。
@@ -125,4 +145,5 @@ class OrderResponse(BaseModel):
     # 生命周期时间
     created_at: datetime
     accepted_at: datetime | None
+    cancelled_at: datetime | None
     updated_at: datetime

@@ -24,6 +24,7 @@ from app.schemas.order_schema import OrderCreateRequest
 from app.services.fee_calculator import FeeCalculator
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
+from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_service import OrderService
 from app.services.order_validation_service import OrderValidationService
 from app.services.rule_query_service import get_rule_query_service
@@ -222,5 +223,24 @@ def make_order_service(
         fee_calculator=FeeCalculator(),
         outbox_repository=outbox_repository or OutboxRepository(),
         trading_day_provider=lambda: context.trading_day,
+        **kwargs,
+    )
+
+
+def make_cancellation_service(
+    *,
+    outbox_repository=None,
+    event_id_factory=None,
+) -> OrderCancellationService:
+    """构造使用真实 PostgreSQL 行锁和仓储的撤单事务服务。"""
+
+    kwargs = {}
+    if event_id_factory is not None:
+        kwargs["event_id_factory"] = event_id_factory
+    return OrderCancellationService(
+        order_repository=OrderRepository(),
+        account_repository=AccountRepository(),
+        freeze_service=OrderFreezeService(),
+        outbox_repository=outbox_repository or OutboxRepository(),
         **kwargs,
     )

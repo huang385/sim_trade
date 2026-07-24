@@ -193,7 +193,34 @@ def test_missing_order_id_is_rejected():
 def test_unknown_event_type_is_classified_for_dead_letter():
     service, _, _ = make_service(make_order())
     fields = make_fields()
-    fields["event_type"] = "ORDER_CANCELLED"
+    fields["event_type"] = "ORDER_UNKNOWN"
 
     with pytest.raises(UnsupportedOrderEventError):
         service.process(Mock(), fields)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "status"),
+    [
+        ("ORDER_CANCELLED", "CANCELLED"),
+        ("ORDER_PARTIALLY_CANCELLED", "PARTIALLY_CANCELLED"),
+    ],
+)
+def test_cancel_events_remove_all_active_indexes(event_type, status):
+    service, _, active_index = make_service(
+        make_order(status=status, remaining_volume=0)
+    )
+    fields = make_fields()
+    fields["event_type"] = event_type
+
+    result = service.process(Mock(), fields)
+
+    assert result.action == "REMOVED"
+    active_index.remove_active_order.assert_called_once_with(
+        order_id="O-1",
+        account_id="A001",
+        exchange_id="SHFE",
+        symbol="RB2610",
+        event_id="EVT-1",
+        processed_ttl_seconds=604800,
+    )

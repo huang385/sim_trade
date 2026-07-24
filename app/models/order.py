@@ -21,8 +21,8 @@ class Order(Base):
     """
     订单主表。
 
-    第一阶段只负责记录已经完成校验和资金冻结的限价开仓订单。
-    暂时不处理撮合、成交、撤单和持仓变化。
+    记录已经完成校验和资金冻结的限价开仓订单，并承载后续成交和主动撤单
+    状态。成交、资金释放和持仓变化仍由对应事务服务负责。
 
     表名使用 orders，避免直接使用 SQL 保留字 order。
 
@@ -149,7 +149,7 @@ class Order(Base):
         Integer,
         nullable=False,
     )
-    # 已撤销数量。本阶段只预留字段，尚未开放撤单业务。
+    # 已撤销数量；主动撤单时只增加当前剩余未成交数量。
     cancelled_volume: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
@@ -213,6 +213,11 @@ class Order(Base):
     )
     # 订单完成校验和冻结、正式被接受的时间
     accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    # 用户主动撤销订单的时间；重复撤单始终保留第一次时间。
+    cancelled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
     )

@@ -26,7 +26,11 @@ from app.schemas.reference_sync_log_schema import (
     ReferenceSyncLogCreate,
     ReferenceSyncLogResponse,
 )
-from app.schemas.order_schema import OrderCreateRequest, OrderResponse
+from app.schemas.order_schema import (
+    OrderCancelRequest,
+    OrderCreateRequest,
+    OrderResponse,
+)
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.schemas.trade_schema import TradeResponse
 from app.schemas.position_schema import PositionResponse
@@ -48,6 +52,7 @@ __all__ = [
     "ReferenceSyncLogCreate",
     "ReferenceSyncLogResponse",
     "OrderCreateRequest",
+    "OrderCancelRequest",
     "OrderResponse",
     "MarketTick",
     "MarketTickIngestType",

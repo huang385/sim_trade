@@ -10,6 +10,10 @@ from app.services.rule_query_service import (
     get_rule_query_service,
 )
 from app.services.order_freeze_service import OrderFreezeService
+from app.services.order_cancellation_service import (
+    OrderCancellationService,
+    get_order_cancellation_service,
+)
 from app.services.order_service import OrderService, get_order_service
 from app.services.order_validation_service import OrderValidationService
 from app.services.accepted_order_event_service import AcceptedOrderEventService
@@ -50,6 +54,8 @@ __all__ = [
     "FeeCalculator",
     "OrderValidationService",
     "OrderFreezeService",
+    "OrderCancellationService",
+    "get_order_cancellation_service",
     "OrderService",
     "get_order_service",
     "AcceptedOrderEventService",
