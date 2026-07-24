@@ -1,5 +1,4 @@
 from dataclasses import replace
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
@@ -13,14 +12,10 @@ def make_market(**overrides) -> MatchingMarketData:
     """创建不依赖 Pydantic 或数据库的一档行情快照。"""
 
     values = {
-        "event_id": "TICK-1",
-        "stream_message_id": "1-0",
         "bid_price_1": Decimal("14598"),
         "bid_volume_1": 3,
         "ask_price_1": Decimal("14599"),
         "ask_volume_1": 2,
-        "event_time": datetime(2026, 7, 23, 9, tzinfo=timezone.utc),
-        "sequence_id": 1,
     }
     values.update(overrides)
     return MatchingMarketData(**values)
@@ -30,7 +25,6 @@ def make_order(**overrides) -> MatchingOrder:
     """创建纯撮合订单快照。"""
 
     values = {
-        "order_id": "O-1",
         "direction": OrderDirection.BUY,
         "offset_flag": OffsetFlag.OPEN,
         "order_type": OrderType.LIMIT,
@@ -195,10 +189,7 @@ def test_vn_orders_independently_receive_full_displayed_liquidity():
     engine = VnMatchingEngine()
     market = make_market(ask_volume_1=3)
 
-    results = [
-        engine.match(make_order(order_id=f"O-{index}"), market)
-        for index in range(2)
-    ]
+    results = [engine.match(make_order(), market) for _ in range(2)]
 
     # VN 模式不共享盘口量，两笔订单都可以各自成交 3 手。
     assert [item.fill_volume for item in results] == [3, 3]

@@ -16,7 +16,10 @@ from app.matching.models import MatchingMarketData, MatchingOrder
 from app.repositories.order_repository import OrderRepository
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.schemas.matching_schema import MarketTickMatchResult
-from app.services.trade_settlement_service import TradeSettlementService
+from app.services.trade_settlement_service import (
+    SettlementCommand,
+    TradeSettlementService,
+)
 
 
 class MarketTickEventValidationError(ValueError):
@@ -152,14 +155,10 @@ class MarketTickMatchingService:
         # 同一条 Tick 的所有候选订单共享一份不可变行情快照，避免在高频
         # 循环中重复构造对象，同时仍保持 VN 模式下盘口量互不扣减的语义。
         market_snapshot = MatchingMarketData(
-            event_id=event.event_id,
-            stream_message_id=stream_message_id,
             bid_price_1=event.tick.bid_price_1,
             bid_volume_1=event.tick.bid_volume_1,
             ask_price_1=event.tick.ask_price_1,
             ask_volume_1=event.tick.ask_volume_1,
-            event_time=event.tick.event_time,
-            sequence_id=event.tick.sequence_id,
         )
         matched = settled = idempotent = skipped = 0
         first_error: Exception | None = None
@@ -174,7 +173,6 @@ class MarketTickMatchingService:
                         skipped += 1
                         continue
                     order_snapshot = MatchingOrder(
-                        order_id=order.order_id,
                         direction=OrderDirection(order.direction),
                         offset_flag=OffsetFlag(order.offset_flag),
                         order_type=OrderType(order.order_type),
@@ -190,11 +188,21 @@ class MarketTickMatchingService:
                     skipped += 1
                     continue
                 matched += 1
+                # 纯撮合结果不携带订单编号或 Redis 信息；编排层在确认成交后
+                # 组合结算命令，确保幂等和 Trade 追踪字段仍完整保留。
+                command = SettlementCommand(
+                    order_id=order.order_id,
+                    market_event_id=event.event_id,
+                    market_stream_message_id=stream_message_id,
+                    tick_event_time=event.tick.event_time,
+                    tick_sequence_id=event.tick.sequence_id,
+                    match_result=match_result,
+                )
                 # 每笔候选订单使用独立 Session 和事务。一笔失败不妨碍后续
                 # 订单先完成；但循环结束后仍抛错，使整条 Tick 保留在 Pending。
                 with self.session_factory() as settlement_db:
                     result = self.settlement_service.settle(
-                        settlement_db, match_result
+                        settlement_db, command
                     )
                 if result.action == "SETTLED":
                     settled += 1

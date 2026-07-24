@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 from uuid import uuid4
@@ -28,6 +29,23 @@ from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.trade_repository import TradeRepository
+
+
+@dataclass(frozen=True)
+class SettlementCommand:
+    """
+    从撮合编排层交给成交结算层的完整命令。
+
+    订单编号、行情事件和 Redis Stream 追踪信息属于业务上下文，不进入
+    纯撮合模型；MatchResult 只描述价格和数量计算结果。
+    """
+
+    order_id: str
+    market_event_id: str
+    market_stream_message_id: str
+    tick_event_time: datetime
+    tick_sequence_id: int
+    match_result: MatchResult
 
 
 @dataclass(frozen=True)
@@ -222,7 +240,11 @@ class TradeSettlementService:
             created_at=now,
         )
 
-    def settle(self, db: Session, result: MatchResult) -> SettlementResult:
+    def settle(
+        self,
+        db: Session,
+        command: SettlementCommand,
+    ) -> SettlementResult:
         """
         执行单个订单的一次成交事务并在成功后提交。
 
@@ -231,39 +253,43 @@ class TradeSettlementService:
         重试时已成功订单依靠order_id+market_event_id幂等跳过。
         """
 
+        # 纯计算结果和业务追踪上下文明确分离；结算只从 command 获取
+        # 订单、行情及 Redis 标识，从 match_result 获取拟成交价格和数量。
+        match_result = command.match_result
+
         # 纯撮合明确返回不成交时，无需开启数据库写事务。
-        if not result.matched:
-            return SettlementResult(None, result.order_id, "NOT_MATCHED")
+        if not match_result.matched:
+            return SettlementResult(None, command.order_id, "NOT_MATCHED")
 
         try:
             # 固定先锁订单，再锁账户、持仓，降低并发结算时的死锁概率。
             order = self.order_repository.get_by_order_id_for_update(
-                db, result.order_id
+                db, command.order_id
             )
             if order is None:
                 db.rollback()
-                return SettlementResult(None, result.order_id, "ORDER_NOT_FOUND")
+                return SettlementResult(None, command.order_id, "ORDER_NOT_FOUND")
 
             existing = self.trade_repository.get_by_order_market_event(
                 db,
-                order_id=result.order_id,
-                market_event_id=result.market_event_id,
+                order_id=command.order_id,
+                market_event_id=command.market_event_id,
             )
             if existing is not None:
                 # 成交事务可能已经提交，但Worker尚未来得及XACK便崩溃。
                 # 该分支返回原成交编号，禁止重复更新订单、账户和持仓。
                 trade_id = existing.trade_id
                 db.rollback()
-                return SettlementResult(trade_id, result.order_id, "IDEMPOTENT")
+                return SettlementResult(trade_id, command.order_id, "IDEMPOTENT")
 
-            if not self._is_matchable_order(order, result):
+            if not self._is_matchable_order(order, match_result):
                 # Redis活动索引允许短暂滞后，数据库确认失效即可安全跳过。
                 db.rollback()
-                return SettlementResult(None, result.order_id, "ORDER_INACTIVE")
+                return SettlementResult(None, command.order_id, "ORDER_INACTIVE")
 
             # 引擎使用的是 Redis 候选快照，拿到数据库行锁后必须以数据库
             # 当前剩余量为上限，避免并发 Tick 把订单成交为负数。
-            fill_volume = min(result.fill_volume, order.remaining_volume)
+            fill_volume = min(match_result.fill_volume, order.remaining_volume)
             remaining_before = order.remaining_volume
             traded_before = order.traded_volume
             average_before = order.average_price or Decimal("0")
@@ -311,7 +337,7 @@ class TradeSettlementService:
                 remaining_volume_before_fill=remaining_before,
             )
             # 成交价格和成交额在入库前统一量化到Numeric(24,6)精度。
-            fill_price = quantize_money(result.fill_price)
+            fill_price = quantize_money(match_result.fill_price)
             turnover = quantize_money(
                 fill_price
                 * Decimal(fill_volume)
@@ -323,8 +349,8 @@ class TradeSettlementService:
                 trade_id=self.trade_id_factory(),
                 order_id=order.order_id,
                 account_id=order.account_id,
-                market_event_id=result.market_event_id,
-                market_stream_message_id=result.market_stream_message_id,
+                market_event_id=command.market_event_id,
+                market_stream_message_id=command.market_stream_message_id,
                 order_book_id=order.order_book_id,
                 exchange_id=order.exchange_id,
                 symbol=order.symbol,
@@ -337,7 +363,7 @@ class TradeSettlementService:
                 margin=allocated_margin,
                 commission=allocated_commission,
                 realized_pnl=Decimal("0.000000"),
-                trade_time=result.tick_event_time,
+                trade_time=command.tick_event_time,
                 created_at=now,
             )
             self.trade_repository.add(db, trade)
@@ -472,12 +498,12 @@ class TradeSettlementService:
             db.rollback()
             existing = self.trade_repository.get_by_order_market_event(
                 db,
-                order_id=result.order_id,
-                market_event_id=result.market_event_id,
+                order_id=command.order_id,
+                market_event_id=command.market_event_id,
             )
             if existing is not None:
                 return SettlementResult(
-                    existing.trade_id, result.order_id, "IDEMPOTENT"
+                    existing.trade_id, command.order_id, "IDEMPOTENT"
                 )
             raise DataAccessError(
                 "成交结算唯一约束冲突",

@@ -1,24 +1,9 @@
 """
-撮合领域的统一公开接口。
+纯撮合领域模块。
 
-该包只保存纯撮合模型、引擎接口、引擎实现和创建注册器，不依赖
-Redis、PostgreSQL、SQLAlchemy ORM 或成交结算服务。
+本模块只包含撮合输入、撮合结果、统一接口和撮合算法，
+不访问 Redis、PostgreSQL、SQLAlchemy 或成交结算服务。
+
+包初始化阶段不导入 Registry 或具体引擎，调用方应从对应子模块显式导入，
+避免仅使用领域模型时触发引擎注册。
 """
-
-from app.matching.base import MatchingEngine
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
-from app.matching.registry import (
-    MatchingEngineRegistry,
-    create_matching_engine,
-    matching_engine_registry,
-)
-
-__all__ = [
-    "MatchingEngine",
-    "MatchingOrder",
-    "MatchingMarketData",
-    "MatchResult",
-    "MatchingEngineRegistry",
-    "matching_engine_registry",
-    "create_matching_engine",
-]

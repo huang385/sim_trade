@@ -19,6 +19,7 @@ from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.trade_repository import TradeRepository
 from app.services.trade_settlement_service import TradeSettlementService
+from app.services.trade_settlement_service import SettlementCommand
 
 
 def make_session_factory():
@@ -99,18 +100,22 @@ def seed(session_factory, *, direction="BUY"):
 
 
 def match(event_id, price, volume):
-    return MatchResult(
-        matched=True,
+    """构造成交结算命令，纯 MatchResult 不携带订单和行情追踪信息。"""
+
+    return SettlementCommand(
         order_id="O-1",
         market_event_id=event_id,
         market_stream_message_id=f"{event_id}-0",
-        fill_price=Decimal(price),
-        fill_volume=volume,
         tick_event_time=datetime(2026, 7, 23, 2, tzinfo=timezone.utc),
         tick_sequence_id=1,
-        reason=None,
-        engine_name="VN",
-        engine_version="1.0",
+        match_result=MatchResult(
+            matched=True,
+            fill_price=Decimal(price),
+            fill_volume=volume,
+            reason=None,
+            engine_name="VN",
+            engine_version="1.0",
+        ),
     )
 
 
@@ -150,6 +155,20 @@ def test_two_ticks_partial_then_full_preserve_all_balances():
         assert position.used_margin == Decimal("131400.000000")
         assert [trade.margin for trade in trades] == [Decimal("52560.000000"), Decimal("78840.000000")]
         assert [trade.commission for trade in trades] == [Decimal("6.000000"), Decimal("9.000000")]
+        assert [trade.order_id for trade in trades] == ["O-1", "O-1"]
+        assert [trade.market_event_id for trade in trades] == [
+            "TICK-1001",
+            "TICK-1002",
+        ]
+        assert [trade.market_stream_message_id for trade in trades] == [
+            "TICK-1001-0",
+            "TICK-1002-0",
+        ]
+        assert all(
+            trade.trade_time.replace(tzinfo=timezone.utc)
+            == datetime(2026, 7, 23, 2, tzinfo=timezone.utc)
+            for trade in trades
+        )
         assert len(details) == 2
         assert len(outbox) == 4
         assert {item.event_type for item in outbox} == {

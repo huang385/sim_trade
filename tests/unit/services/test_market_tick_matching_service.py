@@ -12,7 +12,10 @@ from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
     UnsupportedMarketTickEventError,
 )
-from app.services.trade_settlement_service import SettlementResult
+from app.services.trade_settlement_service import (
+    SettlementCommand,
+    SettlementResult,
+)
 
 
 def make_fields(*, ingest_type="LIVE_CALLBACK"):
@@ -68,6 +71,7 @@ class FakeMatchingEngine:
     def __init__(self, matched=True):
         self.matched = matched
         self.calls: list[tuple[MatchingOrder, MatchingMarketData]] = []
+        self.results: list[MatchResult] = []
 
     def match(
         self,
@@ -75,11 +79,8 @@ class FakeMatchingEngine:
         market: MatchingMarketData,
     ) -> MatchResult:
         self.calls.append((order, market))
-        return MatchResult(
+        result = MatchResult(
             matched=self.matched,
-            order_id=order.order_id,
-            market_event_id=market.event_id,
-            market_stream_message_id=market.stream_message_id,
             fill_price=market.ask_price_1 if self.matched else None,
             fill_volume=min(
                 order.remaining_volume,
@@ -87,12 +88,12 @@ class FakeMatchingEngine:
             )
             if self.matched
             else 0,
-            tick_event_time=market.event_time,
-            tick_sequence_id=market.sequence_id,
             reason=None if self.matched else "FAKE_NOT_MATCHED",
             engine_name=self.name,
             engine_version=self.version,
         )
+        self.results.append(result)
+        return result
 
 
 def make_service(
@@ -168,6 +169,12 @@ def test_limit_open_orders_each_call_injected_engine_and_settle():
         and isinstance(market, MatchingMarketData)
         for order, market in engine.calls
     )
+    assert all(not hasattr(order, "order_id") for order, _ in engine.calls)
+    assert all(
+        not hasattr(market, "stream_message_id")
+        and not hasattr(market, "event_id")
+        for _, market in engine.calls
+    )
 
 
 @pytest.mark.parametrize(
@@ -207,15 +214,24 @@ def test_not_matched_result_does_not_call_settlement():
     settlement.settle.assert_not_called()
 
 
-def test_matched_result_is_passed_to_settlement():
+def test_matched_result_is_wrapped_in_complete_settlement_command():
     service, engine, settlement = make_service(orders=[make_order("O-1")])
 
     result = service.process(stream_message_id="1-0", fields=make_fields())
 
     assert len(engine.calls) == 1
     settlement.settle.assert_called_once()
-    settled_result = settlement.settle.call_args.args[1]
-    assert settled_result.engine_name == "FAKE"
+    command = settlement.settle.call_args.args[1]
+    assert isinstance(command, SettlementCommand)
+    assert command.order_id == "O-1"
+    assert command.market_event_id == "TICK-1"
+    assert command.market_stream_message_id == "1-0"
+    assert command.tick_event_time == datetime(
+        2026, 7, 23, 1, tzinfo=timezone.utc
+    )
+    assert command.tick_sequence_id == 1
+    assert command.match_result is engine.results[0]
+    assert command.match_result.engine_name == "FAKE"
     assert result.settled_count == 1
 
 

@@ -10,7 +10,10 @@ from app.models.account import Account
 from app.matching.models import MatchResult
 from app.models.position import Position
 from app.models.trade import Trade
-from app.services.trade_settlement_service import TradeSettlementService
+from app.services.trade_settlement_service import (
+    SettlementCommand,
+    TradeSettlementService,
+)
 from tests.integration.conftest import make_order_service, make_request
 
 
@@ -36,21 +39,23 @@ def test_same_account_concurrent_fills_preserve_funds_and_position(
             order_ids.append(order.order_id)
 
     def settle(index):
-        result = MatchResult(
-            matched=True,
+        command = SettlementCommand(
             order_id=order_ids[index],
             market_event_id=f"CONCURRENT-TICK-{index}",
             market_stream_message_id=f"{index + 1}-0",
-            fill_price=Decimal("3499"),
-            fill_volume=1,
             tick_event_time=datetime(2026, 7, 23, 1, tzinfo=timezone.utc),
             tick_sequence_id=index + 1,
-            reason=None,
-            engine_name="VN",
-            engine_version="1.0",
+            match_result=MatchResult(
+                matched=True,
+                fill_price=Decimal("3499"),
+                fill_volume=1,
+                reason=None,
+                engine_name="VN",
+                engine_version="1.0",
+            ),
         )
         with SessionLocal() as db:
-            return TradeSettlementService().settle(db, result).action
+            return TradeSettlementService().settle(db, command).action
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         actions = list(executor.map(settle, range(2)))

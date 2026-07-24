@@ -28,13 +28,8 @@ class VnMatchingEngine:
 
         return MatchResult(
             matched=False,
-            order_id=order.order_id,
-            market_event_id=market.event_id,
-            market_stream_message_id=market.stream_message_id,
             fill_price=None,
             fill_volume=0,
-            tick_event_time=market.event_time,
-            tick_sequence_id=market.sequence_id,
             reason=reason,
             engine_name=self.name,
             engine_version=self.version,
@@ -86,13 +81,8 @@ class VnMatchingEngine:
         fill_volume = min(order.remaining_volume, market_volume)
         return MatchResult(
             matched=True,
-            order_id=order.order_id,
-            market_event_id=market.event_id,
-            market_stream_message_id=market.stream_message_id,
             fill_price=fill_price,
             fill_volume=fill_volume,
-            tick_event_time=market.event_time,
-            tick_sequence_id=market.sequence_id,
             reason=None,
             engine_name=self.name,
             engine_version=self.version,

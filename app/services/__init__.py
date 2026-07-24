@@ -30,6 +30,7 @@ from app.services.market_tick_validation_service import (
 )
 from app.services.trade_settlement_service import (
     PositionQueryService,
+    SettlementCommand,
     SettlementResult,
     TradeQueryService,
     TradeSettlementService,
@@ -62,6 +63,7 @@ __all__ = [
     "MarketTickNormalizer",
     "MarketTickValidationService",
     "TradeSettlementService",
+    "SettlementCommand",
     "SettlementResult",
     "TradeQueryService",
     "PositionQueryService",
