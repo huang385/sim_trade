@@ -55,25 +55,83 @@ class PositionRepository:
         return db.scalars(statement).all()
 
     @staticmethod
-    def list_details_for_update(
+    def list_available_details_for_update(
         db: Session,
         *,
         position_id: str,
     ) -> Sequence[PositionDetail]:
         """
-        按FIFO顺序锁定持仓的全部逐笔明细。
+        平仓下单时只锁定仍有可平数量的逐笔明细。
 
-        已完全关闭的明细仍可能被历史 PositionFreezeAllocation 和
-        TradePositionAllocation 引用。平仓结算的一致性校验需要确认这些
-        关联对象真实存在，因此不能只返回 remaining_volume > 0 的记录；
-        分配器会自行过滤无可用数量的明细。
+        SQL层直接过滤 remaining_volume - frozen_volume > 0，已关闭明细和
+        已被其他订单完全冻结的明细都不会进入锁范围；排序继续使用数据库
+        自增 id，保证昨/今分类内部的 FIFO 稳定。
         """
 
         statement = (
             select(PositionDetail)
-            .where(PositionDetail.position_id == position_id)
+            .where(
+                PositionDetail.position_id == position_id,
+                (
+                    PositionDetail.remaining_volume
+                    - PositionDetail.frozen_volume
+                )
+                > 0,
+            )
             .order_by(PositionDetail.id)
             .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def list_details_by_ids_for_update(
+        db: Session,
+        *,
+        position_id: str,
+        position_detail_ids: Sequence[str],
+    ) -> Sequence[PositionDetail]:
+        """
+        成交和撤单只锁定当前订单 Allocation 引用的持仓明细。
+
+        position_id 条件防止异常 Allocation 跨持仓引用；固定按 id 排序，
+        并与成交、撤单统一采用 Allocation 后、PositionDetail 前的锁顺序。
+        """
+
+        if not position_detail_ids:
+            return []
+        statement = (
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_id == position_id,
+                PositionDetail.position_detail_id.in_(
+                    tuple(position_detail_ids)
+                ),
+            )
+            .order_by(PositionDetail.id)
+            .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def list_open_details(
+        db: Session,
+        *,
+        position_id: str,
+    ) -> Sequence[PositionDetail]:
+        """
+        只读取尚有持仓的有效明细，用于成交后重算持仓汇总。
+
+        调用方已经锁定 Position 行，因此同一持仓的其他成交或撤单事务无法
+        并发修改；这里无需扩大 FOR UPDATE 范围到无关历史明细。
+        """
+
+        statement = (
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_id == position_id,
+                PositionDetail.remaining_volume > 0,
+            )
+            .order_by(PositionDetail.id)
         )
         return db.scalars(statement).all()
 

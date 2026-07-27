@@ -23,6 +23,7 @@ from app.enums.order_enums import (
     PositionDirection,
     PositionFreezeAllocationStatus,
 )
+from app.enums.reference_data_enums import CommissionType
 from app.models.order import Order
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
@@ -33,7 +34,11 @@ from app.repositories.position_freeze_allocation_repository import (
 )
 from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCreateRequest
-from app.services.fee_calculator import FeeCalculator
+from app.services.fee_calculator import (
+    FeeBucketEntry,
+    FeeBucketKey,
+    FeeCalculator,
+)
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_validation_service import OrderValidationService
@@ -178,7 +183,9 @@ class OrderService:
             )
 
             is_open = request.offset_flag == OffsetFlag.OPEN
-            commission_type = str(rules.fee_rule.commission_type)
+            commission_type = CommissionType(
+                rules.fee_rule.commission_type
+            ).value
             commission_parameter = (
                 self.fee_calculator.resolve_commission_parameter(
                     offset_flag=request.offset_flag,
@@ -266,9 +273,11 @@ class OrderService:
                         "可平持仓不存在",
                         error_code="POSITION_NOT_FOUND",
                     )
-                details = self.position_repository.list_details_for_update(
-                    db,
-                    position_id=position.position_id,
+                details = (
+                    self.position_repository.list_available_details_for_update(
+                        db,
+                        position_id=position.position_id,
+                    )
                 )
                 plans = self.close_allocator.allocate(
                     details=details,
@@ -276,7 +285,7 @@ class OrderService:
                     trading_day=trading_day,
                     volume=request.volume,
                 )
-                allocation_fee_snapshots = []
+                allocation_fee_metadata = []
                 for plan in plans:
                     allocation_parameter = (
                         self.fee_calculator.resolve_commission_parameter(
@@ -284,22 +293,43 @@ class OrderService:
                             fee_rule=rules.fee_rule,
                         )
                     )
-                    allocation_frozen_commission = (
-                        self.fee_calculator.calculate_from_snapshot(
-                            price=request.limit_price,
-                            volume=plan.volume,
-                            commission_type=commission_type,
-                            commission_parameter=allocation_parameter,
-                            contract_multiplier=commission_contract_multiplier,
-                        )
-                    )
-                    allocation_fee_snapshots.append(
+                    allocation_fee_metadata.append(
                         (
                             plan,
                             allocation_parameter,
-                            allocation_frozen_commission,
                         )
                     )
+                # 相同平今/平昨及相同规则快照组成一个手续费桶。每个桶只按
+                # 总数量计算一次，避免 PositionDetail 数量改变订单手续费。
+                allocation_commissions = (
+                    self.fee_calculator.calculate_bucket_allocations(
+                        price=request.limit_price,
+                        entries=[
+                            FeeBucketEntry(
+                                key=FeeBucketKey(
+                                    resolved_offset_flag=(
+                                        plan.resolved_offset_flag.value
+                                    ),
+                                    commission_type=commission_type,
+                                    commission_parameter=parameter,
+                                    commission_contract_multiplier=(
+                                        commission_contract_multiplier
+                                    ),
+                                ),
+                                volume=plan.volume,
+                            )
+                            for plan, parameter in allocation_fee_metadata
+                        ],
+                    )
+                )
+                allocation_fee_snapshots = [
+                    (plan, parameter, commission)
+                    for (plan, parameter), commission in zip(
+                        allocation_fee_metadata,
+                        allocation_commissions,
+                        strict=True,
+                    )
+                ]
                 frozen_commission = quantize_money(
                     sum(
                         (

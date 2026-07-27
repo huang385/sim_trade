@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Sequence
 
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import BusinessValidationError
@@ -6,6 +8,30 @@ from app.enums.order_enums import OffsetFlag
 from app.enums.reference_data_enums import CommissionType
 from app.models.fee_rule import FeeRule
 from app.models.instrument import Instrument
+
+
+@dataclass(frozen=True)
+class FeeBucketKey:
+    """
+    手续费桶的稳定分组键。
+
+    resolved_offset_flag 用于区分平今和平昨；其余三个字段固定手续费计算
+    口径。同一桶内无论来自一条还是多条 PositionDetail，都只按总数量
+    计算、量化一次手续费。
+    """
+
+    resolved_offset_flag: str
+    commission_type: str
+    commission_parameter: Decimal
+    commission_contract_multiplier: Decimal
+
+
+@dataclass(frozen=True)
+class FeeBucketEntry:
+    """参与手续费桶计算的一条明细及其数量。"""
+
+    key: FeeBucketKey
+    volume: int
 
 
 class FeeCalculator:
@@ -212,3 +238,84 @@ class FeeCalculator:
         # 当前版本不额外应用 discount_rate；规则同步时写入的参数应当已经
         # 表示最终费率，避免订单接受和成交阶段重复折扣。
         return quantize_money(fee)
+
+    @classmethod
+    def calculate_bucket_allocations(
+        cls,
+        *,
+        price: Decimal,
+        entries: Sequence[FeeBucketEntry],
+    ) -> list[Decimal]:
+        """
+        按手续费桶汇总计算，再把桶级金额稳定分配回各条明细。
+
+        每个桶只调用一次手续费公式。桶内按照输入顺序使用累计数量比例
+        分配，最后一条明细消费桶内全部剩余金额，从而保证：
+
+            sum(明细手续费) == 桶级手续费
+
+        累计比例而不是逐条独立四舍五入，可以避免明细数量改变总手续费，
+        也不会出现多个向上舍入导致最后一条得到负数的情况。
+        """
+
+        if not entries:
+            return []
+
+        grouped_indices: dict[FeeBucketKey, list[int]] = {}
+        for index, entry in enumerate(entries):
+            if not isinstance(entry.volume, int) or entry.volume <= 0:
+                raise BusinessValidationError(
+                    "手续费桶数量必须是大于0的整数",
+                    error_code="INVALID_FEE_VOLUME",
+                )
+            # 枚举值统一转成数据库保存的字符串，避免 Enum 和 str 形成
+            # 两个看似相同、实际哈希不同的手续费桶。
+            try:
+                normalized_type = CommissionType(
+                    entry.key.commission_type
+                ).value
+            except ValueError as exc:
+                raise BusinessValidationError(
+                    "不支持的手续费计算方式",
+                    error_code="UNSUPPORTED_COMMISSION_TYPE",
+                ) from exc
+            normalized_key = FeeBucketKey(
+                resolved_offset_flag=entry.key.resolved_offset_flag,
+                commission_type=normalized_type,
+                commission_parameter=entry.key.commission_parameter,
+                commission_contract_multiplier=(
+                    entry.key.commission_contract_multiplier
+                ),
+            )
+            grouped_indices.setdefault(normalized_key, []).append(index)
+
+        result = [Decimal("0.000000") for _ in entries]
+        for key, indices in grouped_indices.items():
+            total_volume = sum(entries[index].volume for index in indices)
+            bucket_commission = cls.calculate_from_snapshot(
+                price=price,
+                volume=total_volume,
+                commission_type=key.commission_type,
+                commission_parameter=key.commission_parameter,
+                contract_multiplier=key.commission_contract_multiplier,
+            )
+
+            allocated = Decimal("0.000000")
+            cumulative_volume = 0
+            for position, index in enumerate(indices):
+                entry_volume = entries[index].volume
+                cumulative_volume += entry_volume
+                if position == len(indices) - 1:
+                    # 最后一条吸收桶级六位量化尾差，确保明细汇总严格等于桶。
+                    share = quantize_money(bucket_commission - allocated)
+                else:
+                    cumulative_amount = quantize_money(
+                        bucket_commission
+                        * Decimal(cumulative_volume)
+                        / Decimal(total_volume)
+                    )
+                    share = quantize_money(cumulative_amount - allocated)
+                    allocated = cumulative_amount
+                result[index] = share
+
+        return result

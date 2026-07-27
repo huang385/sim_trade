@@ -231,7 +231,9 @@ def test_create_close_order_freezes_commission_and_position(
     )
     position_repository = Mock()
     position_repository.get_for_update.return_value = position
-    position_repository.list_details_for_update.return_value = [detail]
+    position_repository.list_available_details_for_update.return_value = [
+        detail
+    ]
     allocation_repository = Mock()
     outbox_repository = Mock()
     service = make_service(
@@ -313,7 +315,7 @@ def test_plain_close_splits_yesterday_and_today_frozen_commission():
     )
     position_repository = Mock()
     position_repository.get_for_update.return_value = position
-    position_repository.list_details_for_update.return_value = [
+    position_repository.list_available_details_for_update.return_value = [
         yesterday,
         today,
     ]
@@ -356,6 +358,82 @@ def test_plain_close_splits_yesterday_and_today_frozen_commission():
         ("PD-Y", "CLOSE_YESTERDAY", Decimal("3"), Decimal("15.000000")),
         ("PD-T", "CLOSE_TODAY", Decimal("6"), Decimal("30.000000")),
     ]
+
+
+def test_close_order_freeze_uses_bucket_total_across_multiple_details():
+    """同一平今费用桶拆成两条持仓明细时只计算、量化一次总手续费。"""
+
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    order_repository.create.return_value = SimpleNamespace(
+        order_id="O20260717000001"
+    )
+    account = make_account()
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = account
+    rules = make_rules()
+    rules.fee_rule.commission_type = "BY_AMOUNT"
+    rules.fee_rule.close_today_commission = Decimal("0.000001000015")
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = rules
+    details = [
+        SimpleNamespace(
+            id=index,
+            position_detail_id=f"PD-{index}",
+            open_trading_day=TRADING_DAY,
+            remaining_volume=1,
+            frozen_volume=0,
+            updated_at=None,
+        )
+        for index in (1, 2)
+    ]
+    position = SimpleNamespace(
+        position_id="P-1",
+        frozen_volume=0,
+        available_volume=2,
+        updated_at=None,
+    )
+    position_repository = Mock()
+    position_repository.get_for_update.return_value = position
+    position_repository.list_available_details_for_update.return_value = (
+        details
+    )
+    allocation_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=Mock(),
+        position_repository=position_repository,
+        allocation_repository=allocation_repository,
+    )
+
+    service.create_order(
+        db,
+        make_request(
+            direction="SELL",
+            offset_flag="CLOSE_TODAY",
+            limit_price=Decimal("3520"),
+            volume=2,
+        ),
+    )
+
+    allocations = [
+        item.args[1] for item in allocation_repository.add.call_args_list
+    ]
+    assert [item.original_frozen_commission for item in allocations] == [
+        Decimal("0.035201"),
+        Decimal("0.035200"),
+    ]
+    assert sum(
+        item.original_frozen_commission for item in allocations
+    ) == Decimal("0.070401")
+    assert (
+        order_repository.create.call_args.kwargs["frozen_commission"]
+        == account.frozen_commission
+        == Decimal("0.070401")
+    )
 
 
 def test_duplicate_detected_after_account_lock_does_not_freeze_twice():

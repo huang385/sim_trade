@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import uuid4
 
@@ -25,7 +25,11 @@ from app.repositories.trade_position_allocation_repository import (
     TradePositionAllocationRepository,
 )
 from app.repositories.trade_repository import TradeRepository
-from app.services.fee_calculator import FeeCalculator
+from app.services.fee_calculator import (
+    FeeBucketEntry,
+    FeeBucketKey,
+    FeeCalculator,
+)
 from app.services.margin_release_calculator import MarginReleaseCalculator
 from app.services.realized_pnl_calculator import RealizedPnlCalculator
 
@@ -181,6 +185,8 @@ class CloseTradeSettlementHandler:
         detail_map = {item.position_detail_id: item for item in details}
         allocation_remaining_volume = 0
         allocation_remaining_commission = Decimal("0")
+        original_bucket_entries: list[FeeBucketEntry] = []
+        original_bucket_actual: dict[FeeBucketKey, Decimal] = {}
         for allocation in allocations:
             self._validate_allocation_balance(allocation)
             if (
@@ -233,44 +239,27 @@ class CloseTradeSettlementHandler:
                     "冻结分配平今平昨标志与持仓日期不一致",
                     error_code="CLOSE_ALLOCATION_INCONSISTENT",
                 )
-            expected_original_commission = (
-                self.fee_calculator.calculate_from_snapshot(
-                    price=order.limit_price,
+            bucket_key = FeeBucketKey(
+                resolved_offset_flag=allocation.resolved_offset_flag,
+                commission_type=allocation.commission_type,
+                commission_parameter=allocation.commission_parameter,
+                commission_contract_multiplier=(
+                    allocation.commission_contract_multiplier
+                ),
+            )
+            original_bucket_entries.append(
+                FeeBucketEntry(
+                    key=bucket_key,
                     volume=allocation.original_frozen_volume,
-                    commission_type=allocation.commission_type,
-                    commission_parameter=allocation.commission_parameter,
-                    contract_multiplier=(
-                        allocation.commission_contract_multiplier
-                    ),
                 )
             )
-            expected_remaining_commission = (
-                self.fee_calculator.calculate_from_snapshot(
-                    price=order.limit_price,
-                    volume=allocation.remaining_frozen_volume,
-                    commission_type=allocation.commission_type,
-                    commission_parameter=allocation.commission_parameter,
-                    contract_multiplier=(
-                        allocation.commission_contract_multiplier
-                    ),
+            original_bucket_actual[bucket_key] = quantize_money(
+                original_bucket_actual.get(
+                    bucket_key,
+                    Decimal("0.000000"),
                 )
-                if allocation.remaining_frozen_volume > 0
-                else Decimal("0.000000")
+                + allocation.original_frozen_commission
             )
-            if (
-                expected_original_commission
-                != quantize_money(
-                    allocation.original_frozen_commission
-                )
-                or expected_remaining_commission
-                != quantize_money(
-                    allocation.remaining_frozen_commission
-                )
-            ):
-                raise DataAccessError(
-                    "冻结分配手续费与规则快照不一致",
-                    error_code="CLOSE_ALLOCATION_INCONSISTENT",
-                )
             if (
                 allocation.remaining_frozen_volume > detail.frozen_volume
                 or allocation.remaining_frozen_volume > detail.remaining_volume
@@ -282,6 +271,31 @@ class CloseTradeSettlementHandler:
             allocation_remaining_volume += allocation.remaining_frozen_volume
             allocation_remaining_commission += (
                 allocation.remaining_frozen_commission
+            )
+
+        # 原始预计手续费只按桶汇总验证。单条 Allocation 可能承担桶级
+        # 0.000001 尾差，不能再要求其金额等于单独重算的结果。
+        expected_shares = self.fee_calculator.calculate_bucket_allocations(
+            price=order.limit_price,
+            entries=original_bucket_entries,
+        )
+        expected_bucket_totals: dict[FeeBucketKey, Decimal] = {}
+        for entry, share in zip(
+            original_bucket_entries,
+            expected_shares,
+            strict=True,
+        ):
+            expected_bucket_totals[entry.key] = quantize_money(
+                expected_bucket_totals.get(
+                    entry.key,
+                    Decimal("0.000000"),
+                )
+                + share
+            )
+        if expected_bucket_totals != original_bucket_actual:
+            raise DataAccessError(
+                "平仓冻结分配手续费桶汇总不一致",
+                error_code="CLOSE_ALLOCATION_INCONSISTENT",
             )
 
         if (
@@ -337,15 +351,21 @@ class CloseTradeSettlementHandler:
                 error_code="CLOSE_POSITION_NOT_FOUND",
             )
 
-        # 锁顺序与撤单保持一致：Position -> 全部 PositionDetail ->
-        # 当前订单 Allocation。校验通过前不修改任何对象。
-        details = self.position_repository.list_details_for_update(
-            db,
-            position_id=position.position_id,
-        )
+        # 锁顺序与撤单保持一致：Order -> Account -> Position ->
+        # 当前订单 Allocation -> Allocation引用的PositionDetail。
         allocations = self.allocation_repository.list_by_order_for_update(
             db,
             order.order_id,
+        )
+        allocation_detail_ids = list(
+            dict.fromkeys(
+                item.position_detail_id for item in allocations
+            )
+        )
+        details = self.position_repository.list_details_by_ids_for_update(
+            db,
+            position_id=position.position_id,
+            position_detail_ids=allocation_detail_ids,
         )
         detail_map = self._validate_before_mutation(
             order=order,
@@ -389,15 +409,6 @@ class CloseTradeSettlementHandler:
                     remaining_volume=allocation.remaining_frozen_volume,
                 )
             )
-            actual_commission = self.fee_calculator.calculate_from_snapshot(
-                price=fill_price,
-                volume=consumed,
-                commission_type=allocation.commission_type,
-                commission_parameter=allocation.commission_parameter,
-                contract_multiplier=(
-                    allocation.commission_contract_multiplier
-                ),
-            )
             consumptions.append(
                 _CloseConsumption(
                     allocation=allocation,
@@ -407,7 +418,7 @@ class CloseTradeSettlementHandler:
                     released_frozen_commission=(
                         released_frozen_commission
                     ),
-                    actual_commission=actual_commission,
+                    actual_commission=Decimal("0.000000"),
                     realized_pnl=realized_pnl,
                 )
             )
@@ -418,6 +429,43 @@ class CloseTradeSettlementHandler:
                 "平仓成交未完全消费冻结分配",
                 error_code="CLOSE_ALLOCATION_INCONSISTENT",
             )
+
+        # 实际手续费同样按“本次 Trade 消费的手续费桶”汇总计算，再按
+        # FIFO消费顺序分配给逐笔审计明细，最后一条吸收六位量化尾差。
+        actual_commissions = (
+            self.fee_calculator.calculate_bucket_allocations(
+                price=fill_price,
+                entries=[
+                    FeeBucketEntry(
+                        key=FeeBucketKey(
+                            resolved_offset_flag=(
+                                item.allocation.resolved_offset_flag
+                            ),
+                            commission_type=(
+                                item.allocation.commission_type
+                            ),
+                            commission_parameter=(
+                                item.allocation.commission_parameter
+                            ),
+                            commission_contract_multiplier=(
+                                item.allocation
+                                .commission_contract_multiplier
+                            ),
+                        ),
+                        volume=item.volume,
+                    )
+                    for item in consumptions
+                ],
+            )
+        )
+        consumptions = [
+            replace(item, actual_commission=commission)
+            for item, commission in zip(
+                consumptions,
+                actual_commissions,
+                strict=True,
+            )
+        ]
 
         released_margin = quantize_money(
             sum(
@@ -654,14 +702,32 @@ class CloseTradeSettlementHandler:
         position.realized_pnl = quantize_money(
             position.realized_pnl + realized_pnl
         )
+        # 汇总重算只读取 remaining_volume > 0 的有效明细，不再读取或锁定
+        # 与当前订单无关的已关闭历史明细。
+        # 此时明细对象已经在内存中扣减，但 Position 的今仓/昨仓汇总尚未重算。
+        # 禁止查询触发自动 flush，否则数据库会在汇总字段更新前检查日仓平衡约束。
+        # SQL 可能把“本次刚好减到 0”的旧明细查回来，因此还要按对象的最新值
+        # 做一次内存过滤；这样参与汇总的始终只有 remaining_volume > 0 的明细。
+        with db.no_autoflush:
+            queried_open_details = (
+                self.position_repository.list_open_details(
+                    db,
+                    position_id=position.position_id,
+                )
+            )
+        open_details = [
+            item
+            for item in queried_open_details
+            if item.remaining_volume > 0
+        ]
         position.today_volume = sum(
             item.remaining_volume
-            for item in details
+            for item in open_details
             if item.open_trading_day == order.trading_day
         )
         position.yesterday_volume = sum(
             item.remaining_volume
-            for item in details
+            for item in open_details
             if item.open_trading_day < order.trading_day
         )
         position.available_volume = (
@@ -678,14 +744,14 @@ class CloseTradeSettlementHandler:
                     item.open_price
                     * Decimal(item.remaining_volume)
                     * Decimal(instrument.contract_multiplier)
-                    for item in details
+                    for item in open_details
                 ),
                 Decimal("0"),
             )
             weighted_price = sum(
                 (
                     item.open_price * Decimal(item.remaining_volume)
-                    for item in details
+                    for item in open_details
                 ),
                 Decimal("0"),
             )

@@ -206,19 +206,29 @@ class OrderCancellationService:
                         "平仓撤单对应持仓方向不一致",
                         error_code="CANCEL_POSITION_INCONSISTENT",
                     )
-                details = self.position_repository.list_details_for_update(
-                    db,
-                    position_id=position.position_id,
-                )
-                detail_map = {
-                    item.position_detail_id: item for item in details
-                }
                 allocations = (
                     self.allocation_repository.list_by_order_for_update(
                         db,
                         order.order_id,
                     )
                 )
+                allocation_detail_ids = list(
+                    dict.fromkeys(
+                        item.position_detail_id
+                        for item in allocations
+                    )
+                )
+                details = (
+                    self.position_repository
+                    .list_details_by_ids_for_update(
+                        db,
+                        position_id=position.position_id,
+                        position_detail_ids=allocation_detail_ids,
+                    )
+                )
+                detail_map = {
+                    item.position_detail_id: item for item in details
+                }
                 allocation_volume = sum(
                     item.remaining_frozen_volume for item in allocations
                 )

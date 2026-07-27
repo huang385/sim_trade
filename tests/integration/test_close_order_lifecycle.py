@@ -5,7 +5,7 @@ from threading import Barrier
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import BusinessRuleError, DataAccessError
@@ -32,27 +32,31 @@ from tests.integration.conftest import make_order_service, make_request
 pytestmark = pytest.mark.integration
 
 
+def settlement_command(order_id, event_id, price, volume):
+    return SettlementCommand(
+        order_id=order_id,
+        market_event_id=event_id,
+        market_stream_message_id=f"{event_id}-0",
+        tick_event_time=datetime(
+            2026, 7, 24, 1, tzinfo=timezone.utc
+        ),
+        tick_sequence_id=1,
+        match_result=MatchResult(
+            matched=True,
+            fill_price=Decimal(price),
+            fill_volume=volume,
+            reason=None,
+            engine_name="VN",
+            engine_version="1.0",
+        ),
+    )
+
+
 def settle(order_id, event_id, price, volume):
     with SessionLocal() as db:
         return TradeSettlementService().settle(
             db,
-            SettlementCommand(
-                order_id=order_id,
-                market_event_id=event_id,
-                market_stream_message_id=f"{event_id}-0",
-                tick_event_time=datetime(
-                    2026, 7, 24, 1, tzinfo=timezone.utc
-                ),
-                tick_sequence_id=1,
-                match_result=MatchResult(
-                    matched=True,
-                    fill_price=Decimal(price),
-                    fill_volume=volume,
-                    reason=None,
-                    engine_name="VN",
-                    engine_version="1.0",
-                ),
-            ),
+            settlement_command(order_id, event_id, price, volume),
         )
 
 
@@ -97,6 +101,68 @@ def create_close_order(
                 limit_price=Decimal("3520"),
                 volume=volume,
             ),
+        )
+
+
+def add_closed_history_detail(context):
+    """在同一持仓下插入一条不应参与下单、成交或撤单的已关闭历史明细。"""
+
+    with SessionLocal() as db:
+        position = db.scalar(
+            select(Position).where(
+                Position.account_id == context.account_id
+            )
+        )
+        detail_id = f"PD-HISTORY-{uuid4().hex}"
+        db.add(
+            PositionDetail(
+                position_detail_id=detail_id,
+                position_id=position.position_id,
+                account_id=context.account_id,
+                open_trade_id=f"T-HISTORY-{uuid4().hex}",
+                order_book_id=context.symbol,
+                exchange_id=context.exchange_id,
+                symbol=context.symbol,
+                direction=position.direction,
+                open_trading_day=(
+                    context.trading_day - timedelta(days=10)
+                ),
+                open_price=Decimal("3400"),
+                original_volume=1,
+                remaining_volume=0,
+                frozen_volume=0,
+                open_margin=Decimal("4200"),
+                remaining_margin=Decimal("0"),
+                open_commission=Decimal("3"),
+                status="CLOSED",
+            )
+        )
+        db.commit()
+        return detail_id
+
+
+def get_unreferenced_detail_id(order_id, account_id):
+    """返回同一持仓下未被指定平仓订单Allocation引用的一条明细。"""
+
+    with SessionLocal() as db:
+        referenced_ids = set(
+            db.scalars(
+                select(
+                    PositionFreezeAllocation.position_detail_id
+                ).where(
+                    PositionFreezeAllocation.order_id == order_id
+                )
+            ).all()
+        )
+        return db.scalar(
+            select(PositionDetail.position_detail_id)
+            .where(
+                PositionDetail.account_id == account_id,
+                PositionDetail.position_detail_id.not_in(
+                    referenced_ids
+                ),
+            )
+            .order_by(PositionDetail.id)
         )
 
 
@@ -336,6 +402,122 @@ def test_close_today_cannot_use_yesterday_position(integration_context):
     assert close_order.frozen_position_volume == 4
 
 
+def test_close_order_does_not_lock_closed_history_detail(
+    integration_context,
+):
+    """真实PostgreSQL验证平仓下单只锁存在可平数量的明细。"""
+
+    create_open_position(integration_context, volume=5)
+    history_detail_id = add_closed_history_detail(integration_context)
+
+    with SessionLocal() as blocker:
+        blocker.scalar(
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_detail_id == history_detail_id
+            )
+            .with_for_update()
+        )
+        with SessionLocal() as db:
+            # 如果下单仍试图锁已关闭明细，应在500ms内失败，而不是让测试挂起。
+            db.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            order = make_order_service(integration_context).create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id="CLOSE-NARROW-CREATE",
+                    direction="SELL",
+                    offset_flag="CLOSE",
+                    limit_price=Decimal("3520"),
+                    volume=2,
+                ),
+            )
+
+    assert order.status == "ACCEPTED"
+
+
+def test_close_settlement_only_locks_allocation_details(
+    integration_context,
+):
+    """成交不得等待同一Position下、但不属于本订单的明细行锁。"""
+
+    create_open_position(integration_context, volume=5)
+    create_open_position(integration_context, volume=5)
+    close_order = create_close_order(
+        integration_context,
+        client_order_id="CLOSE-NARROW-SETTLE",
+        volume=4,
+    )
+    unrelated_detail_id = get_unreferenced_detail_id(
+        close_order.order_id,
+        integration_context.account_id,
+    )
+    assert unrelated_detail_id is not None
+
+    with SessionLocal() as blocker:
+        blocker.scalar(
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_detail_id
+                == unrelated_detail_id
+            )
+            .with_for_update()
+        )
+        with SessionLocal() as db:
+            db.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            result = TradeSettlementService().settle(
+                db,
+                settlement_command(
+                    close_order.order_id,
+                    "TICK-NARROW-SETTLE",
+                    "3522",
+                    2,
+                ),
+            )
+
+    assert result.action == "SETTLED"
+
+
+def test_close_cancellation_only_locks_allocation_details(
+    integration_context,
+):
+    """撤单不得等待同一Position下、但不属于本订单的明细行锁。"""
+
+    create_open_position(integration_context, volume=5)
+    create_open_position(integration_context, volume=5)
+    close_order = create_close_order(
+        integration_context,
+        client_order_id="CLOSE-NARROW-CANCEL",
+        volume=4,
+    )
+    unrelated_detail_id = get_unreferenced_detail_id(
+        close_order.order_id,
+        integration_context.account_id,
+    )
+    assert unrelated_detail_id is not None
+
+    with SessionLocal() as blocker:
+        blocker.scalar(
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_detail_id
+                == unrelated_detail_id
+            )
+            .with_for_update()
+        )
+        with SessionLocal() as db:
+            db.execute(text("SET LOCAL lock_timeout = '500ms'"))
+            result = OrderCancellationService().cancel_order(
+                db=db,
+                order_id=close_order.order_id,
+                request=OrderCancelRequest(
+                    account_id=integration_context.account_id
+                ),
+            )
+
+    assert result.status == "CANCELLED"
+
+
 def test_concurrent_close_orders_cannot_double_freeze(integration_context):
     create_open_position(integration_context)
     barrier = Barrier(2)
@@ -442,6 +624,16 @@ def test_close_fill_and_cancel_concurrency_has_one_legal_result(
         assert sum(
             item.remaining_frozen_volume for item in allocations
         ) == 0
+        assert all(
+            item.original_frozen_commission
+            == item.remaining_frozen_commission
+            + item.consumed_commission
+            + item.released_commission
+            for item in allocations
+        )
+        assert sum(
+            item.remaining_frozen_commission for item in allocations
+        ) == order.frozen_commission == Decimal("0.000000")
 
 
 def test_cancel_one_close_order_does_not_release_another_order(
@@ -495,6 +687,18 @@ def test_cancel_one_close_order_does_not_release_another_order(
         assert first_allocation.remaining_frozen_volume == 0
         assert second_allocation.released_volume == 0
         assert second_allocation.remaining_frozen_volume == 3
+        assert (
+            first_allocation.original_frozen_commission
+            == first_allocation.remaining_frozen_commission
+            + first_allocation.consumed_commission
+            + first_allocation.released_commission
+        )
+        assert (
+            second_allocation.original_frozen_commission
+            == second_allocation.remaining_frozen_commission
+            + second_allocation.consumed_commission
+            + second_allocation.released_commission
+        )
 
 
 def test_concurrent_ticks_cannot_overfill_close_order(integration_context):
@@ -544,6 +748,13 @@ def test_concurrent_ticks_cannot_overfill_close_order(integration_context):
         assert position.frozen_volume == 0
         assert allocation.consumed_volume == 4
         assert allocation.remaining_frozen_volume == 0
+        assert (
+            allocation.original_frozen_commission
+            == allocation.remaining_frozen_commission
+            + allocation.consumed_commission
+            + allocation.released_commission
+        )
+        assert allocation.remaining_frozen_commission == Decimal("0.000000")
 
 
 class FailingCloseOutbox(OutboxRepository):

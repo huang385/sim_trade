@@ -345,6 +345,105 @@ def seed_cross_day_close(session_factory):
         db.commit()
 
 
+def configure_tail_fee(session_factory):
+    """把两手平仓订单改成可稳定复现六位量化尾差的按金额费率。"""
+
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        frozen_commission = Decimal("0.070401")
+
+        order.commission_type = "BY_AMOUNT"
+        order.commission_parameter = Decimal("0.000001000015")
+        order.commission_contract_multiplier = Decimal("10")
+        order.frozen_commission = frozen_commission
+
+        allocation.commission_type = "BY_AMOUNT"
+        allocation.commission_parameter = Decimal("0.000001000015")
+        allocation.commission_contract_multiplier = Decimal("10")
+        allocation.original_frozen_commission = frozen_commission
+        allocation.remaining_frozen_commission = frozen_commission
+
+        account.frozen_commission = frozen_commission
+        account.available_cash = Decimal("57970") - frozen_commission
+        db.commit()
+
+
+def split_tail_position_into_two_details(session_factory):
+    """把同一费用桶的两手持仓拆成两条各一手明细。"""
+
+    with session_factory() as db:
+        old_detail = db.scalar(select(PositionDetail))
+        old_allocation = db.scalar(select(PositionFreezeAllocation))
+        db.delete(old_allocation)
+        db.delete(old_detail)
+        db.flush()
+
+        details = []
+        allocations = []
+        commission_shares = (
+            Decimal("0.035201"),
+            Decimal("0.035200"),
+        )
+        for index, commission in enumerate(commission_shares, start=1):
+            detail_id = f"PD-{index}"
+            details.append(
+                PositionDetail(
+                    position_detail_id=detail_id,
+                    position_id="P-1",
+                    account_id="A001",
+                    open_trade_id=f"T-OPEN-{index}",
+                    order_book_id="AG2609",
+                    exchange_id="SHFE",
+                    symbol="AG2609",
+                    direction="LONG",
+                    open_trading_day=TRADING_DAY,
+                    open_price=Decimal("3500"),
+                    original_volume=1,
+                    remaining_volume=1,
+                    frozen_volume=1,
+                    open_margin=Decimal("4200"),
+                    remaining_margin=Decimal("4200"),
+                    open_commission=Decimal("15"),
+                    status="OPEN",
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+            allocations.append(
+                PositionFreezeAllocation(
+                    allocation_id=f"PFA-{index}",
+                    order_id="O-CLOSE",
+                    position_id="P-1",
+                    position_detail_id=detail_id,
+                    account_id="A001",
+                    exchange_id="SHFE",
+                    symbol="AG2609",
+                    offset_flag="CLOSE_TODAY",
+                    resolved_offset_flag="CLOSE_TODAY",
+                    commission_type="BY_AMOUNT",
+                    commission_parameter=Decimal("0.000001000015"),
+                    commission_contract_multiplier=Decimal("10"),
+                    original_frozen_volume=1,
+                    remaining_frozen_volume=1,
+                    consumed_volume=0,
+                    released_volume=0,
+                    original_frozen_commission=commission,
+                    remaining_frozen_commission=commission,
+                    consumed_commission=Decimal("0"),
+                    released_commission=Decimal("0"),
+                    status="ACTIVE",
+                    created_at=NOW,
+                    updated_at=NOW,
+                )
+            )
+        db.add_all(details)
+        db.flush()
+        db.add_all(allocations)
+        db.commit()
+
+
 @pytest.mark.parametrize(
     ("direction", "close_price", "expected_pnl"),
     [
@@ -669,6 +768,124 @@ def test_close_by_amount_uses_fill_price_and_reconciles_frozen_difference():
         assert account.available_cash == Decimal("71219.434000")
         assert allocation.consumed_commission == Decimal("10.500000")
         assert allocation.released_commission == Decimal("3.500000")
+
+
+def test_by_amount_partial_fills_consume_last_frozen_commission_tail():
+    """第二次部分成交必须消费剩余资源，不得按一手重新量化后拒绝。"""
+
+    session_factory = factory()
+    seed_close(
+        session_factory,
+        order_volume=2,
+        position_volume=2,
+        open_margin=Decimal("8400"),
+    )
+    configure_tail_fee(session_factory)
+
+    service = TradeSettlementService()
+    with session_factory() as db:
+        first = service.settle(
+            db,
+            command("TICK-TAIL-1", "3520", 1),
+        )
+        assert first.action == "SETTLED"
+    with session_factory() as db:
+        second = service.settle(
+            db,
+            command("TICK-TAIL-2", "3520", 1),
+        )
+        assert second.action == "SETTLED"
+
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        trades = db.scalars(select(Trade).order_by(Trade.id)).all()
+
+        assert order.status == "FILLED"
+        assert order.frozen_commission == Decimal("0.000000")
+        assert allocation.remaining_frozen_commission == Decimal("0.000000")
+        assert allocation.consumed_commission == Decimal("0.070401")
+        assert (
+            allocation.original_frozen_commission
+            == allocation.remaining_frozen_commission
+            + allocation.consumed_commission
+            + allocation.released_commission
+        )
+        # 每笔Trade按本次成交量独立计算实际手续费；预计冻结资源则严格
+        # 守恒，第二笔只释放首笔比例分配后留下的0.035200。
+        assert [item.commission for item in trades] == [
+            Decimal("0.035201"),
+            Decimal("0.035201"),
+        ]
+        assert account.frozen_commission == Decimal("0.000000")
+        assert account.used_commission == Decimal("30.070402")
+        assert account.available_cash == Decimal("66769.929598")
+
+
+def test_fee_bucket_total_is_same_for_one_or_two_position_details():
+    """同桶两手拆成一条或两条持仓时，冻结、成交和资金结果必须一致。"""
+
+    snapshots = []
+    for split_details in (False, True):
+        session_factory = factory()
+        seed_close(
+            session_factory,
+            order_volume=2,
+            position_volume=2,
+            open_margin=Decimal("8400"),
+        )
+        configure_tail_fee(session_factory)
+        if split_details:
+            split_tail_position_into_two_details(session_factory)
+
+        with session_factory() as db:
+            order = db.scalar(select(Order))
+            allocations = db.scalars(
+                select(PositionFreezeAllocation).order_by(
+                    PositionFreezeAllocation.id
+                )
+            ).all()
+            assert sum(
+                item.original_frozen_commission for item in allocations
+            ) == order.frozen_commission == Decimal("0.070401")
+
+        with session_factory() as db:
+            TradeSettlementService().settle(
+                db,
+                command(
+                    f"TICK-BUCKET-{int(split_details)}",
+                    "3520",
+                    2,
+                ),
+            )
+
+        with session_factory() as db:
+            trade = db.scalar(select(Trade))
+            account = db.scalar(select(Account))
+            trade_allocations = db.scalars(
+                select(TradePositionAllocation).order_by(
+                    TradePositionAllocation.id
+                )
+            ).all()
+            assert sum(
+                item.commission for item in trade_allocations
+            ) == trade.commission == Decimal("0.070401")
+            if split_details:
+                assert [item.commission for item in trade_allocations] == [
+                    Decimal("0.035201"),
+                    Decimal("0.035200"),
+                ]
+            snapshots.append(
+                (
+                    trade.commission,
+                    account.cash_balance,
+                    account.available_cash,
+                    account.used_commission,
+                )
+            )
+
+    assert snapshots[0] == snapshots[1]
 
 
 def test_plain_close_partial_fills_charge_yesterday_then_cross_into_today():
