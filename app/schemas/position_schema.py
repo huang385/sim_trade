@@ -9,7 +9,7 @@ class PositionResponse(BaseModel):
     持仓汇总查询响应。
 
     返回账户当前按合约和多空方向汇总后的结果，不展开PositionDetail逐笔
-    明细。当前阶段只体现开仓形成的数量、成本和占用保证金。
+    明细。平仓成交后数量、成本、占用保证金和已实现盈亏同步更新。
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -33,7 +33,7 @@ class PositionResponse(BaseModel):
     average_open_price: Decimal
     position_cost: Decimal
     used_margin: Decimal
-    # 已实现与未实现盈亏，本阶段仍为0
+    # 已实现盈亏盘中累计；未实现盈亏仍等待后续盯市阶段更新
     realized_pnl: Decimal
     unrealized_pnl: Decimal
     # 交易日和生命周期时间

@@ -55,6 +55,25 @@ class PositionRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_details_for_update(
+        db: Session,
+        *,
+        position_id: str,
+    ) -> Sequence[PositionDetail]:
+        """按FIFO顺序锁定持仓的全部未平逐笔明细。"""
+
+        statement = (
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_id == position_id,
+                PositionDetail.remaining_volume > 0,
+            )
+            .order_by(PositionDetail.id)
+            .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def add(db: Session, position: Position) -> None:
         """加入一条新持仓汇总，不在Repository中提交。"""
 

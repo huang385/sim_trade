@@ -9,6 +9,14 @@ from app.models.order import Order
 from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
 
 
+SUPPORTED_ACTIVE_OFFSET_FLAGS = (
+    OffsetFlag.OPEN.value,
+    OffsetFlag.CLOSE.value,
+    OffsetFlag.CLOSE_TODAY.value,
+    OffsetFlag.CLOSE_YESTERDAY.value,
+)
+
+
 class OrderRepository:
     """
     订单数据库仓储。
@@ -100,7 +108,7 @@ class OrderRepository:
                 ),
                 Order.remaining_volume > 0,
                 Order.order_type == OrderType.LIMIT.value,
-                Order.offset_flag == OffsetFlag.OPEN.value,
+                Order.offset_flag.in_(SUPPORTED_ACTIVE_OFFSET_FLAGS),
             )
             .order_by(Order.id)
             .limit(batch_size)
@@ -127,6 +135,7 @@ class OrderRepository:
         submit_status: str,
         frozen_margin: Decimal,
         frozen_commission: Decimal,
+        frozen_position_volume: int,
         created_at: datetime,
         accepted_at: datetime,
     ) -> Order:
@@ -160,8 +169,7 @@ class OrderRepository:
             submit_status=submit_status,
             frozen_margin=frozen_margin,
             frozen_commission=frozen_commission,
-            # 开仓订单不冻结已有持仓。
-            frozen_position_volume=0,
+            frozen_position_volume=frozen_position_volume,
             reject_code=None,
             reject_message=None,
             created_at=created_at,

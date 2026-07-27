@@ -40,6 +40,10 @@ class PositionDetail(Base):
             "frozen_volume <= remaining_volume",
             name="ck_position_detail_frozen_limit",
         ),
+        CheckConstraint(
+            "remaining_margin >= 0",
+            name="ck_position_detail_remaining_margin_nonnegative",
+        ),
     )
 
     # 数据库内部自增主键
@@ -78,19 +82,24 @@ class PositionDetail(Base):
     # 原始开仓数量，创建后不再修改
     original_volume: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # 尚未被平仓的数量，本阶段等于original_volume
+    # 尚未被平仓的数量，平仓成交后按实际消费数量递减
     remaining_volume: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # 被平仓委托冻结的明细数量，本阶段固定为0
+    # 被尚未完成的平仓订单冻结的明细数量
     frozen_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 该笔成交从订单冻结保证金中分配到的金额
     open_margin: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
+    # 当前尚未随平仓释放的保证金；open_margin保留原始审计值不再修改
+    remaining_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False
+    )
+
     # 该笔成交实际确认的开仓手续费
     open_commission: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
-    # 明细状态，本阶段创建时固定为OPEN
+    # 明细状态；剩余数量归零后更新为CLOSED
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="OPEN")
 
     # 明细创建时间

@@ -87,7 +87,7 @@ class Position(Base):
     # 前一交易日结转的持仓数量；本阶段暂不执行每日结转
     yesterday_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # 被平仓订单占用的持仓数量；当前只做开仓，因此保持0
+    # 被尚未完成的平仓订单冻结的持仓数量
     frozen_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 可用于平仓的数量，必须等于总持仓量减冻结持仓量
@@ -108,7 +108,7 @@ class Position(Base):
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
 
-    # 已实现盈亏；只有后续平仓阶段才会变化
+    # 当前持仓方向累计确认的已实现盈亏
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )

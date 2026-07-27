@@ -17,6 +17,7 @@ from app.models.outbox_event import OutboxEvent
 from app.models.trade import Trade
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -146,6 +147,11 @@ def integration_context():
                     OutboxEvent.aggregate_id.in_(order_ids),
                 )
             )
+            db.execute(
+                delete(PositionFreezeAllocation).where(
+                    PositionFreezeAllocation.order_id.in_(order_ids)
+                )
+            )
         db.execute(
             delete(PositionDetail).where(
                 PositionDetail.account_id == context.account_id
@@ -185,6 +191,8 @@ def make_request(
     *,
     client_order_id: str,
     direction: str = "BUY",
+    offset_flag: str = "OPEN",
+    limit_price: Decimal = Decimal("3500"),
     volume: int = 2,
 ) -> OrderCreateRequest:
     """构造使用当前集成测试参考数据的订单请求。"""
@@ -195,9 +203,9 @@ def make_request(
         exchange_id=context.exchange_id,
         symbol=context.symbol,
         direction=direction,
-        offset_flag="OPEN",
+        offset_flag=offset_flag,
         order_type="LIMIT",
-        limit_price=Decimal("3500"),
+        limit_price=limit_price,
         volume=volume,
     )
 

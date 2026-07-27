@@ -67,6 +67,12 @@ class AcceptedOrderEventService:
     # TRADE_CREATED 与订单状态事件发布到同一 Stream。活动订单消费者只需
     # 安全确认它，不维护成交派生数据，避免把合法成交事件误送入死信。
     PASSTHROUGH_EVENT_TYPES = {"TRADE_CREATED"}
+    SUPPORTED_OFFSET_FLAGS = {
+        OffsetFlag.OPEN.value,
+        OffsetFlag.CLOSE.value,
+        OffsetFlag.CLOSE_TODAY.value,
+        OffsetFlag.CLOSE_YESTERDAY.value,
+    }
 
     def __init__(
         self,
@@ -164,7 +170,7 @@ class AcceptedOrderEventService:
             or order.remaining_volume <= 0
             or order.status not in self.ACTIVE_STATUSES
             or order.order_type != OrderType.LIMIT.value
-            or order.offset_flag != OffsetFlag.OPEN.value
+            or order.offset_flag not in self.SUPPORTED_OFFSET_FLAGS
         )
         if should_remove:
             self.active_order_index.remove_active_order(

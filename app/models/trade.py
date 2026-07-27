@@ -85,7 +85,7 @@ class Trade(Base):
     # 原订单买卖方向：BUY或SELL
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
 
-    # 原订单开平标志，本阶段固定为OPEN
+    # 原订单开平标志：OPEN、CLOSE、CLOSE_TODAY或CLOSE_YESTERDAY
     offset_flag: Mapped[str] = mapped_column(String(32), nullable=False)
 
     # 实际成交价格：买入使用卖一价，卖出使用买一价
@@ -97,13 +97,13 @@ class Trade(Base):
     # 成交金额 = 成交价 × 成交量 × 合约乘数
     turnover: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
-    # 本次从订单冻结保证金转入持仓占用保证金的金额
+    # OPEN表示新增占用保证金，CLOSE类成交表示本次释放的保证金
     margin: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
     # 本次从订单冻结手续费转为账户实际手续费的金额
     commission: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
-    # 开仓不会产生已实现盈亏，本阶段固定为0
+    # OPEN成交为0；CLOSE类成交记录本次逐笔计算的已实现盈亏
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )

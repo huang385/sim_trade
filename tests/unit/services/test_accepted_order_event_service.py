@@ -155,7 +155,7 @@ def test_zero_remaining_volume_removes_old_index():
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("order_type", "MARKET"), ("offset_flag", "CLOSE"), ("status", "NEW")],
+    [("order_type", "MARKET"), ("offset_flag", "UNKNOWN"), ("status", "NEW")],
 )
 def test_non_active_order_shape_is_not_registered(field, value):
     service, _, active_index = make_service(make_order(**{field: value}))

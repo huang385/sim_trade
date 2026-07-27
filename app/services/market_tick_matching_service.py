@@ -56,6 +56,12 @@ class MarketTickMatchingService:
         OrderStatus.ACCEPTED.value,
         OrderStatus.PARTIALLY_FILLED.value,
     }
+    SUPPORTED_OFFSET_FLAGS = {
+        OffsetFlag.OPEN.value,
+        OffsetFlag.CLOSE.value,
+        OffsetFlag.CLOSE_TODAY.value,
+        OffsetFlag.CLOSE_YESTERDAY.value,
+    }
 
     def __init__(
         self,
@@ -126,7 +132,7 @@ class MarketTickMatchingService:
             and order.status in cls.ACTIVE_STATUSES
             and order.remaining_volume > 0
             and order.order_type == OrderType.LIMIT.value
-            and order.offset_flag == OffsetFlag.OPEN.value
+            and order.offset_flag in cls.SUPPORTED_OFFSET_FLAGS
             and order.exchange_id == event.exchange_id
             and order.symbol == event.symbol
         )

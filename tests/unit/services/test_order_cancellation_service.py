@@ -205,10 +205,10 @@ def test_repeated_cancel_ends_transaction_without_second_business_change(status)
     ("field", "value"),
     [
         ("order_type", "MARKET"),
-        ("offset_flag", "CLOSE"),
+        ("offset_flag", "UNKNOWN"),
     ],
 )
-def test_non_limit_or_non_open_order_is_rejected_before_account_lock(
+def test_non_limit_or_unsupported_offset_is_rejected_before_account_lock(
     field,
     value,
 ):

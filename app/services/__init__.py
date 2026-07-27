@@ -40,6 +40,15 @@ from app.services.trade_settlement_service import (
     TradeSettlementService,
 )
 from app.services.market_tick_matching_service import MarketTickMatchingService
+from app.services.position_close_allocator import (
+    PositionCloseAllocator,
+    PositionFreezePlan,
+)
+from app.services.realized_pnl_calculator import RealizedPnlCalculator
+from app.services.margin_release_calculator import MarginReleaseCalculator
+from app.services.close_trade_settlement_handler import (
+    CloseTradeSettlementHandler,
+)
 
 
 __all__ = [
@@ -74,4 +83,9 @@ __all__ = [
     "TradeQueryService",
     "PositionQueryService",
     "MarketTickMatchingService",
+    "PositionCloseAllocator",
+    "PositionFreezePlan",
+    "RealizedPnlCalculator",
+    "MarginReleaseCalculator",
+    "CloseTradeSettlementHandler",
 ]

@@ -13,12 +13,12 @@ from app.models.account import Account
 
 class OrderFreezeService:
     """
-    开仓订单资金冻结服务。
+    开平仓订单资源冻结与撤单释放服务。
 
     本服务接收已经被 SELECT FOR UPDATE 锁定的账户对象，
     检查账户状态和可用资金后直接修改 ORM 字段。
 
-    只允许修改：
+    开仓冻结允许修改：
         available_cash
         frozen_margin
         frozen_commission
@@ -34,6 +34,21 @@ class OrderFreezeService:
     """
 
     @staticmethod
+    def validate_account_tradable(account: Account | None) -> None:
+        """在冻结任何资源前确认账户存在且允许交易。"""
+
+        if account is None:
+            raise ResourceNotFoundError(
+                "账户不存在",
+                error_code="ACCOUNT_NOT_FOUND",
+            )
+        if account.status != AccountStatus.NORMAL.value:
+            raise BusinessRuleError(
+                "账户当前不可交易",
+                error_code="ACCOUNT_NOT_TRADABLE",
+            )
+
+    @staticmethod
     def freeze_open_order(
         *,
         account: Account | None,
@@ -42,19 +57,7 @@ class OrderFreezeService:
     ) -> None:
         """检查账户并冻结预计保证金和预计手续费。"""
 
-        # 账户不存在属于资源不存在，不创建拒绝订单。
-        if account is None:
-            raise ResourceNotFoundError(
-                "账户不存在",
-                error_code="ACCOUNT_NOT_FOUND",
-            )
-
-        # 只有 NORMAL 账户允许继续下单。
-        if account.status != AccountStatus.NORMAL.value:
-            raise BusinessRuleError(
-                "账户当前不可交易",
-                error_code="ACCOUNT_NOT_TRADABLE",
-            )
+        OrderFreezeService.validate_account_tradable(account)
 
         if frozen_margin < Decimal("0"):
             raise BusinessValidationError(
@@ -89,6 +92,34 @@ class OrderFreezeService:
         )
         account.frozen_commission = quantize_money(
             account.frozen_commission + frozen_commission
+        )
+
+    @staticmethod
+    def freeze_close_order_commission(
+        *,
+        account: Account | None,
+        frozen_commission: Decimal,
+    ) -> None:
+        """平仓下单只冻结预计手续费，不新增占用保证金。"""
+
+        OrderFreezeService.freeze_open_order(
+            account=account,
+            frozen_margin=Decimal("0"),
+            frozen_commission=frozen_commission,
+        )
+
+    @staticmethod
+    def release_close_order_commission(
+        *,
+        account: Account | None,
+        frozen_commission: Decimal,
+    ) -> None:
+        """平仓撤单只把剩余冻结手续费退回可用资金。"""
+
+        OrderFreezeService.release_open_order_frozen_resources(
+            account=account,
+            frozen_margin=Decimal("0"),
+            frozen_commission=frozen_commission,
         )
 
     @staticmethod

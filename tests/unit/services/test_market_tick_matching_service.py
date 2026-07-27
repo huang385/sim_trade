@@ -180,8 +180,7 @@ def test_limit_open_orders_each_call_injected_engine_and_settle():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"offset_flag": "CLOSE"},
-        {"offset_flag": "CLOSE_TODAY"},
+        {"offset_flag": "UNKNOWN"},
         {"order_type": "MARKET"},
     ],
 )

@@ -18,20 +18,20 @@ class OrderValidationService:
 
     校验顺序：
     1. 合约存在且处于可交易状态；
-    2. 当前版本只接受限价开仓；
+    2. 当前版本只接受期货限价开仓和平仓；
     3. 价格和数量必须为正数；
     4. 数量符合合约最小、最大下单量；
     5. 价格符合合约最小变动价位。
     """
 
     @classmethod
-    def validate_open_order(
+    def validate_order(
         cls,
         *,
         request: OrderCreateRequest,
         instrument: Instrument | None,
     ) -> None:
-        """校验一笔限价开仓订单。"""
+        """校验一笔限价开仓或平仓订单的公共规则。"""
 
         # RuleQueryService 正常情况下已经检查过合约，
         # 这里仍保留防御性校验，便于该服务被单独调用。
@@ -54,10 +54,14 @@ class OrderValidationService:
                 error_code="UNSUPPORTED_ORDER_TYPE",
             )
 
-        # 平仓依赖持仓与冻结持仓模块，当前阶段明确拒绝。
-        if request.offset_flag != OffsetFlag.OPEN:
+        if request.offset_flag not in {
+            OffsetFlag.OPEN,
+            OffsetFlag.CLOSE,
+            OffsetFlag.CLOSE_TODAY,
+            OffsetFlag.CLOSE_YESTERDAY,
+        }:
             raise BusinessValidationError(
-                "当前只支持开仓订单",
+                "不支持的开平标志",
                 error_code="UNSUPPORTED_OFFSET_FLAG",
             )
 
@@ -91,6 +95,22 @@ class OrderValidationService:
             price=request.limit_price,
             price_tick=instrument.price_tick,
         )
+
+    @classmethod
+    def validate_open_order(
+        cls,
+        *,
+        request: OrderCreateRequest,
+        instrument: Instrument | None,
+    ) -> None:
+        """兼容原有调用：校验公共规则后明确要求OPEN。"""
+
+        cls.validate_order(request=request, instrument=instrument)
+        if request.offset_flag != OffsetFlag.OPEN:
+            raise BusinessValidationError(
+                "当前方法只校验开仓订单",
+                error_code="UNSUPPORTED_OFFSET_FLAG",
+            )
 
     @staticmethod
     def validate_price_tick(

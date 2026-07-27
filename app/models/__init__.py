@@ -23,6 +23,7 @@ from app.models.outbox_event import OutboxEvent
 from app.models.trade import Trade
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.models.position_freeze_allocation import PositionFreezeAllocation
 
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "Trade",
     "Position",
     "PositionDetail",
+    "PositionFreezeAllocation",
 ]

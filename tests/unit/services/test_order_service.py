@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -93,6 +93,9 @@ def make_service(
     account_repository=None,
     rule_query_service=None,
     outbox_repository=None,
+    position_repository=None,
+    allocation_repository=None,
+    close_allocator=None,
 ):
     order_repository = order_repository or Mock()
     account_repository = account_repository or Mock()
@@ -107,6 +110,9 @@ def make_service(
         margin_calculator=MarginCalculator(),
         fee_calculator=FeeCalculator(),
         outbox_repository=outbox_repository,
+        position_repository=position_repository,
+        allocation_repository=allocation_repository,
+        close_allocator=close_allocator,
         trading_day_provider=lambda: TRADING_DAY,
         order_id_factory=lambda: "O20260717000001",
         event_id_factory=lambda: "EVT-000001",
@@ -178,6 +184,98 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     account_repository.get_by_account_id_for_update.assert_not_called()
     order_repository.create.assert_not_called()
     db.commit.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("direction", "offset_flag", "position_direction", "commission"),
+    [
+        ("SELL", "CLOSE_TODAY", "LONG", Decimal("12.000000")),
+        ("BUY", "CLOSE_TODAY", "SHORT", Decimal("12.000000")),
+        ("SELL", "CLOSE_YESTERDAY", "LONG", Decimal("6.000000")),
+        ("BUY", "CLOSE", "SHORT", Decimal("6.000000")),
+    ],
+)
+def test_create_close_order_freezes_commission_and_position(
+    direction,
+    offset_flag,
+    position_direction,
+    commission,
+):
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    created_order = SimpleNamespace(order_id="O20260717000001")
+    order_repository.create.return_value = created_order
+    account = make_account()
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = account
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    detail = SimpleNamespace(
+        id=1,
+        position_detail_id="PD-1",
+        open_trading_day=(
+            TRADING_DAY - timedelta(days=1)
+            if offset_flag == "CLOSE_YESTERDAY"
+            else TRADING_DAY
+        ),
+        remaining_volume=5,
+        frozen_volume=0,
+        updated_at=None,
+    )
+    position = SimpleNamespace(
+        position_id="P-1",
+        frozen_volume=0,
+        available_volume=5,
+        updated_at=None,
+    )
+    position_repository = Mock()
+    position_repository.get_for_update.return_value = position
+    position_repository.list_details_for_update.return_value = [detail]
+    allocation_repository = Mock()
+    outbox_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+        position_repository=position_repository,
+        allocation_repository=allocation_repository,
+    )
+
+    result = service.create_order(
+        db,
+        make_request(
+            direction=direction,
+            offset_flag=offset_flag,
+        ),
+    )
+
+    assert result is created_order
+    assert account.available_cash == Decimal("100000") - commission
+    assert account.frozen_margin == Decimal("0")
+    assert account.frozen_commission == commission
+    assert position.frozen_volume == 2
+    assert position.available_volume == 3
+    assert detail.frozen_volume == 2
+    assert (
+        position_repository.get_for_update.call_args.kwargs["direction"]
+        == position_direction
+    )
+    create_args = order_repository.create.call_args.kwargs
+    assert create_args["frozen_margin"] == Decimal("0.000000")
+    assert create_args["frozen_commission"] == commission
+    assert create_args["frozen_position_volume"] == 2
+    allocation = allocation_repository.add.call_args.args[1]
+    assert allocation.original_frozen_volume == 2
+    assert allocation.remaining_frozen_volume == 2
+    assert allocation.status == "ACTIVE"
+    assert (
+        outbox_repository.create_event.call_args.kwargs["payload"][
+            "frozen_position_volume"
+        ]
+        == 2
+    )
 
 
 def test_duplicate_detected_after_account_lock_does_not_freeze_twice():

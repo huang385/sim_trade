@@ -14,11 +14,21 @@ from app.common.exceptions import (
     ResourceNotFoundError,
 )
 from app.common.time_utils import utc_now
-from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderStatus,
+    OrderType,
+    PositionDirection,
+    PositionFreezeAllocationStatus,
+)
 from app.models.order import Order
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
+from app.repositories.position_freeze_allocation_repository import (
+    PositionFreezeAllocationRepository,
+)
+from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.order_freeze_service import OrderFreezeService
 
@@ -37,7 +47,7 @@ def _decimal_string(value: Decimal) -> str:
 
 class OrderCancellationService:
     """
-    限价开仓订单主动撤销的事务服务。
+    期货限价开平仓订单主动撤销的事务服务。
 
     撤单与成交统一先锁 Order、再锁 Account。订单更新、剩余冻结资源释放
     和撤单 Outbox 事件必须在同一个 PostgreSQL 事务中成功或回滚。
@@ -59,6 +69,8 @@ class OrderCancellationService:
         account_repository: AccountRepository | None = None,
         freeze_service: OrderFreezeService | None = None,
         outbox_repository: OutboxRepository | None = None,
+        position_repository: PositionRepository | None = None,
+        allocation_repository: PositionFreezeAllocationRepository | None = None,
         event_id_factory: Callable[[], str] = generate_cancel_event_id,
         time_provider: Callable[[], datetime] = utc_now,
     ):
@@ -66,6 +78,10 @@ class OrderCancellationService:
         self.account_repository = account_repository or AccountRepository()
         self.freeze_service = freeze_service or OrderFreezeService()
         self.outbox_repository = outbox_repository or OutboxRepository()
+        self.position_repository = position_repository or PositionRepository()
+        self.allocation_repository = (
+            allocation_repository or PositionFreezeAllocationRepository()
+        )
         self.event_id_factory = event_id_factory
         self.time_provider = time_provider
 
@@ -96,27 +112,6 @@ class OrderCancellationService:
                     "订单不属于指定账户",
                     error_code="ORDER_ACCOUNT_MISMATCH",
                 )
-
-            # 当前服务只实现“限价开仓订单”的资金释放。这里必须再次校验
-            # 数据库中的订单类型和开平标志，不能仅依赖下单入口的校验，
-            # 否则未来平仓订单进入活动状态后可能误用开仓撤单流程。
-            if (
-                order.order_type != OrderType.LIMIT.value
-                or order.offset_flag != OffsetFlag.OPEN.value
-            ):
-                raise ResourceConflictError(
-                    "当前撤单服务仅支持限价开仓订单",
-                    error_code="ORDER_NOT_CANCELLABLE",
-                )
-
-            # 开仓订单只冻结资金，不应冻结任何已有持仓。非零值表示订单
-            # 数据已经违反业务约束，必须中止并回滚，不能通过清零掩盖问题。
-            if order.frozen_position_volume != 0:
-                raise DataAccessError(
-                    "开仓订单冻结持仓数量不为0",
-                    error_code="CANCEL_ORDER_STATE_INCONSISTENT",
-                )
-
             # 已撤销终态直接幂等返回，不锁账户、不释放资金、不创建新事件，
             # cancelled_at 也保持第一次撤单写入的值。订单查询使用了
             # SELECT FOR UPDATE，因此返回前必须主动提交并刷新，及时释放行锁。
@@ -124,6 +119,12 @@ class OrderCancellationService:
                 db.commit()
                 db.refresh(order)
                 return order
+
+            if order.order_type != OrderType.LIMIT.value:
+                raise ResourceConflictError(
+                    "当前撤单服务仅支持限价订单",
+                    error_code="ORDER_NOT_CANCELLABLE",
+                )
             if order.status not in self.CANCELLABLE_STATUSES:
                 raise ResourceConflictError(
                     "订单当前状态不允许撤销",
@@ -134,8 +135,36 @@ class OrderCancellationService:
                     "活动订单剩余数量不合法",
                     error_code="CANCEL_ORDER_STATE_INCONSISTENT",
                 )
+            if order.offset_flag == OffsetFlag.OPEN.value:
+                if order.frozen_position_volume != 0:
+                    raise DataAccessError(
+                        "开仓订单冻结持仓数量不为0",
+                        error_code="CANCEL_ORDER_STATE_INCONSISTENT",
+                    )
+            elif order.offset_flag in {
+                OffsetFlag.CLOSE.value,
+                OffsetFlag.CLOSE_TODAY.value,
+                OffsetFlag.CLOSE_YESTERDAY.value,
+            }:
+                if (
+                    quantize_money(order.frozen_margin)
+                    != Decimal("0.000000")
+                    or order.frozen_position_volume
+                    != order.remaining_volume
+                ):
+                    raise DataAccessError(
+                        "平仓订单冻结资源与剩余数量不一致",
+                        error_code="CANCEL_ORDER_STATE_INCONSISTENT",
+                    )
+            else:
+                raise ResourceConflictError(
+                    "当前订单开平标志不支持撤单",
+                    error_code="ORDER_NOT_CANCELLABLE",
+                )
 
-            # 固定锁顺序第二步：订单锁成功后再锁账户。撤单不访问持仓。
+            cancelled_at = self.time_provider()
+            # 固定锁顺序第二步：先锁账户；平仓撤单随后继续锁持仓、
+            # 逐笔明细和本订单Allocation，开仓撤单不访问持仓。
             account = self.account_repository.get_by_account_id_for_update(
                 db,
                 order.account_id,
@@ -143,13 +172,93 @@ class OrderCancellationService:
             cancel_volume = order.remaining_volume
             released_margin = quantize_money(order.frozen_margin)
             released_commission = quantize_money(order.frozen_commission)
-            self.freeze_service.release_open_order_frozen_resources(
-                account=account,
-                frozen_margin=released_margin,
-                frozen_commission=released_commission,
-            )
 
-            cancelled_at = self.time_provider()
+            if order.offset_flag == OffsetFlag.OPEN.value:
+                self.freeze_service.release_open_order_frozen_resources(
+                    account=account,
+                    frozen_margin=released_margin,
+                    frozen_commission=released_commission,
+                )
+            elif order.offset_flag in {
+                OffsetFlag.CLOSE.value,
+                OffsetFlag.CLOSE_TODAY.value,
+                OffsetFlag.CLOSE_YESTERDAY.value,
+            }:
+                position_direction = (
+                    PositionDirection.LONG.value
+                    if order.direction == "SELL"
+                    else PositionDirection.SHORT.value
+                )
+                position = self.position_repository.get_for_update(
+                    db,
+                    account_id=order.account_id,
+                    exchange_id=order.exchange_id,
+                    symbol=order.symbol,
+                    direction=position_direction,
+                )
+                if position is None:
+                    raise DataAccessError(
+                        "平仓撤单对应持仓不存在",
+                        error_code="CANCEL_POSITION_INCONSISTENT",
+                    )
+                details = self.position_repository.list_details_for_update(
+                    db,
+                    position_id=position.position_id,
+                )
+                detail_map = {
+                    item.position_detail_id: item for item in details
+                }
+                allocations = (
+                    self.allocation_repository.list_by_order_for_update(
+                        db,
+                        order.order_id,
+                    )
+                )
+                allocation_volume = sum(
+                    item.remaining_frozen_volume for item in allocations
+                )
+                if allocation_volume != cancel_volume:
+                    raise DataAccessError(
+                        "平仓撤单冻结分配数量不一致",
+                        error_code="CANCEL_POSITION_INCONSISTENT",
+                    )
+                for allocation in allocations:
+                    released_volume = allocation.remaining_frozen_volume
+                    if released_volume <= 0:
+                        continue
+                    detail = detail_map.get(
+                        allocation.position_detail_id
+                    )
+                    if (
+                        detail is None
+                        or detail.frozen_volume < released_volume
+                    ):
+                        raise DataAccessError(
+                            "平仓撤单逐笔冻结数量不一致",
+                            error_code="CANCEL_POSITION_INCONSISTENT",
+                        )
+                    detail.frozen_volume -= released_volume
+                    detail.updated_at = cancelled_at
+                    allocation.remaining_frozen_volume = 0
+                    allocation.released_volume += released_volume
+                    allocation.status = (
+                        PositionFreezeAllocationStatus.RELEASED.value
+                    )
+                    allocation.updated_at = cancelled_at
+                if position.frozen_volume < cancel_volume:
+                    raise DataAccessError(
+                        "持仓汇总冻结数量不足",
+                        error_code="CANCEL_POSITION_INCONSISTENT",
+                    )
+                position.frozen_volume -= cancel_volume
+                position.available_volume += cancel_volume
+                position.updated_at = cancelled_at
+                self.freeze_service.release_close_order_commission(
+                    account=account,
+                    frozen_commission=released_commission,
+                )
+                order.frozen_position_volume = 0
+
             order.cancelled_volume += cancel_volume
             order.remaining_volume = 0
             order.frozen_margin = Decimal("0.000000")
@@ -212,6 +321,7 @@ class OrderCancellationService:
                     "frozen_commission": _decimal_string(
                         order.frozen_commission
                     ),
+                    "frozen_position_volume": order.frozen_position_volume,
                     "cancelled_at": cancelled_at.isoformat(),
                     "updated_at": order.updated_at.isoformat(),
                 },

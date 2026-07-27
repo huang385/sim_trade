@@ -9,6 +9,7 @@ from app.enums.order_enums import (
     OutboxStatus,
     PositionDirection,
     PositionDetailStatus,
+    PositionFreezeAllocationStatus,
 )
 from app.enums.reference_data_enums import (
     CommissionType,
@@ -31,4 +32,5 @@ __all__ = [
     "OutboxStatus",
     "PositionDirection",
     "PositionDetailStatus",
+    "PositionFreezeAllocationStatus",
 ]

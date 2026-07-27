@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from datetime import date
+from decimal import Decimal
 from typing import Sequence
 from uuid import uuid4
 
@@ -14,16 +15,29 @@ from app.common.exceptions import (
 )
 from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
-from app.enums.order_enums import OrderStatus, OrderSubmitStatus
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderDirection,
+    OrderStatus,
+    OrderSubmitStatus,
+    PositionDirection,
+    PositionFreezeAllocationStatus,
+)
 from app.models.order import Order
+from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
+from app.repositories.position_freeze_allocation_repository import (
+    PositionFreezeAllocationRepository,
+)
+from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCreateRequest
 from app.services.fee_calculator import FeeCalculator
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_validation_service import OrderValidationService
+from app.services.position_close_allocator import PositionCloseAllocator
 from app.services.rule_query_service import (
     RuleQueryService,
     get_rule_query_service,
@@ -55,6 +69,12 @@ def generate_event_id() -> str:
     return f"EVT-{uuid4().hex.upper()}"
 
 
+def generate_allocation_id() -> str:
+    """生成平仓订单逐笔持仓冻结分配编号。"""
+
+    return f"PFA{utc_now().strftime('%Y%m%d')}{uuid4().hex[:16].upper()}"
+
+
 def decimal_to_json_string(value) -> str:
     """把金额按数据库精度转换为 JSON 字符串，禁止转成 float。"""
 
@@ -63,7 +83,7 @@ def decimal_to_json_string(value) -> str:
 
 class OrderService:
     """
-    限价开仓订单接收、校验、资金冻结和落库的事务入口。
+    期货限价开平仓订单接收、资源冻结和落库的事务入口。
 
     OrderService 负责串联各个单一职责组件：
     1. OrderRepository 负责订单查询与写入；
@@ -88,9 +108,13 @@ class OrderService:
         margin_calculator: MarginCalculator,
         fee_calculator: FeeCalculator,
         outbox_repository: OutboxRepository | None = None,
+        position_repository: PositionRepository | None = None,
+        allocation_repository: PositionFreezeAllocationRepository | None = None,
+        close_allocator: PositionCloseAllocator | None = None,
         trading_day_provider: Callable[[], date] = date.today,
         order_id_factory: Callable[[], str] = generate_order_id,
         event_id_factory: Callable[[], str] = generate_event_id,
+        allocation_id_factory: Callable[[], str] = generate_allocation_id,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -102,9 +126,15 @@ class OrderService:
         self.margin_calculator = margin_calculator
         self.fee_calculator = fee_calculator
         self.outbox_repository = outbox_repository or OutboxRepository()
+        self.position_repository = position_repository or PositionRepository()
+        self.allocation_repository = (
+            allocation_repository or PositionFreezeAllocationRepository()
+        )
+        self.close_allocator = close_allocator or PositionCloseAllocator()
         self.trading_day_provider = trading_day_provider
         self.order_id_factory = order_id_factory
         self.event_id_factory = event_id_factory
+        self.allocation_id_factory = allocation_id_factory
 
     def create_order(
         self,
@@ -112,7 +142,7 @@ class OrderService:
         request: OrderCreateRequest,
     ) -> Order:
         """
-        创建并接受一笔限价开仓订单。
+        创建并接受一笔限价开仓或平仓订单。
 
         返回已有订单也属于成功，用于支持客户端在网络超时后
         使用相同 client_order_id 安全重试。
@@ -142,12 +172,13 @@ class OrderService:
             )
 
             # 校验订单类型、开平标志、价格档位和数量范围。
-            self.validation_service.validate_open_order(
+            self.validation_service.validate_order(
                 request=request,
                 instrument=rules.instrument,
             )
 
-            # 根据买卖方向选择多头或空头保证金率。
+            is_open = request.offset_flag == OffsetFlag.OPEN
+            # 只有开仓订单需要新增保证金；平仓订单只冻结手续费和持仓。
             frozen_margin = (
                 self.margin_calculator.calculate_open_margin(
                     price=request.limit_price,
@@ -156,6 +187,8 @@ class OrderService:
                     instrument=rules.instrument,
                     margin_rule=rules.margin_rule,
                 )
+                if is_open
+                else Decimal("0.000000")
             )
             # 按手续费规则计算开仓预计手续费。
             frozen_commission = self.fee_calculator.calculate(
@@ -185,18 +218,85 @@ class OrderService:
             if existing is not None:
                 return existing
 
-            # 检查账户状态和可用资金，并修改冻结相关字段。
-            self.freeze_service.freeze_open_order(
-                account=account,
-                frozen_margin=frozen_margin,
-                frozen_commission=frozen_commission,
-            )
+            # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
+            # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
+            self.freeze_service.validate_account_tradable(account)
 
-            # 订单已完成所有校验和资源冻结，可以进入 ACCEPTED 状态。
+            order_id = self.order_id_factory()
             accepted_at = utc_now()
+            frozen_position_volume = 0
+
+            if is_open:
+                self.freeze_service.freeze_open_order(
+                    account=account,
+                    frozen_margin=frozen_margin,
+                    frozen_commission=frozen_commission,
+                )
+            else:
+                # SELL平多、BUY平空，方向必须和开平标志共同解释。
+                position_direction = (
+                    PositionDirection.LONG.value
+                    if request.direction == OrderDirection.SELL
+                    else PositionDirection.SHORT.value
+                )
+                position = self.position_repository.get_for_update(
+                    db,
+                    account_id=request.account_id,
+                    exchange_id=rules.instrument.exchange_id,
+                    symbol=rules.instrument.symbol,
+                    direction=position_direction,
+                )
+                if position is None:
+                    raise ResourceNotFoundError(
+                        "可平持仓不存在",
+                        error_code="POSITION_NOT_FOUND",
+                    )
+                details = self.position_repository.list_details_for_update(
+                    db,
+                    position_id=position.position_id,
+                )
+                plans = self.close_allocator.allocate(
+                    details=details,
+                    offset_flag=request.offset_flag,
+                    trading_day=trading_day,
+                    volume=request.volume,
+                )
+                self.freeze_service.freeze_close_order_commission(
+                    account=account,
+                    frozen_commission=frozen_commission,
+                )
+                for plan in plans:
+                    plan.detail.frozen_volume += plan.volume
+                    plan.detail.updated_at = accepted_at
+                    self.allocation_repository.add(
+                        db,
+                        PositionFreezeAllocation(
+                            allocation_id=self.allocation_id_factory(),
+                            order_id=order_id,
+                            position_id=position.position_id,
+                            position_detail_id=plan.detail.position_detail_id,
+                            account_id=request.account_id,
+                            exchange_id=rules.instrument.exchange_id,
+                            symbol=rules.instrument.symbol,
+                            offset_flag=request.offset_flag.value,
+                            original_frozen_volume=plan.volume,
+                            remaining_frozen_volume=plan.volume,
+                            consumed_volume=0,
+                            released_volume=0,
+                            status=PositionFreezeAllocationStatus.ACTIVE.value,
+                            created_at=accepted_at,
+                            updated_at=accepted_at,
+                        ),
+                    )
+                position.frozen_volume += request.volume
+                position.available_volume -= request.volume
+                position.updated_at = accepted_at
+                frozen_position_volume = request.volume
+
+            # 订单已完成所有校验和资源冻结，可以进入ACCEPTED状态。
             order = self.order_repository.create(
                 db=db,
-                order_id=self.order_id_factory(),
+                order_id=order_id,
                 client_order_id=request.client_order_id,
                 account_id=request.account_id,
                 order_book_id=rules.instrument.order_book_id,
@@ -212,6 +312,7 @@ class OrderService:
                 submit_status=OrderSubmitStatus.ACCEPTED.value,
                 frozen_margin=frozen_margin,
                 frozen_commission=frozen_commission,
+                frozen_position_volume=frozen_position_volume,
                 created_at=accepted_at,
                 accepted_at=accepted_at,
             )
@@ -244,6 +345,13 @@ class OrderService:
                     ),
                     "total_volume": request.volume,
                     "remaining_volume": request.volume,
+                    "frozen_margin": decimal_to_json_string(
+                        frozen_margin
+                    ),
+                    "frozen_commission": decimal_to_json_string(
+                        frozen_commission
+                    ),
+                    "frozen_position_volume": frozen_position_volume,
                     "accepted_at": accepted_at.isoformat(),
                 },
                 created_at=accepted_at,
@@ -333,4 +441,7 @@ def get_order_service() -> OrderService:
         margin_calculator=MarginCalculator(),
         fee_calculator=FeeCalculator(),
         outbox_repository=OutboxRepository(),
+        position_repository=PositionRepository(),
+        allocation_repository=PositionFreezeAllocationRepository(),
+        close_allocator=PositionCloseAllocator(),
     )

@@ -111,10 +111,18 @@ class PositionDirection(str, Enum):
 
 
 class PositionDetailStatus(str, Enum):
-    """逐笔持仓明细状态，本阶段只会创建 OPEN 明细。"""
+    """逐笔持仓明细状态。"""
 
     OPEN = "OPEN"
     CLOSED = "CLOSED"
+
+
+class PositionFreezeAllocationStatus(str, Enum):
+    """平仓订单逐笔持仓冻结分配状态。"""
+
+    ACTIVE = "ACTIVE"
+    CONSUMED = "CONSUMED"
+    RELEASED = "RELEASED"
 
 
 class OutboxStatus(str, Enum):

@@ -6,6 +6,9 @@ from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.position_repository import PositionRepository
+from app.repositories.position_freeze_allocation_repository import (
+    PositionFreezeAllocationRepository,
+)
 
 
 __all__ = [
@@ -17,4 +20,5 @@ __all__ = [
     "OutboxRepository",
     "TradeRepository",
     "PositionRepository",
+    "PositionFreezeAllocationRepository",
 ]

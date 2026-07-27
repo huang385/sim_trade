@@ -75,7 +75,11 @@ def test_repository_cursor_query_only_returns_true_active_orders():
             batch_size=100,
         )
 
-    assert [order.order_id for order in result] == ["ACCEPTED", "PARTIAL"]
+    assert [order.order_id for order in result] == [
+        "ACCEPTED",
+        "PARTIAL",
+        "CLOSE",
+    ]
 
 
 def test_rebuild_pages_and_upserts_database_active_orders():

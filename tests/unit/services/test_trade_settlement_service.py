@@ -148,6 +148,7 @@ def test_two_ticks_partial_then_full_preserve_all_balances():
         assert account.used_commission == Decimal("15.000000")
         assert account.cash_balance == Decimal("199985.000000")
         assert account.equity == Decimal("199985.000000")
+        assert account.daily_pnl == Decimal("-15.000000")
         assert position.direction == "LONG"
         assert position.total_volume == position.today_volume == position.available_volume == 5
         assert position.average_open_price == Decimal("14599.600000")

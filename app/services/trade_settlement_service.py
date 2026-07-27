@@ -28,7 +28,13 @@ from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
+from app.repositories.position_freeze_allocation_repository import (
+    PositionFreezeAllocationRepository,
+)
 from app.repositories.trade_repository import TradeRepository
+from app.services.close_trade_settlement_handler import (
+    CloseTradeSettlementHandler,
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,12 @@ ACTIVE_ORDER_STATUSES = {
     OrderStatus.ACCEPTED.value,
     OrderStatus.PARTIALLY_FILLED.value,
 }
+SUPPORTED_OFFSET_FLAGS = {
+    OffsetFlag.OPEN.value,
+    OffsetFlag.CLOSE.value,
+    OffsetFlag.CLOSE_TODAY.value,
+    OffsetFlag.CLOSE_YESTERDAY.value,
+}
 
 
 def _generate_id(prefix: str) -> str:
@@ -98,6 +110,8 @@ class TradeSettlementService:
         instrument_repository: InstrumentRepository | None = None,
         trade_repository: TradeRepository | None = None,
         position_repository: PositionRepository | None = None,
+        allocation_repository: PositionFreezeAllocationRepository | None = None,
+        close_handler: CloseTradeSettlementHandler | None = None,
         outbox_repository: OutboxRepository | None = None,
         trade_id_factory: Callable[[], str] | None = None,
         position_id_factory: Callable[[], str] | None = None,
@@ -111,6 +125,14 @@ class TradeSettlementService:
         self.instrument_repository = instrument_repository or InstrumentRepository()
         self.trade_repository = trade_repository or TradeRepository()
         self.position_repository = position_repository or PositionRepository()
+        self.allocation_repository = (
+            allocation_repository or PositionFreezeAllocationRepository()
+        )
+        self.close_handler = close_handler or CloseTradeSettlementHandler(
+            position_repository=self.position_repository,
+            allocation_repository=self.allocation_repository,
+            trade_repository=self.trade_repository,
+        )
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.trade_id_factory = trade_id_factory or (lambda: _generate_id("T"))
         self.position_id_factory = position_id_factory or (lambda: _generate_id("P"))
@@ -151,7 +173,7 @@ class TradeSettlementService:
             order.status in ACTIVE_ORDER_STATUSES
             and order.remaining_volume > 0
             and order.order_type == OrderType.LIMIT.value
-            and order.offset_flag == OffsetFlag.OPEN.value
+            and order.offset_flag in SUPPORTED_OFFSET_FLAGS
             and result.fill_price is not None
             and result.fill_price > 0
             and result.fill_volume > 0
@@ -228,6 +250,8 @@ class TradeSettlementService:
                 "exchange_id": order.exchange_id,
                 "symbol": order.symbol,
                 "order_book_id": order.order_book_id,
+                "direction": order.direction,
+                "offset_flag": order.offset_flag,
                 "status": order.status,
                 "traded_volume": order.traded_volume,
                 "remaining_volume": order.remaining_volume,
@@ -235,6 +259,10 @@ class TradeSettlementService:
                 "average_price": _decimal_string(order.average_price),
                 "frozen_margin": _decimal_string(order.frozen_margin),
                 "frozen_commission": _decimal_string(order.frozen_commission),
+                "frozen_position_volume": order.frozen_position_volume,
+                "released_margin": _decimal_string(trade.margin),
+                "commission": _decimal_string(trade.commission),
+                "realized_pnl": _decimal_string(trade.realized_pnl),
                 "updated_at": order.updated_at.isoformat(),
             },
             created_at=now,
@@ -311,6 +339,36 @@ class TradeSettlementService:
                     error_code="SETTLEMENT_INSTRUMENT_NOT_FOUND",
                 )
 
+            fill_price = quantize_money(match_result.fill_price)
+            now = utc_now()
+            if order.offset_flag != OffsetFlag.OPEN.value:
+                trade = self.close_handler.apply(
+                    db,
+                    order=order,
+                    account=account,
+                    instrument=instrument,
+                    command=command,
+                    fill_volume=fill_volume,
+                    fill_price=fill_price,
+                    remaining_before=remaining_before,
+                    traded_before=traded_before,
+                    average_before=average_before,
+                    trade_id=self.trade_id_factory(),
+                    now=now,
+                )
+                self._create_outbox_events(
+                    db,
+                    trade=trade,
+                    order=order,
+                    now=now,
+                )
+                db.commit()
+                return SettlementResult(
+                    trade.trade_id,
+                    order.order_id,
+                    "SETTLED",
+                )
+
             position_direction = (
                 PositionDirection.LONG.value
                 if order.direction == OrderDirection.BUY.value
@@ -337,13 +395,11 @@ class TradeSettlementService:
                 remaining_volume_before_fill=remaining_before,
             )
             # 成交价格和成交额在入库前统一量化到Numeric(24,6)精度。
-            fill_price = quantize_money(match_result.fill_price)
             turnover = quantize_money(
                 fill_price
                 * Decimal(fill_volume)
                 * Decimal(instrument.contract_multiplier)
             )
-            now = utc_now()
             # Trade记录本次资源转换结果，不重新按成交价计算保证金和手续费。
             trade = Trade(
                 trade_id=self.trade_id_factory(),
@@ -412,7 +468,10 @@ class TradeSettlementService:
                 account.cash_balance - allocated_commission
             )
             account.equity = quantize_money(
-                account.equity - allocated_commission
+                account.cash_balance + account.unrealized_pnl
+            )
+            account.daily_pnl = quantize_money(
+                account.daily_pnl - allocated_commission
             )
             account.updated_at = now
 
@@ -482,6 +541,7 @@ class TradeSettlementService:
                 remaining_volume=fill_volume,
                 frozen_volume=0,
                 open_margin=allocated_margin,
+                remaining_margin=allocated_margin,
                 open_commission=allocated_commission,
                 status=PositionDetailStatus.OPEN.value,
                 created_at=now,
