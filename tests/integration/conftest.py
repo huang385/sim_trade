@@ -18,6 +18,7 @@ from app.models.trade import Trade
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
+from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -134,6 +135,11 @@ def integration_context():
             )
         ).all()
         if trade_ids:
+            db.execute(
+                delete(TradePositionAllocation).where(
+                    TradePositionAllocation.trade_id.in_(trade_ids)
+                )
+            )
             db.execute(
                 delete(OutboxEvent).where(
                     OutboxEvent.aggregate_type == "TRADE",

@@ -178,6 +178,16 @@ class OrderService:
             )
 
             is_open = request.offset_flag == OffsetFlag.OPEN
+            commission_type = str(rules.fee_rule.commission_type)
+            commission_parameter = (
+                self.fee_calculator.resolve_commission_parameter(
+                    offset_flag=request.offset_flag,
+                    fee_rule=rules.fee_rule,
+                )
+            )
+            commission_contract_multiplier = Decimal(
+                rules.instrument.contract_multiplier
+            )
             # 只有开仓订单需要新增保证金；平仓订单只冻结手续费和持仓。
             frozen_margin = (
                 self.margin_calculator.calculate_open_margin(
@@ -190,13 +200,18 @@ class OrderService:
                 if is_open
                 else Decimal("0.000000")
             )
-            # 按手续费规则计算开仓预计手续费。
-            frozen_commission = self.fee_calculator.calculate(
-                price=request.limit_price,
-                volume=request.volume,
-                offset_flag=request.offset_flag,
-                instrument=rules.instrument,
-                fee_rule=rules.fee_rule,
+            # 开仓可以直接按整张订单计算；平仓必须先完成逐笔持仓分配，
+            # 再按每条 Allocation 的最终平今/平昨标志分别计算。
+            frozen_commission = (
+                self.fee_calculator.calculate_from_snapshot(
+                    price=request.limit_price,
+                    volume=request.volume,
+                    commission_type=commission_type,
+                    commission_parameter=commission_parameter,
+                    contract_multiplier=commission_contract_multiplier,
+                )
+                if is_open
+                else Decimal("0.000000")
             )
 
             # SELECT FOR UPDATE 锁定账户。
@@ -261,11 +276,48 @@ class OrderService:
                     trading_day=trading_day,
                     volume=request.volume,
                 )
+                allocation_fee_snapshots = []
+                for plan in plans:
+                    allocation_parameter = (
+                        self.fee_calculator.resolve_commission_parameter(
+                            offset_flag=plan.resolved_offset_flag,
+                            fee_rule=rules.fee_rule,
+                        )
+                    )
+                    allocation_frozen_commission = (
+                        self.fee_calculator.calculate_from_snapshot(
+                            price=request.limit_price,
+                            volume=plan.volume,
+                            commission_type=commission_type,
+                            commission_parameter=allocation_parameter,
+                            contract_multiplier=commission_contract_multiplier,
+                        )
+                    )
+                    allocation_fee_snapshots.append(
+                        (
+                            plan,
+                            allocation_parameter,
+                            allocation_frozen_commission,
+                        )
+                    )
+                frozen_commission = quantize_money(
+                    sum(
+                        (
+                            item[2]
+                            for item in allocation_fee_snapshots
+                        ),
+                        Decimal("0"),
+                    )
+                )
                 self.freeze_service.freeze_close_order_commission(
                     account=account,
                     frozen_commission=frozen_commission,
                 )
-                for plan in plans:
+                for (
+                    plan,
+                    allocation_parameter,
+                    allocation_frozen_commission,
+                ) in allocation_fee_snapshots:
                     plan.detail.frozen_volume += plan.volume
                     plan.detail.updated_at = accepted_at
                     self.allocation_repository.add(
@@ -279,10 +331,26 @@ class OrderService:
                             exchange_id=rules.instrument.exchange_id,
                             symbol=rules.instrument.symbol,
                             offset_flag=request.offset_flag.value,
+                            resolved_offset_flag=(
+                                plan.resolved_offset_flag.value
+                            ),
+                            commission_type=commission_type,
+                            commission_parameter=allocation_parameter,
+                            commission_contract_multiplier=(
+                                commission_contract_multiplier
+                            ),
                             original_frozen_volume=plan.volume,
                             remaining_frozen_volume=plan.volume,
                             consumed_volume=0,
                             released_volume=0,
+                            original_frozen_commission=(
+                                allocation_frozen_commission
+                            ),
+                            remaining_frozen_commission=(
+                                allocation_frozen_commission
+                            ),
+                            consumed_commission=Decimal("0.000000"),
+                            released_commission=Decimal("0.000000"),
                             status=PositionFreezeAllocationStatus.ACTIVE.value,
                             created_at=accepted_at,
                             updated_at=accepted_at,
@@ -306,6 +374,11 @@ class OrderService:
                 direction=request.direction.value,
                 offset_flag=request.offset_flag.value,
                 order_type=request.order_type.value,
+                commission_type=commission_type,
+                commission_parameter=commission_parameter,
+                commission_contract_multiplier=(
+                    commission_contract_multiplier
+                ),
                 limit_price=request.limit_price,
                 total_volume=request.volume,
                 status=OrderStatus.ACCEPTED.value,

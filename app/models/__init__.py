@@ -24,6 +24,7 @@ from app.models.trade import Trade
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
+from app.models.trade_position_allocation import TradePositionAllocation
 
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "Position",
     "PositionDetail",
     "PositionFreezeAllocation",
+    "TradePositionAllocation",
 ]

@@ -32,9 +32,13 @@ from app.repositories.position_freeze_allocation_repository import (
     PositionFreezeAllocationRepository,
 )
 from app.repositories.trade_repository import TradeRepository
+from app.repositories.trade_position_allocation_repository import (
+    TradePositionAllocationRepository,
+)
 from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
 )
+from app.services.fee_calculator import FeeCalculator
 
 
 @dataclass(frozen=True)
@@ -112,6 +116,7 @@ class TradeSettlementService:
         position_repository: PositionRepository | None = None,
         allocation_repository: PositionFreezeAllocationRepository | None = None,
         close_handler: CloseTradeSettlementHandler | None = None,
+        fee_calculator: FeeCalculator | None = None,
         outbox_repository: OutboxRepository | None = None,
         trade_id_factory: Callable[[], str] | None = None,
         position_id_factory: Callable[[], str] | None = None,
@@ -133,6 +138,7 @@ class TradeSettlementService:
             allocation_repository=self.allocation_repository,
             trade_repository=self.trade_repository,
         )
+        self.fee_calculator = fee_calculator or FeeCalculator()
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.trade_id_factory = trade_id_factory or (lambda: _generate_id("T"))
         self.position_id_factory = position_id_factory or (lambda: _generate_id("P"))
@@ -382,17 +388,24 @@ class TradeSettlementService:
                 direction=position_direction,
             )
 
-            # 保证金和手续费都从“成交前订单剩余冻结资源”按剩余量分配。
-            # 最后一笔会直接拿走全部剩余值，防止六位小数舍入残留尾差。
+            # 保证金仍从成交前剩余冻结资源按数量转为实际占用；手续费则
+            # 明确区分“本次释放的预计冻结值”和“按实际成交价重算的值”。
             allocated_margin = self._allocate_frozen(
                 order.frozen_margin,
                 fill_volume=fill_volume,
                 remaining_volume_before_fill=remaining_before,
             )
-            allocated_commission = self._allocate_frozen(
+            released_frozen_commission = self._allocate_frozen(
                 order.frozen_commission,
                 fill_volume=fill_volume,
                 remaining_volume_before_fill=remaining_before,
+            )
+            actual_commission = self.fee_calculator.calculate_from_snapshot(
+                price=fill_price,
+                volume=fill_volume,
+                commission_type=order.commission_type,
+                commission_parameter=order.commission_parameter,
+                contract_multiplier=order.commission_contract_multiplier,
             )
             # 成交价格和成交额在入库前统一量化到Numeric(24,6)精度。
             turnover = quantize_money(
@@ -400,7 +413,7 @@ class TradeSettlementService:
                 * Decimal(fill_volume)
                 * Decimal(instrument.contract_multiplier)
             )
-            # Trade记录本次资源转换结果，不重新按成交价计算保证金和手续费。
+            # Trade.commission 只记录实际手续费，不能写入预计冻结手续费。
             trade = Trade(
                 trade_id=self.trade_id_factory(),
                 order_id=order.order_id,
@@ -417,7 +430,7 @@ class TradeSettlementService:
                 trade_volume=fill_volume,
                 turnover=turnover,
                 margin=allocated_margin,
-                commission=allocated_commission,
+                commission=actual_commission,
                 realized_pnl=Decimal("0.000000"),
                 trade_time=command.tick_event_time,
                 created_at=now,
@@ -446,12 +459,22 @@ class TradeSettlementService:
                 order.frozen_margin - allocated_margin
             )
             order.frozen_commission = quantize_money(
-                order.frozen_commission - allocated_commission
+                order.frozen_commission - released_frozen_commission
             )
             order.updated_at = now
 
-            # 下单时 available_cash 已经一次性减少。本处只把冻结资源转成
-            # 实际占用，并扣除手续费，绝不能再次减少 available_cash。
+            if (
+                account.frozen_margin < allocated_margin
+                or account.frozen_commission
+                < released_frozen_commission
+            ):
+                raise DataAccessError(
+                    "开仓成交账户冻结资源不一致",
+                    error_code="OPEN_RESOURCE_INCONSISTENT",
+                )
+
+            # 保证金只从冻结转为实际占用；手续费先释放预计冻结额，再按
+            # 实际成交价扣除，二者差额才会改变 available_cash。
             account.frozen_margin = quantize_money(
                 account.frozen_margin - allocated_margin
             )
@@ -459,19 +482,26 @@ class TradeSettlementService:
                 account.used_margin + allocated_margin
             )
             account.frozen_commission = quantize_money(
-                account.frozen_commission - allocated_commission
+                account.frozen_commission - released_frozen_commission
             )
             account.used_commission = quantize_money(
-                account.used_commission + allocated_commission
+                account.used_commission + actual_commission
             )
             account.cash_balance = quantize_money(
-                account.cash_balance - allocated_commission
+                account.cash_balance - actual_commission
+            )
+            # 下单时已扣除预计手续费。成交时释放预计值并扣除实际值，
+            # BY_AMOUNT 改善或劣化成交因此会正确反映到可用资金。
+            account.available_cash = quantize_money(
+                account.available_cash
+                + released_frozen_commission
+                - actual_commission
             )
             account.equity = quantize_money(
                 account.cash_balance + account.unrealized_pnl
             )
             account.daily_pnl = quantize_money(
-                account.daily_pnl - allocated_commission
+                account.daily_pnl - actual_commission
             )
             account.updated_at = now
 
@@ -542,7 +572,7 @@ class TradeSettlementService:
                 frozen_volume=0,
                 open_margin=allocated_margin,
                 remaining_margin=allocated_margin,
-                open_commission=allocated_commission,
+                open_commission=actual_commission,
                 status=PositionDetailStatus.OPEN.value,
                 created_at=now,
                 updated_at=now,
@@ -591,8 +621,18 @@ class TradeQueryService:
     也不会修改成交、订单、账户或Redis状态。
     """
 
-    def __init__(self, repository: TradeRepository | None = None):
+    def __init__(
+        self,
+        repository: TradeRepository | None = None,
+        position_allocation_repository: (
+            TradePositionAllocationRepository | None
+        ) = None,
+    ):
         self.repository = repository or TradeRepository()
+        self.position_allocation_repository = (
+            position_allocation_repository
+            or TradePositionAllocationRepository()
+        )
 
     def get(self, db: Session, trade_id: str) -> Trade:
         trade = self.repository.get_by_trade_id(db, trade_id.strip())
@@ -611,6 +651,25 @@ class TradeQueryService:
             db,
             account_id=account_id.strip() if account_id else None,
             order_id=order_id.strip() if order_id else None,
+        )
+
+    def list_position_allocations(
+        self,
+        db: Session,
+        trade_id: str,
+    ):
+        """查询一笔平仓成交具体消费的 PositionDetail 明细。"""
+
+        normalized_trade_id = trade_id.strip()
+        trade = self.repository.get_by_trade_id(db, normalized_trade_id)
+        if trade is None:
+            raise ResourceNotFoundError(
+                "成交不存在",
+                error_code="TRADE_NOT_FOUND",
+            )
+        return self.position_allocation_repository.list_by_trade(
+            db,
+            normalized_trade_id,
         )
 
 

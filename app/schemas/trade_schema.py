@@ -45,3 +45,30 @@ class TradeResponse(BaseModel):
     # 行情事件时间和数据库写入时间
     trade_time: datetime
     created_at: datetime
+
+
+class TradePositionAllocationResponse(BaseModel):
+    """平仓成交与被关闭逐笔持仓之间的可审计明细。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    trade_position_allocation_id: str
+    trade_id: str
+    order_id: str
+    allocation_id: str
+    position_id: str
+    position_detail_id: str
+    account_id: str
+    order_book_id: str
+    exchange_id: str
+    symbol: str
+    resolved_offset_flag: str
+    open_trading_day: date
+    close_trading_day: date
+    open_price: Decimal
+    close_price: Decimal
+    close_volume: int
+    released_margin: Decimal
+    commission: Decimal
+    realized_pnl: Decimal
+    created_at: datetime

@@ -21,8 +21,8 @@ class Order(Base):
     """
     订单主表。
 
-    记录已经完成校验和资金冻结的限价开仓订单，并承载后续成交和主动撤单
-    状态。成交、资金释放和持仓变化仍由对应事务服务负责。
+    记录已经完成校验和资源冻结的限价开仓、平仓订单，并承载后续部分成交、
+    完全成交和主动撤单状态。成交、资金释放和持仓变化由对应事务服务负责。
 
     表名使用 orders，避免直接使用 SQL 保留字 order。
 
@@ -62,6 +62,14 @@ class Order(Base):
         Index(
             "ix_order_created_at",
             "created_at",
+        ),
+        CheckConstraint(
+            "commission_parameter >= 0",
+            name="ck_order_commission_parameter_nonnegative",
+        ),
+        CheckConstraint(
+            "commission_contract_multiplier > 0",
+            name="ck_order_commission_multiplier_positive",
         ),
     )
 
@@ -117,14 +125,30 @@ class Order(Base):
         String(16),
         nullable=False,
     )
-    # 开平标志，第一阶段固定为 OPEN
+    # 开平标志：OPEN、CLOSE、CLOSE_TODAY 或 CLOSE_YESTERDAY
     offset_flag: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
     )
-    # 订单类型，第一阶段固定为 LIMIT
+    # 订单类型；当前开平仓链路支持 LIMIT
     order_type: Mapped[str] = mapped_column(
         String(16),
+        nullable=False,
+    )
+
+    # 手续费规则快照。预计冻结使用限价，实际成交使用成交价，但二者必须
+    # 使用订单接受时固定下来的计算方式、参数和合约乘数，不能重新读取
+    # 可能已经更新的当前手续费规则。
+    commission_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+    )
+    commission_parameter: Mapped[Decimal] = mapped_column(
+        Numeric(24, 12),
+        nullable=False,
+    )
+    commission_contract_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
         nullable=False,
     )
 
@@ -187,7 +211,7 @@ class Order(Base):
         nullable=False,
         default=Decimal("0"),
     )
-    # 平仓订单冻结的持仓数量；当前开仓阶段固定为0
+    # 平仓订单尚未成交部分冻结的持仓数量；开仓订单始终为0
     frozen_position_volume: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

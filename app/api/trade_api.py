@@ -2,7 +2,10 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.schemas.trade_schema import TradeResponse
+from app.schemas.trade_schema import (
+    TradePositionAllocationResponse,
+    TradeResponse,
+)
 from app.services.trade_settlement_service import TradeQueryService
 
 
@@ -22,6 +25,20 @@ def get_trade(
     """按系统成交编号查询一条成交。"""
 
     return service.get(db, trade_id)
+
+
+@router.get(
+    "/{trade_id}/position-allocations",
+    response_model=list[TradePositionAllocationResponse],
+)
+def list_trade_position_allocations(
+    trade_id: str,
+    db: Session = Depends(get_db),
+    service: TradeQueryService = Depends(get_trade_query_service),
+):
+    """查询平仓 Trade 实际关闭的逐笔持仓、保证金、手续费和盈亏。"""
+
+    return service.list_position_allocations(db, trade_id)
 
 
 @router.get("", response_model=list[TradeResponse])

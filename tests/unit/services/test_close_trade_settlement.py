@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.common.exceptions import DataAccessError
 from app.core.database import Base
 from app.matching.models import MatchResult
 from app.models.account import Account
@@ -16,9 +17,16 @@ from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade import Trade
+from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.outbox_repository import OutboxRepository
+from app.repositories.trade_position_allocation_repository import (
+    TradePositionAllocationRepository,
+)
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.order_cancellation_service import OrderCancellationService
+from app.services.close_trade_settlement_handler import (
+    CloseTradeSettlementHandler,
+)
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
@@ -95,6 +103,9 @@ def seed_close(
                 direction=close_direction,
                 offset_flag="CLOSE_TODAY",
                 order_type="LIMIT",
+                commission_type="BY_VOLUME",
+                commission_parameter=Decimal("6"),
+                commission_contract_multiplier=Decimal("10"),
                 limit_price=Decimal("3520"),
                 total_volume=order_volume,
                 traded_volume=0,
@@ -167,10 +178,18 @@ def seed_close(
                 exchange_id="SHFE",
                 symbol="AG2609",
                 offset_flag="CLOSE_TODAY",
+                resolved_offset_flag="CLOSE_TODAY",
+                commission_type="BY_VOLUME",
+                commission_parameter=Decimal("6"),
+                commission_contract_multiplier=Decimal("10"),
                 original_frozen_volume=order_volume,
                 remaining_frozen_volume=order_volume,
                 consumed_volume=0,
                 released_volume=0,
+                original_frozen_commission=frozen_commission,
+                remaining_frozen_commission=frozen_commission,
+                consumed_commission=Decimal("0"),
+                released_commission=Decimal("0"),
                 status="ACTIVE",
                 created_at=NOW,
                 updated_at=NOW,
@@ -195,6 +214,135 @@ def command(event_id, price, volume):
             engine_version="1.0",
         ),
     )
+
+
+def seed_cross_day_close(session_factory):
+    """构造昨仓5手、今仓5手的普通 CLOSE 订单。"""
+
+    seed_close(session_factory, order_volume=4)
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        position = db.scalar(select(Position))
+        old_detail = db.scalar(select(PositionDetail))
+        old_allocation = db.scalar(select(PositionFreezeAllocation))
+        db.delete(old_allocation)
+        db.delete(old_detail)
+        db.flush()
+
+        order.offset_flag = "CLOSE"
+        order.total_volume = 10
+        order.remaining_volume = 10
+        order.frozen_position_volume = 10
+        order.frozen_commission = Decimal("45")
+        account.frozen_commission = Decimal("45")
+        account.available_cash = Decimal("57925")
+        position.today_volume = 5
+        position.yesterday_volume = 5
+        position.frozen_volume = 10
+        position.available_volume = 0
+
+        details = [
+            PositionDetail(
+                position_detail_id="PD-Y",
+                position_id="P-1",
+                account_id="A001",
+                open_trade_id="T-OPEN-Y",
+                order_book_id="AG2609",
+                exchange_id="SHFE",
+                symbol="AG2609",
+                direction="LONG",
+                open_trading_day=TRADING_DAY.replace(day=23),
+                open_price=Decimal("3500"),
+                original_volume=5,
+                remaining_volume=5,
+                frozen_volume=5,
+                open_margin=Decimal("21000"),
+                remaining_margin=Decimal("21000"),
+                open_commission=Decimal("15"),
+                status="OPEN",
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+            PositionDetail(
+                position_detail_id="PD-T",
+                position_id="P-1",
+                account_id="A001",
+                open_trade_id="T-OPEN-T",
+                order_book_id="AG2609",
+                exchange_id="SHFE",
+                symbol="AG2609",
+                direction="LONG",
+                open_trading_day=TRADING_DAY,
+                open_price=Decimal("3510"),
+                original_volume=5,
+                remaining_volume=5,
+                frozen_volume=5,
+                open_margin=Decimal("21000"),
+                remaining_margin=Decimal("21000"),
+                open_commission=Decimal("15"),
+                status="OPEN",
+                created_at=NOW,
+                updated_at=NOW,
+            ),
+        ]
+        db.add_all(details)
+        db.flush()
+        db.add_all(
+            [
+                PositionFreezeAllocation(
+                    allocation_id="PFA-Y",
+                    order_id="O-CLOSE",
+                    position_id="P-1",
+                    position_detail_id="PD-Y",
+                    account_id="A001",
+                    exchange_id="SHFE",
+                    symbol="AG2609",
+                    offset_flag="CLOSE",
+                    resolved_offset_flag="CLOSE_YESTERDAY",
+                    commission_type="BY_VOLUME",
+                    commission_parameter=Decimal("3"),
+                    commission_contract_multiplier=Decimal("10"),
+                    original_frozen_volume=5,
+                    remaining_frozen_volume=5,
+                    consumed_volume=0,
+                    released_volume=0,
+                    original_frozen_commission=Decimal("15"),
+                    remaining_frozen_commission=Decimal("15"),
+                    consumed_commission=Decimal("0"),
+                    released_commission=Decimal("0"),
+                    status="ACTIVE",
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+                PositionFreezeAllocation(
+                    allocation_id="PFA-T",
+                    order_id="O-CLOSE",
+                    position_id="P-1",
+                    position_detail_id="PD-T",
+                    account_id="A001",
+                    exchange_id="SHFE",
+                    symbol="AG2609",
+                    offset_flag="CLOSE",
+                    resolved_offset_flag="CLOSE_TODAY",
+                    commission_type="BY_VOLUME",
+                    commission_parameter=Decimal("6"),
+                    commission_contract_multiplier=Decimal("10"),
+                    original_frozen_volume=5,
+                    remaining_frozen_volume=5,
+                    consumed_volume=0,
+                    released_volume=0,
+                    original_frozen_commission=Decimal("30"),
+                    remaining_frozen_commission=Decimal("30"),
+                    consumed_commission=Decimal("0"),
+                    released_commission=Decimal("0"),
+                    status="ACTIVE",
+                    created_at=NOW,
+                    updated_at=NOW,
+                ),
+            ]
+        )
+        db.commit()
 
 
 @pytest.mark.parametrize(
@@ -244,6 +392,15 @@ def test_close_settlement_updates_trade_account_and_position(
         assert detail.remaining_margin == Decimal("29400.000000")
         assert allocation.remaining_frozen_volume == 1
         assert allocation.consumed_volume == 3
+        assert allocation.remaining_frozen_commission == Decimal("6.000000")
+        assert allocation.consumed_commission == Decimal("18.000000")
+        trade_allocations = db.scalars(
+            select(TradePositionAllocation)
+        ).all()
+        assert len(trade_allocations) == 1
+        assert trade_allocations[0].position_detail_id == "PD-1"
+        assert trade_allocations[0].close_volume == 3
+        assert trade_allocations[0].commission == Decimal("18.000000")
         assert len(db.scalars(select(OutboxEvent)).all()) == 2
 
 
@@ -277,6 +434,8 @@ def test_partial_close_then_cancel_releases_only_remaining_allocation():
         assert detail.frozen_volume == 0
         assert allocation.consumed_volume == 3
         assert allocation.released_volume == 1
+        assert allocation.consumed_commission == Decimal("18.000000")
+        assert allocation.released_commission == Decimal("6.000000")
         assert allocation.status == "RELEASED"
 
 
@@ -366,10 +525,18 @@ def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():
                     exchange_id="SHFE",
                     symbol="AG2609",
                     offset_flag="CLOSE_TODAY",
+                    resolved_offset_flag="CLOSE_TODAY",
+                    commission_type="BY_VOLUME",
+                    commission_parameter=Decimal("6"),
+                    commission_contract_multiplier=Decimal("10"),
                     original_frozen_volume=2,
                     remaining_frozen_volume=2,
                     consumed_volume=0,
                     released_volume=0,
+                    original_frozen_commission=Decimal("12"),
+                    remaining_frozen_commission=Decimal("12"),
+                    consumed_commission=Decimal("0"),
+                    released_commission=Decimal("0"),
                     status="ACTIVE",
                     created_at=NOW,
                     updated_at=NOW,
@@ -383,10 +550,18 @@ def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():
                     exchange_id="SHFE",
                     symbol="AG2609",
                     offset_flag="CLOSE_TODAY",
+                    resolved_offset_flag="CLOSE_TODAY",
+                    commission_type="BY_VOLUME",
+                    commission_parameter=Decimal("6"),
+                    commission_contract_multiplier=Decimal("10"),
                     original_frozen_volume=2,
                     remaining_frozen_volume=2,
                     consumed_volume=0,
                     released_volume=0,
+                    original_frozen_commission=Decimal("12"),
+                    remaining_frozen_commission=Decimal("12"),
+                    consumed_commission=Decimal("0"),
+                    released_commission=Decimal("0"),
                     status="ACTIVE",
                     created_at=NOW,
                     updated_at=NOW,
@@ -412,6 +587,307 @@ def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():
         assert details[1].remaining_volume == 7
         assert position.average_open_price == Decimal("3510.000000")
         assert position.position_cost == Decimal("245700.000000")
+        allocations = db.scalars(
+            select(TradePositionAllocation).order_by(
+                TradePositionAllocation.id
+            )
+        ).all()
+        assert [item.position_detail_id for item in allocations] == [
+            "PD-1",
+            "PD-2",
+        ]
+        assert [item.close_volume for item in allocations] == [2, 1]
+        assert sum(item.close_volume for item in allocations) == (
+            trade.trade_volume
+        )
+        assert sum(item.released_margin for item in allocations) == (
+            trade.margin
+        )
+        assert sum(item.realized_pnl for item in allocations) == (
+            trade.realized_pnl
+        )
+        assert sum(item.commission for item in allocations) == (
+            trade.commission
+        )
+
+
+def test_close_by_amount_uses_fill_price_and_reconciles_frozen_difference():
+    session_factory = factory()
+    seed_close(session_factory)
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        order.commission_type = "BY_AMOUNT"
+        order.commission_parameter = Decimal("0.0001")
+        order.commission_contract_multiplier = Decimal("10")
+        order.limit_price = Decimal("3500")
+        order.frozen_commission = Decimal("14.000000")
+        allocation.commission_type = "BY_AMOUNT"
+        allocation.commission_parameter = Decimal("0.0001")
+        allocation.commission_contract_multiplier = Decimal("10")
+        allocation.original_frozen_commission = Decimal("14.000000")
+        allocation.remaining_frozen_commission = Decimal("14.000000")
+        account.frozen_commission = Decimal("14.000000")
+        account.available_cash = Decimal("57956.000000")
+        db.commit()
+
+    with session_factory() as db:
+        TradeSettlementService().settle(
+            db,
+            command("TICK-AMOUNT", "3522", 3),
+        )
+
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        trade = db.scalar(select(Trade))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        detail = db.scalar(select(TradePositionAllocation))
+        # 预计释放：3500*3*10*0.0001=10.5；实际：3522*=10.566。
+        assert trade.commission == Decimal("10.566000")
+        assert detail.commission == Decimal("10.566000")
+        assert order.frozen_commission == Decimal("3.500000")
+        assert allocation.remaining_frozen_commission == Decimal("3.500000")
+        assert allocation.consumed_commission == Decimal("10.500000")
+        assert account.frozen_commission == Decimal("3.500000")
+        assert account.used_commission == Decimal("40.566000")
+        assert account.available_cash == Decimal("71215.934000")
+
+    with session_factory() as db:
+        OrderCancellationService().cancel_order(
+            db=db,
+            order_id="O-CLOSE",
+            request=OrderCancelRequest(account_id="A001"),
+        )
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        assert order.status == "PARTIALLY_CANCELLED"
+        assert account.frozen_commission == Decimal("0.000000")
+        assert account.available_cash == Decimal("71219.434000")
+        assert allocation.consumed_commission == Decimal("10.500000")
+        assert allocation.released_commission == Decimal("3.500000")
+
+
+def test_plain_close_partial_fills_charge_yesterday_then_cross_into_today():
+    session_factory = factory()
+    seed_cross_day_close(session_factory)
+
+    service = TradeSettlementService()
+    with session_factory() as db:
+        service.settle(db, command("TICK-CROSS-1", "3520", 3))
+    with session_factory() as db:
+        service.settle(db, command("TICK-CROSS-2", "3520", 4))
+    with session_factory() as db:
+        service.settle(db, command("TICK-CROSS-3", "3520", 3))
+
+    with session_factory() as db:
+        trades = db.scalars(select(Trade).order_by(Trade.id)).all()
+        details = db.scalars(
+            select(TradePositionAllocation).order_by(
+                TradePositionAllocation.id
+            )
+        ).all()
+        allocations = db.scalars(
+            select(PositionFreezeAllocation).order_by(
+                PositionFreezeAllocation.id
+            )
+        ).all()
+        assert [item.commission for item in trades] == [
+            Decimal("9.000000"),
+            Decimal("18.000000"),
+            Decimal("18.000000"),
+        ]
+        assert [
+            (item.resolved_offset_flag, item.close_volume, item.commission)
+            for item in details
+        ] == [
+            ("CLOSE_YESTERDAY", 3, Decimal("9.000000")),
+            ("CLOSE_YESTERDAY", 2, Decimal("6.000000")),
+            ("CLOSE_TODAY", 2, Decimal("12.000000")),
+            ("CLOSE_TODAY", 3, Decimal("18.000000")),
+        ]
+        assert sum(item.commission for item in trades) == Decimal(
+            "45.000000"
+        )
+        assert all(
+            item.original_frozen_commission
+            == item.remaining_frozen_commission
+            + item.consumed_commission
+            + item.released_commission
+            for item in allocations
+        )
+
+
+def test_plain_close_partial_fill_then_cancel_releases_each_remaining_fee():
+    session_factory = factory()
+    seed_cross_day_close(session_factory)
+    with session_factory() as db:
+        TradeSettlementService().settle(
+            db,
+            command("TICK-CROSS-CANCEL", "3520", 3),
+        )
+    with session_factory() as db:
+        OrderCancellationService().cancel_order(
+            db=db,
+            order_id="O-CLOSE",
+            request=OrderCancelRequest(account_id="A001"),
+        )
+
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        allocations = db.scalars(
+            select(PositionFreezeAllocation).order_by(
+                PositionFreezeAllocation.id
+            )
+        ).all()
+        assert order.status == "PARTIALLY_CANCELLED"
+        assert order.frozen_commission == Decimal("0.000000")
+        assert account.frozen_commission == Decimal("0.000000")
+        assert [
+            (
+                item.consumed_commission,
+                item.released_commission,
+                item.remaining_frozen_commission,
+            )
+            for item in allocations
+        ] == [
+            (
+                Decimal("9.000000"),
+                Decimal("6.000000"),
+                Decimal("0.000000"),
+            ),
+            (
+                Decimal("0.000000"),
+                Decimal("30.000000"),
+                Decimal("0.000000"),
+            ),
+        ]
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        "ALLOCATION_GREATER",
+        "ALLOCATION_SMALLER",
+        "ORDER_FROZEN_MISMATCH",
+        "MISSING_ALLOCATION",
+        "MISSING_DETAIL",
+    ],
+)
+def test_close_consistency_error_rolls_back_without_trade_or_outbox(corrupt):
+    session_factory = factory()
+    seed_close(session_factory)
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        position = db.scalar(select(Position))
+        detail = db.scalar(select(PositionDetail))
+        allocation = db.scalar(select(PositionFreezeAllocation))
+        if corrupt == "ALLOCATION_GREATER":
+            allocation.original_frozen_volume = 5
+            allocation.remaining_frozen_volume = 5
+            detail.frozen_volume = 5
+            position.frozen_volume = 5
+            position.available_volume = 5
+        elif corrupt == "ALLOCATION_SMALLER":
+            allocation.original_frozen_volume = 3
+            allocation.remaining_frozen_volume = 3
+            detail.frozen_volume = 3
+            position.frozen_volume = 3
+            position.available_volume = 7
+        elif corrupt == "ORDER_FROZEN_MISMATCH":
+            order.frozen_position_volume = 3
+        elif corrupt == "MISSING_ALLOCATION":
+            db.delete(allocation)
+        elif corrupt == "MISSING_DETAIL":
+            db.delete(detail)
+        db.commit()
+
+    with session_factory() as db:
+        with pytest.raises(DataAccessError) as exc_info:
+            TradeSettlementService().settle(
+                db,
+                command(f"TICK-{corrupt}", "3522", 2),
+            )
+        assert exc_info.value.error_code in {
+            "CLOSE_ALLOCATION_INCONSISTENT",
+            "CLOSE_POSITION_INCONSISTENT",
+        }
+
+    with session_factory() as db:
+        assert db.scalars(select(Trade)).all() == []
+        assert db.scalars(select(TradePositionAllocation)).all() == []
+        assert db.scalars(select(OutboxEvent)).all() == []
+        order = db.scalar(select(Order))
+        assert order.status == "ACCEPTED"
+        assert order.traded_volume == 0
+
+
+class FailingTradePositionAllocationRepository(
+    TradePositionAllocationRepository
+):
+    @staticmethod
+    def add(db, item):
+        raise RuntimeError("trade position allocation failed")
+
+
+def test_trade_position_allocation_failure_rolls_back_entire_close():
+    session_factory = factory()
+    seed_close(session_factory)
+    close_handler = CloseTradeSettlementHandler(
+        position_repository=TradeSettlementService().position_repository,
+        allocation_repository=(
+            TradeSettlementService().allocation_repository
+        ),
+        trade_repository=TradeSettlementService().trade_repository,
+        trade_position_allocation_repository=(
+            FailingTradePositionAllocationRepository()
+        ),
+    )
+    with session_factory() as db:
+        with pytest.raises(
+            RuntimeError,
+            match="trade position allocation failed",
+        ):
+            TradeSettlementService(close_handler=close_handler).settle(
+                db,
+                command("TICK-DETAIL-FAIL", "3522", 3),
+            )
+
+    with session_factory() as db:
+        assert db.scalars(select(Trade)).all() == []
+        assert db.scalars(select(TradePositionAllocation)).all() == []
+        assert db.scalar(select(Order)).status == "ACCEPTED"
+        assert db.scalar(select(Account)).used_margin == Decimal(
+            "42000.000000"
+        )
+
+
+def test_duplicate_close_settlement_does_not_duplicate_trade_details():
+    session_factory = factory()
+    seed_close(session_factory)
+    service = TradeSettlementService()
+    with session_factory() as db:
+        first = service.settle(
+            db,
+            command("TICK-IDEMPOTENT", "3522", 3),
+        )
+    with session_factory() as db:
+        second = service.settle(
+            db,
+            command("TICK-IDEMPOTENT", "3522", 3),
+        )
+
+    assert first.action == "SETTLED"
+    assert second.action == "IDEMPOTENT"
+    with session_factory() as db:
+        assert len(db.scalars(select(Trade)).all()) == 1
+        assert len(
+            db.scalars(select(TradePositionAllocation)).all()
+        ) == 1
 
 
 class FailingOutbox(OutboxRepository):

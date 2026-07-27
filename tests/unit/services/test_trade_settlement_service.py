@@ -32,8 +32,19 @@ def make_session_factory():
     return sessionmaker(bind=engine, expire_on_commit=False)
 
 
-def seed(session_factory, *, direction="BUY"):
+def seed(
+    session_factory,
+    *,
+    direction="BUY",
+    commission_type="BY_VOLUME",
+    commission_parameter=Decimal("3"),
+):
     now = datetime(2026, 7, 23, 1, tzinfo=timezone.utc)
+    frozen_commission = (
+        Decimal("15")
+        if commission_type == "BY_VOLUME"
+        else Decimal("109.500000")
+    )
     with session_factory() as db:
         db.add(
             Instrument(
@@ -53,7 +64,7 @@ def seed(session_factory, *, direction="BUY"):
                 account_name="test",
                 initial_cash=Decimal("200000"),
                 cash_balance=Decimal("200000"),
-                available_cash=Decimal("68585"),
+                available_cash=Decimal("68600") - frozen_commission,
                 frozen_cash=Decimal("0"),
                 equity=Decimal("200000"),
                 used_margin=Decimal("0"),
@@ -62,7 +73,7 @@ def seed(session_factory, *, direction="BUY"):
                 unrealized_pnl=Decimal("0"),
                 daily_pnl=Decimal("0"),
                 used_commission=Decimal("0"),
-                frozen_commission=Decimal("15"),
+                frozen_commission=frozen_commission,
                 risk_ratio=Decimal("0"),
                 status="NORMAL",
                 trading_day=date(2026, 7, 23),
@@ -80,6 +91,9 @@ def seed(session_factory, *, direction="BUY"):
                 direction=direction,
                 offset_flag="OPEN",
                 order_type="LIMIT",
+                commission_type=commission_type,
+                commission_parameter=commission_parameter,
+                commission_contract_multiplier=Decimal("15"),
                 limit_price=Decimal("14600"),
                 total_volume=5,
                 traded_volume=0,
@@ -89,7 +103,7 @@ def seed(session_factory, *, direction="BUY"):
                 status="ACCEPTED",
                 submit_status="ACCEPTED",
                 frozen_margin=Decimal("131400"),
-                frozen_commission=Decimal("15"),
+                frozen_commission=frozen_commission,
                 frozen_position_volume=0,
                 created_at=now,
                 accepted_at=now,
@@ -177,6 +191,33 @@ def test_two_ticks_partial_then_full_preserve_all_balances():
             "ORDER_PARTIALLY_FILLED",
             "ORDER_FILLED",
         }
+
+
+def test_open_by_amount_uses_fill_price_and_reconciles_available_cash():
+    factory = make_session_factory()
+    seed(
+        factory,
+        commission_type="BY_AMOUNT",
+        commission_parameter=Decimal("0.0001"),
+    )
+
+    with factory() as db:
+        TradeSettlementService().settle(
+            db,
+            match("TICK-AMOUNT", "14599", 2),
+        )
+
+    with factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        trade = db.scalar(select(Trade))
+        # 限价14600对应预计冻结43.800000，实际成交价14599对应43.797000。
+        assert trade.commission == Decimal("43.797000")
+        assert order.frozen_commission == Decimal("65.700000")
+        assert account.frozen_commission == Decimal("65.700000")
+        assert account.used_commission == Decimal("43.797000")
+        assert account.cash_balance == Decimal("199956.203000")
+        assert account.available_cash == Decimal("68490.503000")
 
 
 def test_duplicate_market_event_is_idempotent_and_does_not_charge_again():

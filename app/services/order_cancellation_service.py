@@ -201,6 +201,11 @@ class OrderCancellationService:
                         "平仓撤单对应持仓不存在",
                         error_code="CANCEL_POSITION_INCONSISTENT",
                     )
+                if position.direction != position_direction:
+                    raise DataAccessError(
+                        "平仓撤单对应持仓方向不一致",
+                        error_code="CANCEL_POSITION_INCONSISTENT",
+                    )
                 details = self.position_repository.list_details_for_update(
                     db,
                     position_id=position.position_id,
@@ -217,30 +222,103 @@ class OrderCancellationService:
                 allocation_volume = sum(
                     item.remaining_frozen_volume for item in allocations
                 )
-                if allocation_volume != cancel_volume:
+                allocation_commission = quantize_money(
+                    sum(
+                        (
+                            item.remaining_frozen_commission
+                            for item in allocations
+                        ),
+                        Decimal("0"),
+                    )
+                )
+                if (
+                    not allocations
+                    or allocation_volume != cancel_volume
+                    or allocation_volume != order.frozen_position_volume
+                    or allocation_commission != released_commission
+                ):
                     raise DataAccessError(
-                        "平仓撤单冻结分配数量不一致",
+                        "平仓撤单冻结分配资源不一致",
                         error_code="CANCEL_POSITION_INCONSISTENT",
                     )
+
+                # 在修改任何持仓明细或 Allocation 前完成全量一致性校验，
+                # 防止前几条已修改、后续才发现脏数据。即使异常最终会回滚，
+                # 提前校验也让事务内对象始终保持清晰的全有或全无状态。
                 for allocation in allocations:
-                    released_volume = allocation.remaining_frozen_volume
-                    if released_volume <= 0:
-                        continue
                     detail = detail_map.get(
                         allocation.position_detail_id
                     )
                     if (
-                        detail is None
-                        or detail.frozen_volume < released_volume
+                        allocation.order_id != order.order_id
+                        or allocation.position_id != position.position_id
+                        or allocation.account_id != order.account_id
+                        or allocation.exchange_id != order.exchange_id
+                        or allocation.symbol != order.symbol
+                        or allocation.resolved_offset_flag
+                        not in {
+                            OffsetFlag.CLOSE_TODAY.value,
+                            OffsetFlag.CLOSE_YESTERDAY.value,
+                        }
+                        or detail is None
+                        or detail.direction != position_direction
+                        or allocation.resolved_offset_flag
+                        != (
+                            OffsetFlag.CLOSE_TODAY.value
+                            if detail.open_trading_day
+                            == order.trading_day
+                            else (
+                                OffsetFlag.CLOSE_YESTERDAY.value
+                                if detail.open_trading_day
+                                < order.trading_day
+                                else None
+                            )
+                        )
+                        or detail.frozen_volume
+                        < allocation.remaining_frozen_volume
+                        or detail.remaining_volume
+                        < allocation.remaining_frozen_volume
+                        or allocation.original_frozen_volume
+                        != allocation.remaining_frozen_volume
+                        + allocation.consumed_volume
+                        + allocation.released_volume
+                        or quantize_money(
+                            allocation.original_frozen_commission
+                        )
+                        != quantize_money(
+                            allocation.remaining_frozen_commission
+                            + allocation.consumed_commission
+                            + allocation.released_commission
+                        )
                     ):
                         raise DataAccessError(
-                            "平仓撤单逐笔冻结数量不一致",
+                            "平仓撤单逐笔冻结资源不一致",
                             error_code="CANCEL_POSITION_INCONSISTENT",
                         )
+
+                for allocation in allocations:
+                    released_volume = allocation.remaining_frozen_volume
+                    released_allocation_commission = (
+                        allocation.remaining_frozen_commission
+                    )
+                    if (
+                        released_volume <= 0
+                        and released_allocation_commission
+                        == Decimal("0")
+                    ):
+                        continue
+                    detail = detail_map[allocation.position_detail_id]
                     detail.frozen_volume -= released_volume
                     detail.updated_at = cancelled_at
                     allocation.remaining_frozen_volume = 0
                     allocation.released_volume += released_volume
+                    allocation.remaining_frozen_commission = Decimal(
+                        "0.000000"
+                    )
+                    allocation.released_commission = quantize_money(
+                        allocation.released_commission
+                        + released_allocation_commission
+                    )
                     allocation.status = (
                         PositionFreezeAllocationStatus.RELEASED.value
                     )

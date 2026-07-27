@@ -9,6 +9,9 @@ from app.repositories.position_repository import PositionRepository
 from app.repositories.position_freeze_allocation_repository import (
     PositionFreezeAllocationRepository,
 )
+from app.repositories.trade_position_allocation_repository import (
+    TradePositionAllocationRepository,
+)
 
 
 __all__ = [
@@ -21,4 +24,5 @@ __all__ = [
     "TradeRepository",
     "PositionRepository",
     "PositionFreezeAllocationRepository",
+    "TradePositionAllocationRepository",
 ]

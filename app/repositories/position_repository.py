@@ -60,14 +60,18 @@ class PositionRepository:
         *,
         position_id: str,
     ) -> Sequence[PositionDetail]:
-        """按FIFO顺序锁定持仓的全部未平逐笔明细。"""
+        """
+        按FIFO顺序锁定持仓的全部逐笔明细。
+
+        已完全关闭的明细仍可能被历史 PositionFreezeAllocation 和
+        TradePositionAllocation 引用。平仓结算的一致性校验需要确认这些
+        关联对象真实存在，因此不能只返回 remaining_volume > 0 的记录；
+        分配器会自行过滤无可用数量的明细。
+        """
 
         statement = (
             select(PositionDetail)
-            .where(
-                PositionDetail.position_id == position_id,
-                PositionDetail.remaining_volume > 0,
-            )
+            .where(PositionDetail.position_id == position_id)
             .order_by(PositionDetail.id)
             .with_for_update()
         )

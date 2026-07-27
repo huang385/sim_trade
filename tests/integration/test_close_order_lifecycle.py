@@ -18,6 +18,7 @@ from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade import Trade
+from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.order_cancellation_service import OrderCancellationService
@@ -182,6 +183,11 @@ def test_close_today_partial_fill_then_cancel_complete_chain(
         close_trade = db.scalar(
             select(Trade).where(Trade.order_id == close_order.order_id)
         )
+        trade_allocations = db.scalars(
+            select(TradePositionAllocation).where(
+                TradePositionAllocation.trade_id == close_trade.trade_id
+            )
+        ).all()
         assert order.status == "PARTIALLY_CANCELLED"
         assert (
             order.traded_volume,
@@ -204,6 +210,93 @@ def test_close_today_partial_fill_then_cancel_complete_chain(
         assert allocation.consumed_volume == 3
         assert allocation.released_volume == 1
         assert allocation.status == "RELEASED"
+        assert len(trade_allocations) == 1
+        assert trade_allocations[0].close_volume == 3
+        assert trade_allocations[0].commission == close_trade.commission
+
+
+def test_plain_close_crosses_yesterday_and_today_with_distinct_fees(
+    integration_context,
+):
+    """真实 PostgreSQL 验证普通 CLOSE 的今昨拆分和成交明细关系。"""
+
+    create_open_position(integration_context, volume=5)
+    create_open_position(integration_context, volume=5)
+    with SessionLocal() as db:
+        position = db.scalar(
+            select(Position).where(
+                Position.account_id == integration_context.account_id
+            )
+        )
+        details = db.scalars(
+            select(PositionDetail)
+            .where(
+                PositionDetail.account_id
+                == integration_context.account_id
+            )
+            .order_by(PositionDetail.id)
+        ).all()
+        details[0].open_trading_day = (
+            integration_context.trading_day - timedelta(days=1)
+        )
+        position.today_volume = 5
+        position.yesterday_volume = 5
+        db.commit()
+
+    close_order = create_close_order(
+        integration_context,
+        client_order_id="CLOSE-CROSS-DAY",
+        offset_flag="CLOSE",
+        volume=10,
+    )
+    with SessionLocal() as db:
+        allocations = db.scalars(
+            select(PositionFreezeAllocation)
+            .where(
+                PositionFreezeAllocation.order_id
+                == close_order.order_id
+            )
+            .order_by(PositionFreezeAllocation.id)
+        ).all()
+        assert close_order.frozen_commission == Decimal("45.000000")
+        assert [
+            (
+                item.resolved_offset_flag,
+                item.remaining_frozen_commission,
+            )
+            for item in allocations
+        ] == [
+            ("CLOSE_YESTERDAY", Decimal("15.000000")),
+            ("CLOSE_TODAY", Decimal("30.000000")),
+        ]
+
+    assert settle(
+        close_order.order_id,
+        "TICK-CLOSE-CROSS-DAY",
+        "3522",
+        7,
+    ).action == "SETTLED"
+    with SessionLocal() as db:
+        trade = db.scalar(
+            select(Trade).where(Trade.order_id == close_order.order_id)
+        )
+        details = db.scalars(
+            select(TradePositionAllocation)
+            .where(TradePositionAllocation.trade_id == trade.trade_id)
+            .order_by(TradePositionAllocation.id)
+        ).all()
+        assert trade.commission == Decimal("27.000000")
+        assert [
+            (item.resolved_offset_flag, item.close_volume, item.commission)
+            for item in details
+        ] == [
+            ("CLOSE_YESTERDAY", 5, Decimal("15.000000")),
+            ("CLOSE_TODAY", 2, Decimal("12.000000")),
+        ]
+        assert sum(item.close_volume for item in details) == trade.trade_volume
+        assert sum(item.released_margin for item in details) == trade.margin
+        assert sum(item.realized_pnl for item in details) == trade.realized_pnl
+        assert sum(item.commission for item in details) == trade.commission
 
 
 def test_close_today_cannot_use_yesterday_position(integration_context):

@@ -7,10 +7,11 @@ from app.enums.order_enums import OffsetFlag
 
 @dataclass(frozen=True)
 class PositionFreezePlan:
-    """从一笔逐笔持仓明细冻结的数量。"""
+    """从一笔逐笔持仓明细冻结的数量及最终平今/平昨语义。"""
 
     detail: object
     volume: int
+    resolved_offset_flag: OffsetFlag
 
 
 class PositionCloseAllocator:
@@ -79,7 +80,21 @@ class PositionCloseAllocator:
             free_volume = detail.remaining_volume - detail.frozen_volume
             allocated = min(free_volume, remaining)
             if allocated > 0:
-                plans.append(PositionFreezePlan(detail, allocated))
+                # 普通 CLOSE 仍按昨仓优先、今仓补足分配，但每条计划必须
+                # 固化为明确的平今或平昨，后续冻结和实际成交才能使用正确
+                # 的手续费参数，而不能按整张订单平均分摊。
+                resolved_offset_flag = (
+                    OffsetFlag.CLOSE_TODAY
+                    if detail.open_trading_day == trading_day
+                    else OffsetFlag.CLOSE_YESTERDAY
+                )
+                plans.append(
+                    PositionFreezePlan(
+                        detail,
+                        allocated,
+                        resolved_offset_flag,
+                    )
+                )
                 remaining -= allocated
             if remaining == 0:
                 break

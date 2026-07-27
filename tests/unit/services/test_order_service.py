@@ -192,7 +192,7 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
         ("SELL", "CLOSE_TODAY", "LONG", Decimal("12.000000")),
         ("BUY", "CLOSE_TODAY", "SHORT", Decimal("12.000000")),
         ("SELL", "CLOSE_YESTERDAY", "LONG", Decimal("6.000000")),
-        ("BUY", "CLOSE", "SHORT", Decimal("6.000000")),
+        ("BUY", "CLOSE", "SHORT", Decimal("12.000000")),
     ],
 )
 def test_create_close_order_freezes_commission_and_position(
@@ -276,6 +276,86 @@ def test_create_close_order_freezes_commission_and_position(
         ]
         == 2
     )
+
+
+def test_plain_close_splits_yesterday_and_today_frozen_commission():
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    created_order = SimpleNamespace(order_id="O20260717000001")
+    order_repository.create.return_value = created_order
+    account = make_account()
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = account
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    yesterday = SimpleNamespace(
+        id=1,
+        position_detail_id="PD-Y",
+        open_trading_day=TRADING_DAY - timedelta(days=1),
+        remaining_volume=5,
+        frozen_volume=0,
+        updated_at=None,
+    )
+    today = SimpleNamespace(
+        id=2,
+        position_detail_id="PD-T",
+        open_trading_day=TRADING_DAY,
+        remaining_volume=5,
+        frozen_volume=0,
+        updated_at=None,
+    )
+    position = SimpleNamespace(
+        position_id="P-1",
+        frozen_volume=0,
+        available_volume=10,
+        updated_at=None,
+    )
+    position_repository = Mock()
+    position_repository.get_for_update.return_value = position
+    position_repository.list_details_for_update.return_value = [
+        yesterday,
+        today,
+    ]
+    allocation_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=Mock(),
+        position_repository=position_repository,
+        allocation_repository=allocation_repository,
+    )
+
+    service.create_order(
+        db,
+        make_request(
+            direction="SELL",
+            offset_flag="CLOSE",
+            volume=10,
+        ),
+    )
+
+    assert account.frozen_commission == Decimal("45.000000")
+    assert account.available_cash == Decimal("99955.000000")
+    assert order_repository.create.call_args.kwargs[
+        "frozen_commission"
+    ] == Decimal("45.000000")
+    allocations = [
+        item.args[1] for item in allocation_repository.add.call_args_list
+    ]
+    assert [
+        (
+            item.position_detail_id,
+            item.resolved_offset_flag,
+            item.commission_parameter,
+            item.remaining_frozen_commission,
+        )
+        for item in allocations
+    ] == [
+        ("PD-Y", "CLOSE_YESTERDAY", Decimal("3"), Decimal("15.000000")),
+        ("PD-T", "CLOSE_TODAY", Decimal("6"), Decimal("30.000000")),
+    ]
 
 
 def test_duplicate_detected_after_account_lock_does_not_freeze_twice():

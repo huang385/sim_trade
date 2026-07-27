@@ -32,7 +32,10 @@ from app.schemas.order_schema import (
     OrderResponse,
 )
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
-from app.schemas.trade_schema import TradeResponse
+from app.schemas.trade_schema import (
+    TradePositionAllocationResponse,
+    TradeResponse,
+)
 from app.schemas.position_schema import PositionResponse
 
 
@@ -57,5 +60,6 @@ __all__ = [
     "MarketTick",
     "MarketTickIngestType",
     "TradeResponse",
+    "TradePositionAllocationResponse",
     "PositionResponse",
 ]

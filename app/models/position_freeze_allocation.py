@@ -1,9 +1,11 @@
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Integer,
+    Numeric,
     String,
     UniqueConstraint,
 )
@@ -53,6 +55,30 @@ class PositionFreezeAllocation(Base):
             "+ consumed_volume + released_volume",
             name="ck_position_freeze_volume_balance",
         ),
+        CheckConstraint(
+            "resolved_offset_flag IN ('CLOSE_TODAY', 'CLOSE_YESTERDAY')",
+            name="ck_position_freeze_resolved_offset",
+        ),
+        CheckConstraint(
+            "commission_parameter >= 0",
+            name="ck_position_freeze_commission_parameter_nonnegative",
+        ),
+        CheckConstraint(
+            "commission_contract_multiplier > 0",
+            name="ck_position_freeze_commission_multiplier_positive",
+        ),
+        CheckConstraint(
+            "original_frozen_commission >= 0 "
+            "AND remaining_frozen_commission >= 0 "
+            "AND consumed_commission >= 0 "
+            "AND released_commission >= 0",
+            name="ck_position_freeze_commission_nonnegative",
+        ),
+        CheckConstraint(
+            "original_frozen_commission = remaining_frozen_commission "
+            "+ consumed_commission + released_commission",
+            name="ck_position_freeze_commission_balance",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -66,10 +92,36 @@ class PositionFreezeAllocation(Base):
     exchange_id: Mapped[str] = mapped_column(String(32), nullable=False)
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
     offset_flag: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 普通 CLOSE 在下单分配时解析为明确的平今或平昨，成交和撤单均只
+    # 使用该固定结果，不再根据后来变化的持仓日期重新判断。
+    resolved_offset_flag: Mapped[str] = mapped_column(String(32), nullable=False)
+    # 每条分配独立保存手续费规则快照，支持同一普通 CLOSE 同时包含
+    # 平昨和平今，并确保规则表更新后仍能解释冻结和实际成交手续费。
+    commission_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    commission_parameter: Mapped[Decimal] = mapped_column(
+        Numeric(24, 12), nullable=False
+    )
+    commission_contract_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False
+    )
     original_frozen_volume: Mapped[int] = mapped_column(Integer, nullable=False)
     remaining_frozen_volume: Mapped[int] = mapped_column(Integer, nullable=False)
     consumed_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     released_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 下列四个字段记录“预计冻结手续费”的资源流转，不等同于 Trade 中
+    # 按实际成交价计算的实际手续费。
+    original_frozen_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False
+    )
+    remaining_frozen_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False
+    )
+    consumed_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+    released_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now

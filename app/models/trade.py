@@ -27,7 +27,8 @@ class Trade(Base):
     核心原则：
     1. 一条行情对同一订单最多产生一条成交；
     2. 成交时间使用行情源事件时间，不能使用 Worker 当前处理时间；
-    3. margin 和 commission 记录本次从订单冻结资源中转出的金额；
+    3. margin 记录本次转入或释放的保证金，commission 记录按实际成交价
+       和订单手续费快照重新计算的实际手续费；
     4. 所有价格和金额均使用 Decimal 对应的 Numeric，禁止 float。
     """
 
@@ -100,7 +101,8 @@ class Trade(Base):
     # OPEN表示新增占用保证金，CLOSE类成交表示本次释放的保证金
     margin: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
-    # 本次从订单冻结手续费转为账户实际手续费的金额
+    # 本次按实际成交价和接受时规则快照计算的实际手续费；它可能与本次
+    # 释放的预计冻结手续费不同，差额由成交结算修正账户可用资金。
     commission: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
 
     # OPEN成交为0；CLOSE类成交记录本次逐笔计算的已实现盈亏
