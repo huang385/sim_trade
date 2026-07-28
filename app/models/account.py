@@ -119,21 +119,42 @@ class Account(Base):
         default=Decimal("0"),
     )
 
-    # 平仓成交后已经实现的盈亏
+    # 基于原始开仓价累计计算的已实现盈亏
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),
         nullable=False,
         default=Decimal("0"),
     )
 
-    # 当前持仓根据最新行情计算出的浮动盈亏
+    # 基于原始开仓价计算的累计浮动盈亏
     unrealized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),
         nullable=False,
         default=Decimal("0"),
     )
 
-    # 当前交易日累计盈亏
+    # 当前未平仓持仓相对 pnl_base_price 的当日持仓盈亏
+    daily_position_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前交易日平仓成交相对 pnl_base_price 的累计盈亏
+    daily_close_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当前交易日已经实际发生的成交手续费
+    daily_commission: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 当日净盈亏 = 当日持仓盈亏 + 当日平仓盈亏 - 当日手续费
     daily_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),
         nullable=False,

@@ -110,6 +110,11 @@ class Trade(Base):
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
 
+    # OPEN成交为0；CLOSE类成交记录相对 pnl_base_price 的当日平仓盈亏
+    daily_close_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+
     # 成交时间使用触发撮合的 Tick.event_time，而不是 Worker 的处理时间。
     trade_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True

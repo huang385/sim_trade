@@ -42,6 +42,7 @@ class TradeResponse(BaseModel):
     margin: Decimal
     commission: Decimal
     realized_pnl: Decimal
+    daily_close_pnl: Decimal
     # 行情事件时间和数据库写入时间
     trade_time: datetime
     created_at: datetime
@@ -71,4 +72,5 @@ class TradePositionAllocationResponse(BaseModel):
     released_margin: Decimal
     commission: Decimal
     realized_pnl: Decimal
+    daily_close_pnl: Decimal
     created_at: datetime

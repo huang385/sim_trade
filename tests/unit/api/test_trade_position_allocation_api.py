@@ -43,6 +43,7 @@ def make_allocation(index: int, resolved_offset_flag: str):
         released_margin=Decimal("4200.000000"),
         commission=Decimal("0.035200"),
         realized_pnl=Decimal("200.000000"),
+        daily_close_pnl=Decimal("200.000000"),
         created_at=NOW,
     )
 

@@ -71,6 +71,33 @@ class Settings(BaseSettings):
     # 撮合算法由注册器按名称创建；未知名称会让 Worker 在启动阶段失败。
     matching_engine_name: str = "VN"
 
+    # 盘中实时盈亏使用独立行情Consumer Group，不能与撮合组共享消息。
+    pnl_consumer_group: str = "group:pnl-engine"
+    pnl_consumer_name: str | None = None
+    pnl_consumer_batch_size: int = 100
+    pnl_consumer_block_ms: int = 5000
+    pnl_pending_idle_ms: int = 60000
+    pnl_event_max_retries: int = 10
+    pnl_failure_ttl_seconds: int = 604800
+    pnl_dead_letter_stream: str = "stream:market-ticks:pnl:dead-letter"
+    pnl_consumer_retry_interval_seconds: float = 1.0
+    active_position_cache_refresh_ms: int = 1000
+
+    # Redis实时结果按Dirty集合定时批量落库，而不是逐Tick更新PostgreSQL。
+    pnl_persist_interval_ms: int = 1000
+    pnl_persist_batch_size: int = 500
+
+    # TRADE_CREATED独立消费组用于成交提交后立即失效活动持仓缓存。
+    pnl_trade_consumer_group: str = "group:pnl-trade-engine"
+    pnl_trade_consumer_name: str | None = None
+    pnl_trade_consumer_batch_size: int = 100
+    pnl_trade_consumer_block_ms: int = 5000
+    pnl_trade_pending_idle_ms: int = 60000
+    pnl_trade_event_max_retries: int = 10
+    pnl_trade_failure_ttl_seconds: int = 604800
+    pnl_trade_dead_letter_stream: str = "stream:orders:pnl:dead-letter"
+    pnl_trade_retry_interval_seconds: float = 1.0
+
     @property
     def database_url(self) -> str:
         return (

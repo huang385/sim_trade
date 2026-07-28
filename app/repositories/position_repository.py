@@ -3,6 +3,8 @@ from typing import Sequence
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.account import Account
+from app.models.instrument import Instrument
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 
@@ -53,6 +55,100 @@ class PositionRepository:
             .order_by(Position.id)
         )
         return db.scalars(statement).all()
+
+    @staticmethod
+    def list_by_account_contract(
+        db: Session,
+        *,
+        account_id: str,
+        exchange_id: str,
+        symbol: str,
+    ) -> Sequence[Position]:
+        """查询账户指定合约的多空持仓，供成交后清理实时快照使用。"""
+
+        statement = (
+            select(Position)
+            .where(
+                Position.account_id == account_id,
+                Position.exchange_id == exchange_id,
+                Position.symbol == symbol,
+            )
+            .order_by(Position.id)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def get_by_position_id(
+        db: Session,
+        position_id: str,
+    ) -> Position | None:
+        """按业务编号读取一条持仓，不加行锁。"""
+
+        return db.scalar(
+            select(Position).where(
+                Position.position_id == position_id
+            )
+        )
+
+    @staticmethod
+    def get_by_position_id_for_update(
+        db: Session,
+        position_id: str,
+    ) -> Position | None:
+        """定时持久化时按业务编号锁定一条持仓。"""
+
+        return db.scalar(
+            select(Position)
+            .where(Position.position_id == position_id)
+            .with_for_update()
+        )
+
+    @staticmethod
+    def list_account_ids_for_positions(
+        db: Session,
+        position_ids: Sequence[str],
+    ) -> Sequence[tuple[str, str]]:
+        """批量返回Dirty持仓与账户映射，不加锁且不修改数据。"""
+
+        if not position_ids:
+            return []
+        statement = (
+            select(Position.position_id, Position.account_id)
+            .where(Position.position_id.in_(tuple(position_ids)))
+            .order_by(Position.account_id, Position.id)
+        )
+        return db.execute(statement).all()
+
+    @staticmethod
+    def list_active_calculation_rows(db: Session):
+        """
+        一次读取全部活动持仓计算行，用于短周期内存缓存刷新。
+
+        只返回total_volume和remaining_volume均大于0的数据；调用方立即转换
+        为不可变快照，禁止把这些ORM对象跨Session保存。
+        """
+
+        statement = (
+            select(Position, PositionDetail, Instrument, Account)
+            .join(
+                PositionDetail,
+                PositionDetail.position_id == Position.position_id,
+            )
+            .join(
+                Instrument,
+                Instrument.order_book_id == Position.order_book_id,
+            )
+            .join(
+                Account,
+                Account.account_id == Position.account_id,
+            )
+            .where(
+                Position.total_volume > 0,
+                PositionDetail.remaining_volume > 0,
+            )
+            .order_by(Position.id, PositionDetail.id)
+        )
+        return db.execute(statement).all()
 
     @staticmethod
     def list_available_details_for_update(
@@ -132,6 +228,25 @@ class PositionRepository:
                 PositionDetail.remaining_volume > 0,
             )
             .order_by(PositionDetail.id)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def list_open_details_for_update(
+        db: Session,
+        *,
+        position_id: str,
+    ) -> Sequence[PositionDetail]:
+        """定时持久化时按固定顺序锁定仍有数量的逐笔明细。"""
+
+        statement = (
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_id == position_id,
+                PositionDetail.remaining_volume > 0,
+            )
+            .order_by(PositionDetail.id)
+            .with_for_update()
         )
         return db.scalars(statement).all()
 

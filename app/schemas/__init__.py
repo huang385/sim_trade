@@ -37,6 +37,12 @@ from app.schemas.trade_schema import (
     TradeResponse,
 )
 from app.schemas.position_schema import PositionResponse
+from app.schemas.pnl_schema import (
+    AccountRealtimePnl,
+    AccountRealtimePnlResponse,
+    PositionRealtimePnl,
+    PositionRealtimePnlResponse,
+)
 
 
 __all__ = [
@@ -62,4 +68,8 @@ __all__ = [
     "TradeResponse",
     "TradePositionAllocationResponse",
     "PositionResponse",
+    "PositionRealtimePnl",
+    "AccountRealtimePnl",
+    "PositionRealtimePnlResponse",
+    "AccountRealtimePnlResponse",
 ]

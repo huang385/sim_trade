@@ -86,7 +86,12 @@ class TradePositionAllocation(Base):
         Numeric(24, 6), nullable=False
     )
     commission: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
+    # 基于原始开仓价的累计口径已实现盈亏
     realized_pnl: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
+    # 基于该持仓明细 pnl_base_price 的当日平仓盈亏
+    daily_close_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

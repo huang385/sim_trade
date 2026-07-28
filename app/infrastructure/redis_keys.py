@@ -13,6 +13,12 @@ ACTIVE_ORDERS_ALL_KEY = "active_orders:all"
 MARKET_TICK_STREAM = settings.market_tick_stream_name
 MARKET_MATCHING_CONSUMER_GROUP = settings.market_matching_consumer_group
 MARKET_MATCHING_DEAD_LETTER_STREAM = settings.market_matching_dead_letter_stream
+PNL_CONSUMER_GROUP = settings.pnl_consumer_group
+PNL_DEAD_LETTER_STREAM = settings.pnl_dead_letter_stream
+PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
+PNL_DIRTY_ACCOUNTS_KEY = "pnl:dirty_accounts"
+PNL_DIRTY_POSITION_VERSIONS_KEY = "pnl:dirty_position_versions"
+PNL_POSITION_CACHE_VERSION_KEY = "pnl:position_cache_version"
 YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
 
 
@@ -56,3 +62,39 @@ def market_matching_failure_key(message_id: str) -> str:
     """返回行情撮合消息的失败次数键名。"""
 
     return f"market_matching_failure:{message_id}"
+
+
+def pnl_position_key(position_id: str) -> str:
+    """返回单条持仓实时盈亏Hash键名。"""
+
+    return f"pnl:position:{position_id}"
+
+
+def pnl_account_key(account_id: str) -> str:
+    """返回账户实时盈亏Hash键名。"""
+
+    return f"pnl:account:{account_id}"
+
+
+def pnl_account_positions_key(account_id: str) -> str:
+    """返回账户当前已建立实时快照的持仓编号集合。"""
+
+    return f"pnl:account_positions:{account_id}"
+
+
+def pnl_contract_positions_key(exchange_id: str, symbol: str) -> str:
+    """返回合约当前已建立实时快照的持仓编号集合。"""
+
+    return f"pnl:contract_positions:{exchange_id}:{symbol}"
+
+
+def pnl_event_failure_key(message_id: str) -> str:
+    """返回PnL行情消费失败次数键名。"""
+
+    return f"pnl_event_failure:{message_id}"
+
+
+def pnl_trade_event_failure_key(message_id: str) -> str:
+    """返回成交后PnL刷新消费者的失败次数键名。"""
+
+    return f"pnl_trade_event_failure:{message_id}"

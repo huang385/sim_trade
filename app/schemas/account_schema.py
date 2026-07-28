@@ -53,6 +53,9 @@ class AccountResponse(BaseModel):
 
     realized_pnl: Decimal
     unrealized_pnl: Decimal
+    daily_position_pnl: Decimal
+    daily_close_pnl: Decimal
+    daily_commission: Decimal
     daily_pnl: Decimal
 
     used_commission: Decimal

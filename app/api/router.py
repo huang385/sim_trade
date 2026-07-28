@@ -7,6 +7,7 @@ from app.api.fee_rule_api import router as fee_rule_router
 from app.api.order_api import router as order_router
 from app.api.trade_api import router as trade_router
 from app.api.position_api import router as position_router
+from app.api.pnl_api import router as pnl_router
 
 
 api_router = APIRouter()
@@ -30,3 +31,6 @@ api_router.include_router(order_router)
 # 成交与持仓只读查询接口
 api_router.include_router(trade_router)
 api_router.include_router(position_router)
+
+# 账户和持仓实时盈亏只读接口
+api_router.include_router(pnl_router)

@@ -228,6 +228,9 @@ class TradeSettlementService:
                 "margin": _decimal_string(trade.margin),
                 "commission": _decimal_string(trade.commission),
                 "realized_pnl": _decimal_string(trade.realized_pnl),
+                "daily_close_pnl": _decimal_string(
+                    trade.daily_close_pnl
+                ),
                 "trade_time": trade.trade_time.isoformat(),
                 "created_at": trade.created_at.isoformat(),
             },
@@ -269,6 +272,9 @@ class TradeSettlementService:
                 "released_margin": _decimal_string(trade.margin),
                 "commission": _decimal_string(trade.commission),
                 "realized_pnl": _decimal_string(trade.realized_pnl),
+                "daily_close_pnl": _decimal_string(
+                    trade.daily_close_pnl
+                ),
                 "updated_at": order.updated_at.isoformat(),
             },
             created_at=now,
@@ -432,6 +438,7 @@ class TradeSettlementService:
                 margin=allocated_margin,
                 commission=actual_commission,
                 realized_pnl=Decimal("0.000000"),
+                daily_close_pnl=Decimal("0.000000"),
                 trade_time=command.tick_event_time,
                 created_at=now,
             )
@@ -487,6 +494,9 @@ class TradeSettlementService:
             account.used_commission = quantize_money(
                 account.used_commission + actual_commission
             )
+            account.daily_commission = quantize_money(
+                account.daily_commission + actual_commission
+            )
             account.cash_balance = quantize_money(
                 account.cash_balance - actual_commission
             )
@@ -501,7 +511,9 @@ class TradeSettlementService:
                 account.cash_balance + account.unrealized_pnl
             )
             account.daily_pnl = quantize_money(
-                account.daily_pnl - actual_commission
+                account.daily_position_pnl
+                + account.daily_close_pnl
+                - account.daily_commission
             )
             account.updated_at = now
 
@@ -525,6 +537,8 @@ class TradeSettlementService:
                     used_margin=Decimal("0.000000"),
                     realized_pnl=Decimal("0.000000"),
                     unrealized_pnl=Decimal("0.000000"),
+                    daily_position_pnl=Decimal("0.000000"),
+                    daily_close_pnl=Decimal("0.000000"),
                     trading_day=order.trading_day,
                     created_at=now,
                     updated_at=now,
@@ -567,6 +581,7 @@ class TradeSettlementService:
                 direction=position_direction,
                 open_trading_day=order.trading_day,
                 open_price=fill_price,
+                pnl_base_price=fill_price,
                 original_volume=fill_volume,
                 remaining_volume=fill_volume,
                 frozen_volume=0,

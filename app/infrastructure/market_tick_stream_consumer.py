@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Mapping
+from typing import Callable, Mapping
 
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -29,6 +29,9 @@ class MarketTickStreamConsumer:
         consumer_name: str,
         dead_letter_stream: str,
         failure_ttl_seconds: int,
+        failure_key_factory: Callable[[str], str] = (
+            market_matching_failure_key
+        ),
     ):
         # 所有Key和消费参数都由配置或调用方传入，集成测试可使用隔离Stream，
         # 避免影响生产消费组的位置和Pending列表。
@@ -38,6 +41,7 @@ class MarketTickStreamConsumer:
         self.consumer_name = consumer_name
         self.dead_letter_stream = dead_letter_stream
         self.failure_ttl_seconds = failure_ttl_seconds
+        self.failure_key_factory = failure_key_factory
 
     def ensure_group(self) -> None:
         """
@@ -160,7 +164,7 @@ class MarketTickStreamConsumer:
     def increment_failure(self, message_id: str) -> int:
         """原子增加消息失败次数并刷新TTL，避免计数Key永久残留。"""
 
-        key = market_matching_failure_key(message_id)
+        key = self.failure_key_factory(message_id)
         pipeline = self.redis_client.pipeline(transaction=True)
         pipeline.incr(key)
         pipeline.expire(key, self.failure_ttl_seconds)
@@ -169,7 +173,7 @@ class MarketTickStreamConsumer:
     def clear_failure(self, message_id: str) -> None:
         """消息ACK或成功进入死信后删除失败次数。"""
 
-        self.redis_client.delete(market_matching_failure_key(message_id))
+        self.redis_client.delete(self.failure_key_factory(message_id))
 
     def publish_dead_letter(
         self,

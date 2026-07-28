@@ -8,6 +8,12 @@ from app.common.time_utils import utc_now
 from app.core.database import Base
 
 
+def default_pnl_base_price(context) -> Decimal:
+    """旧测试构造未显式传值时，默认以真实开仓价作为当日盈亏基准。"""
+
+    return Decimal(context.get_current_parameters()["open_price"])
+
+
 class PositionDetail(Base):
     """
     逐笔开仓持仓明细。
@@ -44,6 +50,10 @@ class PositionDetail(Base):
             "remaining_margin >= 0",
             name="ck_position_detail_remaining_margin_nonnegative",
         ),
+        CheckConstraint(
+            "pnl_base_price > 0",
+            name="ck_position_detail_pnl_base_price_positive",
+        ),
     )
 
     # 数据库内部自增主键
@@ -78,6 +88,14 @@ class PositionDetail(Base):
 
     # 该笔持仓的实际开仓成交价
     open_price: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
+
+    # 当日持仓和平仓盈亏计算基准。今仓等于开仓价；未来日终结算会把
+    # 剩余持仓更新为正式结算价，但绝不覆盖上面的原始 open_price。
+    pnl_base_price: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=default_pnl_base_price,
+    )
 
     # 原始开仓数量，创建后不再修改
     original_volume: Mapped[int] = mapped_column(Integer, nullable=False)

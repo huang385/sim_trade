@@ -49,6 +49,14 @@ from app.services.margin_release_calculator import MarginReleaseCalculator
 from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
 )
+from app.services.pnl_calculator import PnlCalculator
+from app.services.realtime_pnl_service import RealtimePnlService
+from app.services.pnl_snapshot_persistence_service import (
+    PnlSnapshotPersistenceService,
+)
+from app.services.realtime_pnl_query_service import (
+    RealtimePnlQueryService,
+)
 
 
 __all__ = [
@@ -88,4 +96,8 @@ __all__ = [
     "RealizedPnlCalculator",
     "MarginReleaseCalculator",
     "CloseTradeSettlementHandler",
+    "PnlCalculator",
+    "RealtimePnlService",
+    "PnlSnapshotPersistenceService",
+    "RealtimePnlQueryService",
 ]

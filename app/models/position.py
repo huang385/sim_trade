@@ -108,13 +108,23 @@ class Position(Base):
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
 
-    # 当前持仓方向累计确认的已实现盈亏
+    # 基于原始开仓价累计确认的已实现盈亏
     realized_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
 
-    # 未实现盈亏；本阶段尚未接入盯市计算
+    # 基于原始开仓价计算的累计浮动盈亏
     unrealized_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+
+    # 当前未平仓明细相对 pnl_base_price 的当日持仓盈亏
+    daily_position_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+
+    # 当前交易日平仓成交相对 pnl_base_price 的累计盈亏
+    daily_close_pnl: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
 

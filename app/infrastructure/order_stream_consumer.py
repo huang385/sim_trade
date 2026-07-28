@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from redis import Redis
 from redis.exceptions import ResponseError
@@ -30,6 +30,9 @@ class OrderStreamConsumer:
         consumer_name: str,
         dead_letter_stream: str,
         failure_ttl_seconds: int,
+        failure_key_factory: Callable[[str], str] = (
+            order_event_failure_key
+        ),
     ):
         self.redis_client = redis_client
         self.stream_name = stream_name
@@ -37,6 +40,7 @@ class OrderStreamConsumer:
         self.consumer_name = consumer_name
         self.dead_letter_stream = dead_letter_stream
         self.failure_ttl_seconds = failure_ttl_seconds
+        self.failure_key_factory = failure_key_factory
 
     def ensure_group(self) -> None:
         """
@@ -175,7 +179,7 @@ class OrderStreamConsumer:
     def increment_failure(self, message_id: str) -> int:
         """增加失败次数并刷新 TTL，避免计数键永久占用 Redis。"""
 
-        key = order_event_failure_key(message_id)
+        key = self.failure_key_factory(message_id)
         pipeline = self.redis_client.pipeline(transaction=True)
         pipeline.incr(key)
         pipeline.expire(key, self.failure_ttl_seconds)
@@ -185,7 +189,7 @@ class OrderStreamConsumer:
     def clear_failure(self, message_id: str) -> None:
         """消息成功处理或进入死信后删除失败计数。"""
 
-        self.redis_client.delete(order_event_failure_key(message_id))
+        self.redis_client.delete(self.failure_key_factory(message_id))
 
     def publish_dead_letter(
         self,

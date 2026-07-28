@@ -36,6 +36,8 @@ class PositionResponse(BaseModel):
     # 已实现盈亏盘中累计；未实现盈亏仍等待后续盯市阶段更新
     realized_pnl: Decimal
     unrealized_pnl: Decimal
+    daily_position_pnl: Decimal
+    daily_close_pnl: Decimal
     # 交易日和生命周期时间
     trading_day: date
     created_at: datetime

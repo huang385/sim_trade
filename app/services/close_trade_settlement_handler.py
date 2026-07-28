@@ -31,6 +31,7 @@ from app.services.fee_calculator import (
     FeeCalculator,
 )
 from app.services.margin_release_calculator import MarginReleaseCalculator
+from app.services.pnl_calculator import PnlCalculator
 from app.services.realized_pnl_calculator import RealizedPnlCalculator
 
 
@@ -51,6 +52,7 @@ class _CloseConsumption:
     released_frozen_commission: Decimal
     actual_commission: Decimal
     realized_pnl: Decimal
+    daily_close_pnl: Decimal
 
 
 class CloseTradeSettlementHandler:
@@ -67,6 +69,7 @@ class CloseTradeSettlementHandler:
         ) = None,
         fee_calculator: FeeCalculator | None = None,
         pnl_calculator: RealizedPnlCalculator | None = None,
+        daily_pnl_calculator: PnlCalculator | None = None,
         margin_calculator: MarginReleaseCalculator | None = None,
         trade_position_allocation_id_factory: Callable[[], str] = (
             generate_trade_position_allocation_id
@@ -81,6 +84,9 @@ class CloseTradeSettlementHandler:
         )
         self.fee_calculator = fee_calculator or FeeCalculator()
         self.pnl_calculator = pnl_calculator or RealizedPnlCalculator()
+        self.daily_pnl_calculator = (
+            daily_pnl_calculator or PnlCalculator()
+        )
         self.margin_calculator = margin_calculator or MarginReleaseCalculator()
         self.trade_position_allocation_id_factory = (
             trade_position_allocation_id_factory
@@ -402,6 +408,18 @@ class CloseTradeSettlementHandler:
                 volume=consumed,
                 contract_multiplier=Decimal(instrument.contract_multiplier),
             )
+            daily_close_pnl = (
+                self.daily_pnl_calculator.calculate_close(
+                    position_direction=position_direction,
+                    close_price=fill_price,
+                    open_price=detail.open_price,
+                    pnl_base_price=detail.pnl_base_price,
+                    volume=consumed,
+                    contract_multiplier=Decimal(
+                        instrument.contract_multiplier
+                    ),
+                ).daily_close_pnl
+            )
             released_frozen_commission = (
                 self._allocate_frozen_commission(
                     allocation.remaining_frozen_commission,
@@ -420,6 +438,7 @@ class CloseTradeSettlementHandler:
                     ),
                     actual_commission=Decimal("0.000000"),
                     realized_pnl=realized_pnl,
+                    daily_close_pnl=daily_close_pnl,
                 )
             )
             remaining_to_consume -= consumed
@@ -491,6 +510,12 @@ class CloseTradeSettlementHandler:
         realized_pnl = quantize_money(
             sum(
                 (item.realized_pnl for item in consumptions),
+                Decimal("0"),
+            )
+        )
+        daily_close_pnl = quantize_money(
+            sum(
+                (item.daily_close_pnl for item in consumptions),
                 Decimal("0"),
             )
         )
@@ -566,6 +591,7 @@ class CloseTradeSettlementHandler:
                     released_margin=item.released_margin,
                     commission=item.actual_commission,
                     realized_pnl=item.realized_pnl,
+                    daily_close_pnl=item.daily_close_pnl,
                     created_at=now,
                 )
             )
@@ -593,6 +619,7 @@ class CloseTradeSettlementHandler:
             margin=released_margin,
             commission=actual_commission,
             realized_pnl=realized_pnl,
+            daily_close_pnl=daily_close_pnl,
             trade_time=command.tick_event_time,
             created_at=now,
         )
@@ -674,6 +701,12 @@ class CloseTradeSettlementHandler:
         account.realized_pnl = quantize_money(
             account.realized_pnl + realized_pnl
         )
+        account.daily_close_pnl = quantize_money(
+            account.daily_close_pnl + daily_close_pnl
+        )
+        account.daily_commission = quantize_money(
+            account.daily_commission + actual_commission
+        )
         account.cash_balance = quantize_money(
             account.cash_balance + realized_pnl - actual_commission
         )
@@ -690,7 +723,9 @@ class CloseTradeSettlementHandler:
             account.cash_balance + account.unrealized_pnl
         )
         account.daily_pnl = quantize_money(
-            account.daily_pnl + realized_pnl - actual_commission
+            account.daily_position_pnl
+            + account.daily_close_pnl
+            - account.daily_commission
         )
         account.updated_at = now
 
@@ -701,6 +736,9 @@ class CloseTradeSettlementHandler:
         )
         position.realized_pnl = quantize_money(
             position.realized_pnl + realized_pnl
+        )
+        position.daily_close_pnl = quantize_money(
+            position.daily_close_pnl + daily_close_pnl
         )
         # 汇总重算只读取 remaining_volume > 0 的有效明细，不再读取或锁定
         # 与当前订单无关的已关闭历史明细。
