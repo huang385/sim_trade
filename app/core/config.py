@@ -81,11 +81,18 @@ class Settings(BaseSettings):
     pnl_failure_ttl_seconds: int = 604800
     pnl_dead_letter_stream: str = "stream:market-ticks:pnl:dead-letter"
     pnl_consumer_retry_interval_seconds: float = 1.0
+    # 行情持续消费，但实时盈亏只按该周期合并同一合约的最新行情。
+    pnl_calculation_interval_ms: int = 500
     active_position_cache_refresh_ms: int = 1000
+    pnl_full_reconciliation_interval_seconds: int = 60
+    pnl_worker_lease_ttl_seconds: int = 15
+    pnl_worker_lease_renew_seconds: int = 5
 
     # Redis实时结果按Dirty集合定时批量落库，而不是逐Tick更新PostgreSQL。
     pnl_persist_interval_ms: int = 1000
     pnl_persist_batch_size: int = 500
+    pnl_persist_max_batches_per_cycle: int = 10
+    pnl_persist_time_budget_ms: int = 800
 
     # TRADE_CREATED独立消费组用于成交提交后立即失效活动持仓缓存。
     pnl_trade_consumer_group: str = "group:pnl-trade-engine"

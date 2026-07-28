@@ -73,8 +73,11 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
     try:
         redis_client.ping()
         redis_client.delete(*cleanup_keys)
-        for tick in ticks:
-            assert store.publish(tick) == MarketTickStoreResult.PUBLISHED
+        for index, tick in enumerate(ticks):
+            assert store.publish(
+                tick,
+                subscription_generation=(7 if index == len(ticks) - 1 else None),
+            ) == MarketTickStoreResult.PUBLISHED
 
         latest = store.get_latest(exchange_id, symbol)
         assert latest["sequence_id"] == "1"
@@ -84,6 +87,13 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
 
         messages = redis_client.xrange(stream_name)
         assert len(messages) == 4
+        # 最新Hash保留真实Stream编号，供订单到达即时撮合继续复用同一
+        # 行情事件和成交幂等键。
+        assert latest["stream_message_id"] == messages[-1][0]
+        latest = store.get_latest(exchange_id, symbol)
+        assert latest["subscription_generation"] == "7"
+        # Hash增加的内部追踪字段不会影响MarketTick类型恢复。
+        assert MarketTickStore.mapping_to_tick(latest) == ticks[-1]
         first_payload = json.loads(messages[0][1]["payload"])
         assert first_payload["last_price"] == "14600.0"
         assert first_payload["cumulative_turnover"] == "5298353100.0"

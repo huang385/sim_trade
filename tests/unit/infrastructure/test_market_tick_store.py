@@ -38,6 +38,37 @@ def test_hash_mapping_uses_empty_string_for_none_and_iso_time():
     assert mapping["last_price"] == "14600.0"
 
 
+def test_hash_mapping_restores_empty_optional_fields_to_none():
+    original = normalize()
+    mapping = MarketTickStore.tick_to_mapping(original)
+    mapping["pre_close"] = ""
+    mapping["server_time"] = ""
+    mapping["raw_update_millisec"] = ""
+
+    restored = MarketTickStore.mapping_to_tick(mapping)
+
+    assert restored.source_event_id == original.source_event_id
+    assert restored.last_price == original.last_price
+    assert restored.pre_close is None
+    assert restored.server_time is None
+    assert restored.raw_update_millisec is None
+
+
+def test_publish_writes_subscription_generation_atomically():
+    redis_client = Mock()
+    redis_client.eval.return_value = "PUBLISHED"
+    store = MarketTickStore(redis_client)
+    tick = normalize()
+
+    result = store.publish(tick, subscription_generation=7)
+
+    assert result == MarketTickStoreResult.PUBLISHED
+    arguments = redis_client.eval.call_args.args
+    assert arguments[1] == 2
+    assert arguments[10] == "7"
+    assert "'subscription_generation', ARGV[7]" in arguments[0]
+
+
 def test_source_status_does_not_require_credentials():
     redis_client = Mock()
     store = MarketTickStore(redis_client)

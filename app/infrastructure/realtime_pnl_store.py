@@ -3,15 +3,24 @@ from decimal import Decimal
 from typing import Iterable
 
 from redis import Redis
+from redis.exceptions import WatchError
 
 from app.infrastructure.redis_keys import (
+    PNL_ACCOUNT_INDEX_KEYS_KEY,
+    PNL_CONTRACT_INDEX_KEYS_KEY,
+    PNL_DIRTY_CONTRACTS_KEY,
+    PNL_DIRTY_CONTRACT_VERSIONS_KEY,
     PNL_DIRTY_ACCOUNTS_KEY,
     PNL_DIRTY_POSITIONS_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_CACHE_VERSION_KEY,
+    PNL_WORKER_LEASE_KEY,
+    parse_pnl_dirty_contract_member,
     pnl_account_key,
     pnl_account_positions_key,
     pnl_contract_positions_key,
+    pnl_dirty_contract_accounts_key,
+    pnl_dirty_contract_member,
     pnl_position_key,
 )
 from app.schemas.pnl_schema import (
@@ -28,6 +37,39 @@ if current == ARGV[2] then
     return 1
 end
 return 0
+"""
+
+CLEAR_DIRTY_CONTRACT_IF_UNCHANGED_SCRIPT = """
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if current == ARGV[2] then
+    redis.call('SREM', KEYS[2], ARGV[1])
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    redis.call('DEL', KEYS[3])
+    return 1
+end
+return 0
+"""
+
+RELEASE_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+RENEW_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+MARK_CONTRACT_DIRTY_SCRIPT = """
+local version = redis.call('INCR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[1], tostring(version))
+redis.call('SADD', KEYS[4], ARGV[2])
+return tostring(version)
 """
 
 
@@ -68,6 +110,130 @@ class RealtimePnlStore:
             self.redis_client.get(PNL_POSITION_CACHE_VERSION_KEY) or "0"
         )
 
+    def mark_contract_dirty(
+        self,
+        *,
+        exchange_id: str,
+        symbol: str,
+        account_id: str,
+    ) -> str:
+        """
+        原子递增持仓缓存版本并记录跨进程Dirty合约。
+
+        版本只作为字符串CAS标识，不参与任何资金计算。关联账户集合用于全部
+        平仓后补读账户基础字段。
+        """
+
+        member = pnl_dirty_contract_member(exchange_id, symbol)
+        return str(
+            self.redis_client.eval(
+                MARK_CONTRACT_DIRTY_SCRIPT,
+                4,
+                PNL_POSITION_CACHE_VERSION_KEY,
+                PNL_DIRTY_CONTRACTS_KEY,
+                PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+                pnl_dirty_contract_accounts_key(exchange_id, symbol),
+                member,
+                account_id,
+            )
+        )
+
+    def list_dirty_contracts(
+        self,
+    ) -> list[tuple[tuple[str, str], str, set[str]]]:
+        """读取当前Dirty合约、版本及成交关联账户。"""
+
+        members = sorted(self.redis_client.smembers(PNL_DIRTY_CONTRACTS_KEY))
+        if not members:
+            return []
+        versions = self.redis_client.hmget(
+            PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+            members,
+        )
+        pipeline = self.redis_client.pipeline(transaction=False)
+        keys: list[tuple[str, str]] = []
+        for member in members:
+            key = parse_pnl_dirty_contract_member(member)
+            keys.append(key)
+            pipeline.smembers(
+                pnl_dirty_contract_accounts_key(*key)
+            )
+        accounts = pipeline.execute()
+        return [
+            (key, str(version or ""), set(account_ids or ()))
+            for key, version, account_ids in zip(
+                keys,
+                versions,
+                accounts,
+                strict=True,
+            )
+        ]
+
+    def complete_dirty_contract(
+        self,
+        *,
+        exchange_id: str,
+        symbol: str,
+        expected_version: str,
+    ) -> bool:
+        """
+        仅清除仍等于本轮读取版本的Dirty标记。
+
+        清理成功后删除本轮成交账户集合；如果计算期间又有成交，版本已变化，
+        Lua返回0并保留新Dirty及其账户信息。
+        """
+
+        member = pnl_dirty_contract_member(exchange_id, symbol)
+        completed = bool(
+            self.redis_client.eval(
+                CLEAR_DIRTY_CONTRACT_IF_UNCHANGED_SCRIPT,
+                3,
+                PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+                PNL_DIRTY_CONTRACTS_KEY,
+                pnl_dirty_contract_accounts_key(exchange_id, symbol),
+                member,
+                expected_version,
+            )
+        )
+        return completed
+
+    def acquire_worker_lease(self, owner: str, ttl_seconds: int) -> bool:
+        """抢占实时PnL快照单写者租约。"""
+
+        return bool(
+            self.redis_client.set(
+                PNL_WORKER_LEASE_KEY,
+                owner,
+                nx=True,
+                ex=ttl_seconds,
+            )
+        )
+
+    def renew_worker_lease(self, owner: str, ttl_seconds: int) -> bool:
+        """只有租约持有者可以续租。"""
+
+        return bool(
+            self.redis_client.eval(
+                RENEW_LEASE_SCRIPT,
+                1,
+                PNL_WORKER_LEASE_KEY,
+                owner,
+                ttl_seconds,
+            )
+        )
+
+    def release_worker_lease(self, owner: str) -> bool:
+        """退出时只删除属于当前实例的租约。"""
+
+        return bool(
+            self.redis_client.eval(
+                RELEASE_LEASE_SCRIPT,
+                1,
+                PNL_WORKER_LEASE_KEY,
+                owner,
+            )
+        )
+
     def write_snapshots(
         self,
         *,
@@ -85,17 +251,6 @@ class RealtimePnlStore:
                 pnl_position_key(item.position_id),
                 mapping=_mapping(item),
             )
-            pipeline.sadd(
-                pnl_account_positions_key(item.account_id),
-                item.position_id,
-            )
-            pipeline.sadd(
-                pnl_contract_positions_key(
-                    item.exchange_id,
-                    item.symbol,
-                ),
-                item.position_id,
-            )
             pipeline.sadd(PNL_DIRTY_POSITIONS_KEY, item.position_id)
             pipeline.hset(
                 PNL_DIRTY_POSITION_VERSIONS_KEY,
@@ -110,6 +265,95 @@ class RealtimePnlStore:
             pipeline.sadd(PNL_DIRTY_ACCOUNTS_KEY, item.account_id)
         pipeline.execute()
         return len(position_items), len(account_items)
+
+    def write_cycle_snapshots(
+        self,
+        *,
+        positions: Iterable[PositionRealtimePnl],
+        accounts: Iterable[AccountRealtimePnl],
+        dirty_version: str,
+        active_positions: Iterable[tuple[str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str]],
+    ) -> tuple[int, int]:
+        """
+        一个500ms批次内原子写快照、Dirty标记和必要的静态索引变化。
+
+        active_positions/closed_positions元素依次为账户、交易所、合约、持仓
+        编号。行情价格变化不会重复维护索引，只有调用方确认结构变化或首次
+        恢复时才传入。
+        """
+
+        position_items = list(positions)
+        account_items = list(accounts)
+        additions = list(active_positions)
+        removals = list(closed_positions)
+        pipeline = self.redis_client.pipeline(transaction=True)
+        for item in position_items:
+            pipeline.hset(
+                pnl_position_key(item.position_id),
+                mapping=_mapping(item),
+            )
+            pipeline.sadd(PNL_DIRTY_POSITIONS_KEY, item.position_id)
+            pipeline.hset(
+                PNL_DIRTY_POSITION_VERSIONS_KEY,
+                item.position_id,
+                dirty_version,
+            )
+        for item in account_items:
+            pipeline.hset(
+                pnl_account_key(item.account_id),
+                mapping=_mapping(item),
+            )
+            pipeline.sadd(PNL_DIRTY_ACCOUNTS_KEY, item.account_id)
+        for account_id, exchange_id, symbol, position_id in additions:
+            account_key = pnl_account_positions_key(account_id)
+            contract_key = pnl_contract_positions_key(
+                exchange_id,
+                symbol,
+            )
+            pipeline.sadd(account_key, position_id)
+            pipeline.sadd(contract_key, position_id)
+            pipeline.sadd(PNL_ACCOUNT_INDEX_KEYS_KEY, account_key)
+            pipeline.sadd(PNL_CONTRACT_INDEX_KEYS_KEY, contract_key)
+        for account_id, exchange_id, symbol, position_id in removals:
+            pipeline.srem(
+                pnl_account_positions_key(account_id),
+                position_id,
+            )
+            pipeline.srem(
+                pnl_contract_positions_key(exchange_id, symbol),
+                position_id,
+            )
+        pipeline.execute()
+        return len(position_items), len(account_items)
+
+    def get_positions_many(
+        self,
+        position_ids: Iterable[str],
+    ) -> dict[str, dict[str, str]]:
+        """使用一个非事务Pipeline批量读取持仓快照，消除逐持仓往返。"""
+
+        ids = list(dict.fromkeys(position_ids))
+        if not ids:
+            return {}
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for position_id in ids:
+            pipeline.hgetall(pnl_position_key(position_id))
+        return dict(zip(ids, pipeline.execute(), strict=True))
+
+    def get_accounts_many(
+        self,
+        account_ids: Iterable[str],
+    ) -> dict[str, dict[str, str]]:
+        """批量读取账户快照。"""
+
+        ids = list(dict.fromkeys(account_ids))
+        if not ids:
+            return {}
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for account_id in ids:
+            pipeline.hgetall(pnl_account_key(account_id))
+        return dict(zip(ids, pipeline.execute(), strict=True))
 
     def get_position(
         self,
@@ -132,6 +376,52 @@ class RealtimePnlStore:
                 pnl_contract_positions_key(exchange_id, symbol)
             )
         )
+
+    def list_active_contract_codes(self) -> set[str]:
+        """
+        返回当前至少包含一条有效持仓的合约代码集合。
+
+        PNL_CONTRACT_INDEX_KEYS_KEY只保存持仓合约索引的键名，具体合约集合
+        可能在全部平仓后暂时变为空集合。因此先一次读取索引键名，再通过
+        Pipeline批量检查SCARD，只把仍有持仓编号的合约交给行情订阅服务。
+        这里不在读取路径删除空索引，避免与并发新建持仓发生竞态；空索引由
+        现有周期性重建统一清理。整个过程不会高频查询PostgreSQL。
+        """
+
+        raw_keys = self.redis_client.smembers(
+            PNL_CONTRACT_INDEX_KEYS_KEY
+        )
+        index_keys = sorted(
+            value.decode("utf-8")
+            if isinstance(value, bytes)
+            else str(value)
+            for value in raw_keys
+        )
+        if not index_keys:
+            return set()
+
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for index_key in index_keys:
+            pipeline.scard(index_key)
+        member_counts = pipeline.execute()
+
+        prefix = "pnl:contract_positions:"
+        codes: set[str] = set()
+        for index_key, member_count in zip(
+            index_keys,
+            member_counts,
+            strict=True,
+        ):
+            if int(member_count or 0) <= 0:
+                continue
+            if not index_key.startswith(prefix):
+                continue
+            contract_part = index_key[len(prefix):]
+            _exchange_id, separator, symbol = contract_part.partition(":")
+            normalized_symbol = symbol.strip().upper()
+            if separator and normalized_symbol:
+                codes.add(normalized_symbol)
+        return codes
 
     def remove_contract_position(
         self,
@@ -156,9 +446,19 @@ class RealtimePnlStore:
         self,
         batch_size: int,
     ) -> list[tuple[str, str]]:
-        position_ids = sorted(
-            self.redis_client.smembers(PNL_DIRTY_POSITIONS_KEY)
-        )[:batch_size]
+        # SSCAN按游标有界读取，避免Dirty集合很大时SMEMBERS一次搬入全部成员。
+        position_ids: list[str] = []
+        cursor = 0
+        while len(position_ids) < batch_size:
+            cursor, members = self.redis_client.sscan(
+                PNL_DIRTY_POSITIONS_KEY,
+                cursor=cursor,
+                count=batch_size,
+            )
+            position_ids.extend(members)
+            if cursor == 0:
+                break
+        position_ids = list(dict.fromkeys(position_ids))[:batch_size]
         if not position_ids:
             return []
         versions = self.redis_client.hmget(
@@ -196,3 +496,65 @@ class RealtimePnlStore:
         """账户落库后清理辅助Dirty标记；持仓版本仍是可靠性主标记。"""
 
         self.redis_client.srem(PNL_DIRTY_ACCOUNTS_KEY, account_id)
+
+    def rebuild_active_indexes(
+        self,
+        *,
+        expected_cache_version: str,
+        positions: Iterable[tuple[str, str, str, str]],
+    ) -> bool:
+        """
+        按PostgreSQL周期快照重建PnL活动索引，不使用KEYS扫描。
+
+        WATCH确保数据库读取期间若成交递增了缓存版本，本次不会清空新索引，
+        Worker会在下一周期使用新版本重试。
+        """
+
+        items = list(positions)
+        for _attempt in range(3):
+            pipeline = self.redis_client.pipeline()
+            try:
+                pipeline.watch(PNL_POSITION_CACHE_VERSION_KEY)
+                current = str(
+                    pipeline.get(PNL_POSITION_CACHE_VERSION_KEY) or "0"
+                )
+                if current != str(expected_cache_version or "0"):
+                    pipeline.unwatch()
+                    return False
+                account_keys = set(
+                    pipeline.smembers(PNL_ACCOUNT_INDEX_KEYS_KEY)
+                )
+                contract_keys = set(
+                    pipeline.smembers(PNL_CONTRACT_INDEX_KEYS_KEY)
+                )
+                pipeline.multi()
+                stale_keys = sorted(account_keys | contract_keys)
+                if stale_keys:
+                    pipeline.delete(*stale_keys)
+                pipeline.delete(
+                    PNL_ACCOUNT_INDEX_KEYS_KEY,
+                    PNL_CONTRACT_INDEX_KEYS_KEY,
+                )
+                for account_id, exchange_id, symbol, position_id in items:
+                    account_key = pnl_account_positions_key(account_id)
+                    contract_key = pnl_contract_positions_key(
+                        exchange_id,
+                        symbol,
+                    )
+                    pipeline.sadd(account_key, position_id)
+                    pipeline.sadd(contract_key, position_id)
+                    pipeline.sadd(
+                        PNL_ACCOUNT_INDEX_KEYS_KEY,
+                        account_key,
+                    )
+                    pipeline.sadd(
+                        PNL_CONTRACT_INDEX_KEYS_KEY,
+                        contract_key,
+                    )
+                pipeline.execute()
+                return True
+            except WatchError:
+                continue
+            finally:
+                pipeline.reset()
+        return False

@@ -1,5 +1,6 @@
 import logging
 import signal
+import time
 from dataclasses import dataclass
 from threading import Event
 
@@ -10,6 +11,7 @@ from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.services.pnl_snapshot_persistence_service import (
+    PnlPersistenceResult,
     PnlSnapshotPersistenceService,
 )
 
@@ -36,10 +38,16 @@ class PnlSnapshotPersistenceWorker:
         service: PnlSnapshotPersistenceService,
         interval_ms: int,
         batch_size: int,
+        max_batches_per_cycle: int = 10,
+        time_budget_ms: int = 800,
+        monotonic=time.monotonic,
     ):
         self.service = service
         self.interval_seconds = max(interval_ms, 1) / 1000
         self.batch_size = batch_size
+        self.max_batches_per_cycle = max(max_batches_per_cycle, 1)
+        self.time_budget_seconds = max(time_budget_ms, 1) / 1000
+        self.monotonic = monotonic
         self.stop_event = Event()
         self.stats = PnlPersistenceStats()
 
@@ -47,27 +55,63 @@ class PnlSnapshotPersistenceWorker:
         self.stop_event.set()
 
     def run_once(self):
-        result = self.service.persist_batch(self.batch_size)
+        """
+        同一轮连续领取多个批次。
+
+        单批500只是数据库锁定规模上限；Dirty超过500时无需固定等待下一秒，
+        直到集合暂空、达到批次数上限或耗尽本轮时间预算才退出。
+        """
+
+        started = self.monotonic()
+        total_positions = 0
+        total_accounts = 0
+        total_requested = 0
+        retained = 0
+        result = None
+        for _batch_number in range(self.max_batches_per_cycle):
+            result = self.service.persist_batch(self.batch_size)
+            total_requested += result.requested
+            total_positions += result.positions_persisted
+            total_accounts += result.accounts_persisted
+            retained = result.retained
+            if result.requested == 0:
+                break
+            if result.positions_persisted == 0:
+                # 数据库不可用或当前批次均无法更新时，留到下一周期重试，
+                # 避免同一轮无进展地连续冲击数据库。
+                break
+            if (
+                self.monotonic() - started
+                >= self.time_budget_seconds
+            ):
+                break
+        if result is None:
+            return None
         self.stats = PnlPersistenceStats(
             postgres_positions_persisted=(
                 self.stats.postgres_positions_persisted
-                + result.positions_persisted
+                + total_positions
             ),
             postgres_accounts_persisted=(
                 self.stats.postgres_accounts_persisted
-                + result.accounts_persisted
+                + total_accounts
             ),
-            retained_dirty_positions=result.retained,
+            retained_dirty_positions=retained,
             failed_batches=self.stats.failed_batches,
         )
-        if result.positions_persisted:
+        if total_positions:
             logger.info(
                 "PnL快照持久化完成 positions=%s accounts=%s retained=%s",
-                result.positions_persisted,
-                result.accounts_persisted,
-                result.retained,
+                total_positions,
+                total_accounts,
+                retained,
             )
-        return result
+        return PnlPersistenceResult(
+            requested=total_requested,
+            positions_persisted=total_positions,
+            accounts_persisted=total_accounts,
+            retained=retained,
+        )
 
     def run_forever(self) -> None:
         while not self.stop_event.is_set():
@@ -104,6 +148,10 @@ def build_worker() -> PnlSnapshotPersistenceWorker:
         service=service,
         interval_ms=settings.pnl_persist_interval_ms,
         batch_size=settings.pnl_persist_batch_size,
+        max_batches_per_cycle=(
+            settings.pnl_persist_max_batches_per_cycle
+        ),
+        time_budget_ms=settings.pnl_persist_time_budget_ms,
     )
 
 

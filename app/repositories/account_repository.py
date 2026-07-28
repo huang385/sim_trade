@@ -63,3 +63,19 @@ class AccountRepository:
         )
 
         return db.scalars(statement).all()
+
+    @staticmethod
+    def list_by_account_ids(
+        db: Session,
+        account_ids: Sequence[str],
+    ) -> Sequence[Account]:
+        """批量读取指定账户，供实时盈亏周期快照补齐已全平账户。"""
+
+        if not account_ids:
+            return []
+        statement = (
+            select(Account)
+            .where(Account.account_id.in_(tuple(account_ids)))
+            .order_by(Account.id)
+        )
+        return db.scalars(statement).all()

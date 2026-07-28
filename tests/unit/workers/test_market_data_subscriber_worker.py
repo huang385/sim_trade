@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import MarketDataProcessAction
 from app.services.market_subscription_service import MarketSubscriptionService
 from app.services.market_tick_validation_service import MarketTickValidationError
@@ -52,8 +53,11 @@ def make_worker(
     index = Mock()
     index.list_all_order_ids.side_effect = lambda: set(details)
     index.get_active_order.side_effect = details.get
+    active_position_source = Mock()
+    active_position_source.list_active_contract_codes.return_value = set()
     subscription_service = MarketSubscriptionService(
         active_order_index=index,
+        active_position_contract_source=active_position_source,
         debounce_seconds=3,
     )
     feed_client = Mock()
@@ -113,6 +117,42 @@ def test_valid_queue_item_updates_publish_counter():
     assert stats.processed_count == 1
     assert stats.published_count == 1
     assert worker.last_published_at is not None
+
+
+def test_current_subscription_generation_is_forwarded_to_atomic_publish():
+    worker, _feed, market_data_service, *_ = make_worker()
+    tick = normalize()
+    market_data_service.process_with_session_factory.return_value = (
+        SimpleNamespace(
+            action=MarketDataProcessAction.PUBLISHED,
+            tick=tick,
+        )
+    )
+
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(),
+            make_raw(),
+            subscription_generation=7,
+        )
+    )
+
+    market_data_service.process_with_session_factory.assert_called_once_with(
+        worker.session_factory,
+        data=make_data(),
+        raw=make_raw(),
+        ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+        subscription_generation=7,
+    )
+
+
+def test_websocket_callback_captures_subscription_generation():
+    worker, *_ = make_worker()
+
+    worker.on_quote(make_data(), make_raw(), generation=9)
+
+    queued = worker.tick_queue.get_nowait()
+    assert queued.subscription_generation == 9
 
 
 def test_bad_tick_does_not_escape_processing_loop():
@@ -291,6 +331,7 @@ def test_all_confirmed_subscription_is_running():
     worker._publish_source_status()
     mapping = worker.tick_store.update_source_status.call_args.args[0]
     assert mapping["status"] == MarketDataSourceStatus.RUNNING.value
+    assert mapping["subscription_generation"] == 1
     assert mapping["last_successful_subscribe_at"] is not None
 
 

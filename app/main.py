@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 # 必须导入models，确保SQLAlchemy知道有哪些表
@@ -37,6 +40,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# 测试交易台与 API 同源部署，页面请求无需额外配置 CORS。
+# 静态目录只存放调试页面资源，不参与任何交易业务计算。
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+app.mount(
+    "/static",
+    StaticFiles(directory=STATIC_DIR),
+    name="static",
+)
+
 
 # 注册统一业务异常处理器
 app.add_exception_handler(
@@ -47,6 +59,18 @@ app.add_exception_handler(
 
 # 注册全部业务接口
 app.include_router(api_router)
+
+
+@app.get("/test-trading", include_in_schema=False)
+def trading_test_page():
+    """
+    返回本地交易与实时盈亏测试台。
+
+    该页面用于开发环境手工联调，所有数据仍通过正式 API 读取或提交，
+    不会绕过订单服务、资金校验、撮合和成交结算流程。
+    """
+
+    return FileResponse(STATIC_DIR / "trading_test.html")
 
 
 @app.get("/")

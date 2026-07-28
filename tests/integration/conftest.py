@@ -4,10 +4,18 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from redis.exceptions import RedisError
 from sqlalchemy import delete, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import SessionLocal
+from app.core.redis_client import redis_client
+from app.infrastructure.redis_keys import (
+    PNL_DIRTY_CONTRACTS_KEY,
+    PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+    pnl_dirty_contract_accounts_key,
+    pnl_dirty_contract_member,
+)
 from app.models.account import Account
 from app.models.fee_rule import FeeRule
 from app.models.instrument import Instrument
@@ -190,6 +198,27 @@ def integration_context():
             delete(Account).where(Account.account_id == context.account_id)
         )
         db.commit()
+
+    # 集成测试可能在外部Worker同时运行时发布TRADE_CREATED。数据库测试账户
+    # 删除后必须精确清理它对应的PnL Dirty引用，避免测试残留在后续实时
+    # Worker中被当成失效账户反复重试。随机ITEX合约不会与用户数据重合。
+    member = pnl_dirty_contract_member(
+        context.exchange_id,
+        context.symbol,
+    )
+    try:
+        redis_client.srem(PNL_DIRTY_CONTRACTS_KEY, member)
+        redis_client.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
+        redis_client.delete(
+            pnl_dirty_contract_accounts_key(
+                context.exchange_id,
+                context.symbol,
+            )
+        )
+    except RedisError:
+        # Redis不可用不应把只依赖PostgreSQL的测试改判失败；需要Redis的
+        # 测试会在自身初始化阶段按项目规范明确skip。
+        pass
 
 
 def make_request(

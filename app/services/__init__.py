@@ -40,6 +40,12 @@ from app.services.trade_settlement_service import (
     TradeSettlementService,
 )
 from app.services.market_tick_matching_service import MarketTickMatchingService
+from app.services.live_market_snapshot_service import (
+    LiveMarketSnapshotService,
+)
+from app.services.order_arrival_matching_service import (
+    OrderArrivalMatchingService,
+)
 from app.services.position_close_allocator import (
     PositionCloseAllocator,
     PositionFreezePlan,
@@ -91,6 +97,8 @@ __all__ = [
     "TradeQueryService",
     "PositionQueryService",
     "MarketTickMatchingService",
+    "LiveMarketSnapshotService",
+    "OrderArrivalMatchingService",
     "PositionCloseAllocator",
     "PositionFreezePlan",
     "RealizedPnlCalculator",

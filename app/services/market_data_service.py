@@ -124,6 +124,7 @@ class MarketDataService:
         raw: dict[str, Any],
         instrument: MarketInstrumentSnapshot | None,
         ingest_type: MarketTickIngestType,
+        subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         if instrument is None:
             raise MarketTickValidationError("合约不存在")
@@ -142,7 +143,10 @@ class MarketDataService:
                 tick=tick,
             )
 
-        store_result = self.tick_store.publish(tick)
+        store_result = self.tick_store.publish(
+            tick,
+            subscription_generation=subscription_generation,
+        )
         if store_result != MarketTickStoreResult.PUBLISHED:
             raise RuntimeError(f"未知行情存储结果: {store_result}")
         return MarketDataProcessResult(action=MarketDataProcessAction.PUBLISHED, tick=tick)
@@ -154,6 +158,7 @@ class MarketDataService:
         data: dict[str, Any],
         raw: dict[str, Any],
         ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
+        subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         self.validation_service.validate_envelope(data=data, raw=raw)
         order_book_id = normalize_code(str(data.get("code") or ""))
@@ -165,6 +170,7 @@ class MarketDataService:
             raw=raw,
             instrument=instrument,
             ingest_type=ingest_type,
+            subscription_generation=subscription_generation,
         )
 
     def process_with_session_factory(
@@ -174,6 +180,7 @@ class MarketDataService:
         data: dict[str, Any],
         raw: dict[str, Any],
         ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
+        subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         """Tick 线程入口：缓存命中时完全不创建数据库 Session。"""
 
@@ -188,4 +195,5 @@ class MarketDataService:
             raw=raw,
             instrument=instrument,
             ingest_type=ingest_type,
+            subscription_generation=subscription_generation,
         )

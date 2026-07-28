@@ -9,6 +9,7 @@ from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
     create_remote_sdk_client,
 )
+from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 
 
 pytestmark = pytest.mark.integration
@@ -23,8 +24,12 @@ def configured_codes():
         detail = index.get_active_order(order_id)
         if detail.get("order_book_id"):
             codes.add(detail["order_book_id"])
+    # 真实行情联调应覆盖生产订阅目标：活动订单与有效持仓的合约并集。
+    codes.update(
+        RealtimePnlStore(redis_client).list_active_contract_codes()
+    )
     if not codes:
-        pytest.skip("Redis中没有活动订单合约")
+        pytest.skip("Redis中没有活动订单或有效持仓合约")
     return codes
 
 

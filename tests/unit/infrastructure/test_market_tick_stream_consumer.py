@@ -81,3 +81,20 @@ def test_failure_counter_has_ttl_and_dead_letter_has_context():
     fields = redis_client.xadd.call_args.kwargs["fields"]
     assert fields["source_message_id"] == "1-0"
     assert fields["consumer_name"] == "matching-1"
+
+
+def test_acknowledge_many_uses_one_xack_call():
+    redis_client = Mock()
+    redis_client.xack.return_value = 3
+    consumer = make_consumer(redis_client)
+
+    result = consumer.acknowledge_many(["1-0", "2-0", "3-0"])
+
+    assert result == 3
+    redis_client.xack.assert_called_once_with(
+        "stream:market-ticks",
+        "group:matching-engine",
+        "1-0",
+        "2-0",
+        "3-0",
+    )

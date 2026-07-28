@@ -10,9 +10,16 @@ def make_index(details):
     return index
 
 
+def make_position_source(codes=()):
+    source = Mock()
+    source.list_active_contract_codes.return_value = set(codes)
+    return source
+
+
 def test_no_active_orders_produces_empty_desired_set():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
 
@@ -28,15 +35,50 @@ def test_repeated_order_book_id_is_subscribed_only_once():
                 "O3": {"order_book_id": "AU2608"},
             }
         ),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
 
     assert service.get_desired_codes() == frozenset({"AG2609", "AU2608"})
 
 
+def test_active_positions_are_subscribed_without_active_orders():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(
+            {"jd2609", "AG2612"}
+        ),
+        debounce_seconds=3,
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"JD2609", "AG2612"}
+    )
+
+
+def test_active_orders_and_positions_are_merged_and_deduplicated():
+    service = MarketSubscriptionService(
+        active_order_index=make_index(
+            {
+                "O1": {"order_book_id": "JD2609"},
+                "O2": {"order_book_id": "A2609"},
+            }
+        ),
+        active_position_contract_source=make_position_source(
+            {"jd2609", "AG2612"}
+        ),
+        debounce_seconds=3,
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"JD2609", "A2609", "AG2612"}
+    )
+
+
 def test_add_and_remove_changes_wait_for_debounce():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
     desired = frozenset({"AG2609"})
@@ -55,6 +97,7 @@ def test_add_and_remove_changes_wait_for_debounce():
 def test_partial_subscription_receipt_tracks_success_and_failure_reasons():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
     generation = service.mark_requested(
@@ -84,6 +127,7 @@ def test_partial_subscription_receipt_tracks_success_and_failure_reasons():
 def test_duplicate_and_out_of_order_receipts_keep_success_monotonic():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
     generation = service.mark_requested(frozenset({"AG2609"}))
@@ -109,6 +153,7 @@ def test_duplicate_and_out_of_order_receipts_keep_success_monotonic():
 def test_old_generation_receipt_does_not_change_new_request():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
     old_generation = service.mark_requested(frozenset({"OLD"}))

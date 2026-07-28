@@ -1,0 +1,319 @@
+import json
+from types import MappingProxyType, SimpleNamespace
+
+from app.schemas.market_tick_schema import MarketTick
+from app.services.active_position_cache import ActivePositionCycleSnapshot
+from app.services.realtime_pnl_service import (
+    RealtimePnlProcessResult,
+    RealtimePnlService,
+)
+from app.workers.realtime_pnl_worker import RealtimePnlWorker
+
+
+def make_fields(symbol: str, price: str, sequence: int) -> dict[str, str]:
+    return {
+        "event_type": "MARKET_TICK",
+        "payload": json.dumps(
+            {
+                "source_event_id": f"{symbol}-{sequence}",
+                "source": "YML_FEEDHUB",
+                "ingest_type": "LIVE_CALLBACK",
+                "order_book_id": symbol,
+                "exchange_id": "DCE",
+                "symbol": symbol,
+                "trading_day": "2026-07-28",
+                "event_time": "2026-07-28T10:00:00+08:00",
+                "sequence_id": sequence,
+                "last_price": price,
+                "cumulative_volume": sequence,
+                "bid_volume_1": 1,
+                "ask_volume_1": 1,
+            }
+        ),
+    }
+
+
+class Clock:
+    def __init__(self):
+        self.value = 0.0
+
+    def __call__(self):
+        return self.value
+
+
+class FakeConsumer:
+    stream_name = "stream:test"
+    group_name = "group:test"
+    consumer_name = "consumer:test"
+
+    def __init__(self, messages):
+        self.messages = list(messages)
+        self.acked_batches = []
+        self.block_values = []
+        self.dead_letters = []
+
+    def claim_stale_messages(self, **_kwargs):
+        return []
+
+    def read_new_messages(self, *, batch_size, block_ms):
+        self.block_values.append(block_ms)
+        rows, self.messages = (
+            self.messages[:batch_size],
+            self.messages[batch_size:],
+        )
+        return rows
+
+    def acknowledge_many(self, message_ids):
+        self.acked_batches.append(list(message_ids))
+        return len(message_ids)
+
+    def clear_failures(self, _message_ids):
+        return None
+
+    def acknowledge(self, message_id):
+        self.acked_batches.append([message_id])
+        return 1
+
+    def clear_failure(self, _message_id):
+        return None
+
+    def publish_dead_letter(self, **kwargs):
+        self.dead_letters.append(kwargs)
+
+    def increment_failure(self, _message_id):
+        return 1
+
+
+class FakeCache:
+    def __init__(self):
+        self.calls = 0
+
+    def get_cycle_snapshot(self, **_kwargs):
+        self.calls += 1
+        return ActivePositionCycleSnapshot(
+            by_contract=MappingProxyType({}),
+            by_account=MappingProxyType({}),
+            accounts=MappingProxyType({}),
+            cache_version="1",
+            refresh_count=1,
+        )
+
+
+class FakePnlStore:
+    def __init__(self):
+        self.dirty = []
+        self.completed = []
+
+    def list_dirty_contracts(self):
+        return list(self.dirty)
+
+    def complete_dirty_contract(self, **kwargs):
+        self.completed.append(kwargs)
+        return True
+
+    def rebuild_active_indexes(self, **_kwargs):
+        return True
+
+
+class FakeMarketStore:
+    def __init__(self):
+        self.latest = {}
+
+    def get_latest(self, exchange_id, symbol):
+        return self.latest.get((exchange_id, symbol), {})
+
+
+class FakeService:
+    parse_tick = staticmethod(RealtimePnlService.parse_tick)
+
+    def __init__(self, store, *, fail=False, successful=None):
+        self.pnl_store = store
+        self.active_position_cache = FakeCache()
+        self.calls = []
+        self.fail = fail
+        self.successful = successful
+
+    def process_batch(self, *, requests, **_kwargs):
+        self.calls.append(requests)
+        if self.fail:
+            raise RuntimeError("redis unavailable")
+        successful = (
+            set(self.successful)
+            if self.successful is not None
+            else {item.key for item in requests}
+        )
+        failed = {item.key for item in requests} - successful
+        return RealtimePnlProcessResult(
+            action="CALCULATED",
+            successful_contracts=frozenset(successful),
+            failed_contracts=frozenset(failed),
+            redis_snapshots_written=len(successful),
+        )
+
+
+def make_worker(messages, *, service=None, store=None, market_store=None):
+    clock = Clock()
+    store = store or FakePnlStore()
+    service = service or FakeService(store)
+    consumer = FakeConsumer(messages)
+    worker = RealtimePnlWorker(
+        stream_consumer=consumer,
+        service=service,
+        pnl_store=store,
+        market_tick_store=market_store or FakeMarketStore(),
+        batch_size=2000,
+        block_ms=5000,
+        pending_idle_ms=60000,
+        max_retries=3,
+        retry_interval_seconds=0,
+        calculation_interval_ms=500,
+        monotonic=clock,
+    )
+    return worker, consumer, service, store, clock
+
+
+def test_four_ticks_in_window_use_latest_price_and_ack_all_once():
+    messages = [
+        (f"{index}-0", make_fields("JD2609", str(3200 + index), index))
+        for index in range(1, 5)
+    ]
+    worker, consumer, service, _store, _clock = make_worker(messages)
+
+    worker.run_once(force_flush=True)
+
+    assert len(service.calls) == 1
+    assert service.calls[0][0].tick.last_price == 3204
+    assert consumer.acked_batches == [["1-0", "2-0", "3-0", "4-0"]]
+    assert worker.stats_snapshot().ticks_coalesced == 3
+
+
+def test_two_contracts_keep_their_own_latest_tick():
+    messages = [
+        ("1-0", make_fields("JD2609", "3200", 1)),
+        ("2-0", make_fields("AG2612", "14000", 2)),
+        ("3-0", make_fields("JD2609", "3210", 3)),
+    ]
+    worker, _consumer, service, _store, _clock = make_worker(messages)
+
+    worker.run_once(force_flush=True)
+
+    prices = {item.key: item.tick.last_price for item in service.calls[0]}
+    assert prices == {
+        ("DCE", "AG2612"): 14000,
+        ("DCE", "JD2609"): 3210,
+    }
+
+
+def test_same_price_without_dirty_is_acked_without_second_calculation():
+    worker, consumer, service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))]
+    )
+    worker.run_once(force_flush=True)
+    consumer.messages.append(
+        ("2-0", make_fields("JD2609", "3200", 2))
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert len(service.calls) == 1
+    assert consumer.acked_batches[-1] == ["2-0"]
+    assert worker.stats_snapshot().contracts_skipped_unchanged == 1
+
+
+def test_same_price_with_trade_dirty_is_recalculated():
+    store = FakePnlStore()
+    worker, consumer, service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        store=store,
+    )
+    worker.run_once(force_flush=True)
+    store.dirty = [(("DCE", "JD2609"), "9", {"A001"})]
+
+    worker.run_once(force_flush=True)
+
+    assert len(service.calls) == 2
+    assert store.completed[0]["expected_version"] == "9"
+
+
+def test_redis_failure_keeps_all_messages_pending():
+    store = FakePnlStore()
+    service = FakeService(store, fail=True)
+    worker, consumer, _service, _store, _clock = make_worker(
+        [
+            ("1-0", make_fields("JD2609", "3200", 1)),
+            ("2-0", make_fields("JD2609", "3201", 2)),
+        ],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert consumer.acked_batches == []
+    assert ("DCE", "JD2609") in worker._buffer
+
+
+def test_partial_contract_failure_only_acks_successful_contract():
+    store = FakePnlStore()
+    service = FakeService(
+        store,
+        successful={("DCE", "JD2609")},
+    )
+    worker, consumer, _service, _store, _clock = make_worker(
+        [
+            ("1-0", make_fields("JD2609", "3200", 1)),
+            ("2-0", make_fields("AG2612", "14000", 2)),
+        ],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert consumer.acked_batches == [["1-0"]]
+    assert ("DCE", "AG2612") in worker._buffer
+
+
+def test_pending_trigger_uses_current_latest_market_not_old_price():
+    market = FakeMarketStore()
+    current = MarketTick.model_validate(
+        json.loads(make_fields("JD2609", "3250", 2)["payload"])
+    )
+    market.latest[("DCE", "JD2609")] = current.model_dump(
+        mode="json"
+    )
+    worker, _consumer, service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3100", 1))],
+        market_store=market,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert service.calls[0][0].tick.last_price == 3250
+
+
+def test_one_thousand_ticks_are_coalesced_to_one_calculation():
+    messages = [
+        (
+            f"{index}-0",
+            make_fields("JD2609", str(3200 + index), index),
+        )
+        for index in range(1, 1001)
+    ]
+    worker, consumer, service, _store, _clock = make_worker(messages)
+
+    worker.run_once(force_flush=True)
+
+    assert len(service.calls) == 1
+    assert len(service.calls[0]) == 1
+    assert len(consumer.acked_batches[0]) == 1000
+    assert worker.stats_snapshot().ticks_coalesced == 999
+
+
+def test_dynamic_block_does_not_exceed_remaining_flush_time():
+    worker, consumer, _service, _store, clock = make_worker([])
+    clock.value = 0.35
+
+    worker.run_once()
+
+    assert 149 <= consumer.block_values[0] <= 150

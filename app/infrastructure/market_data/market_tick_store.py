@@ -21,8 +21,7 @@ class MarketTickStoreResult(str, Enum):
 # Redis 5 兼容 Lua：单行情 Worker 已保证 WebSocket Tick 严格有序且不重复，
 # 因此不再读取旧行情做二次判断，只保留最新 Hash 与 Stream 的原子双写。
 PUBLISH_MARKET_TICK_SCRIPT = """
-redis.call('HSET', KEYS[1], unpack(ARGV, 7))
-redis.call(
+local stream_message_id = redis.call(
     'XADD', KEYS[2], '*',
     'event_id', ARGV[1],
     'event_type', ARGV[2],
@@ -31,9 +30,21 @@ redis.call(
     'order_book_id', ARGV[5],
     'payload', ARGV[6]
 )
+redis.call(
+    'HSET', KEYS[1],
+    'stream_message_id', stream_message_id,
+    unpack(ARGV, 8)
+)
+if ARGV[7] ~= '' then
+    redis.call(
+        'HSET', KEYS[1],
+        'subscription_generation', ARGV[7]
+    )
+else
+    redis.call('HDEL', KEYS[1], 'subscription_generation')
+end
 return 'PUBLISHED'
 """
-
 
 def serialize_market_value(value: Any) -> str:
     """Redis Hash 统一使用稳定字符串，Decimal 绝不经过 float。"""
@@ -103,7 +114,29 @@ class MarketTickStore:
             sort_keys=True,
         )
 
-    def publish(self, tick: MarketTick) -> MarketTickStoreResult:
+    @staticmethod
+    def mapping_to_tick(values: dict[str, str]) -> MarketTick:
+        """
+        把Redis Hash还原为MarketTick。
+
+        Redis Hash不能保存None，写入时统一序列化为空字符串；恢复Pydantic
+        模型前必须把这些空字符串还原为None，否则可选Decimal、时间和整数
+        字段会被误判为格式错误。
+        """
+
+        return MarketTick.model_validate(
+            {
+                key: None if value == "" else value
+                for key, value in values.items()
+            }
+        )
+
+    def publish(
+        self,
+        tick: MarketTick,
+        *,
+        subscription_generation: int | None = None,
+    ) -> MarketTickStoreResult:
         """原子更新最新行情 Hash 并发布一条 WebSocket 行情事件。"""
 
         mapping = self.tick_to_mapping(tick)
@@ -121,6 +154,11 @@ class MarketTickStore:
             tick.symbol,
             tick.order_book_id,
             self.tick_to_payload(tick),
+            (
+                str(subscription_generation)
+                if subscription_generation is not None
+                else ""
+            ),
             *hash_arguments,
         )
         if isinstance(result, bytes):

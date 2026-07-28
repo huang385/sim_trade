@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Sim Trade 实时交易测试台</title>
+    <link rel="stylesheet" href="/static/trading_test.css">
+</head>
+<body>
+    <header class="topbar">
+        <div class="brand">
+            <span class="brand-mark" aria-hidden="true">ST</span>
+            <div>
+                <h1>Sim Trade</h1>
+                <p>实时盈亏与订单联调台</p>
+            </div>
+        </div>
+        <div class="connection">
+            <span id="connection-dot" class="status-dot waiting"></span>
+            <span id="connection-text">正在连接后端</span>
+            <span class="divider"></span>
+            <span id="last-refresh">尚未刷新</span>
+        </div>
+    </header>
+
+    <main>
+        <section class="toolbar panel">
+            <label class="field grow">
+                <span>当前账户</span>
+                <input id="account-id" value="PNL_DEMO_793A868B"
+                       maxlength="64" autocomplete="off">
+            </label>
+            <button id="load-account" class="button primary" type="button">
+                加载账户
+            </button>
+            <label class="switch-control">
+                <input id="auto-refresh" type="checkbox" checked>
+                <span class="switch" aria-hidden="true"></span>
+                <span>500ms 实时刷新</span>
+            </label>
+            <button id="refresh-now" class="button secondary" type="button">
+                立即刷新
+            </button>
+        </section>
+
+        <section class="metric-grid" aria-label="账户实时资金">
+            <article class="metric-card hero">
+                <span class="metric-label">动态权益</span>
+                <strong id="metric-equity">--</strong>
+                <small id="metric-source">等待账户快照</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">可用资金</span>
+                <strong id="metric-available">--</strong>
+                <small>可用于新订单冻结</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">累计净盈亏</span>
+                <strong id="metric-net-pnl">--</strong>
+                <small>已实现 + 浮动 - 累计手续费</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">累计浮动盈亏</span>
+                <strong id="metric-unrealized">--</strong>
+                <small>全部当前持仓合计</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">累计已实现盈亏</span>
+                <strong id="metric-realized">--</strong>
+                <small>累计平仓盈亏，未扣手续费</small>
+            </article>
+            <article class="metric-card hero">
+                <span class="metric-label">当日盈亏</span>
+                <strong id="metric-daily-pnl">--</strong>
+                <small>持仓 + 平仓 - 手续费</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">当日持仓盈亏</span>
+                <strong id="metric-daily-position">--</strong>
+                <small>未平仓持仓的当日盯市盈亏</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">当日平仓盈亏</span>
+                <strong id="metric-daily-close">--</strong>
+                <small>当日平仓成交的盯市盈亏</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">当日手续费</span>
+                <strong id="metric-daily-commission" class="fee">--</strong>
+                <small>当前交易日实际成交手续费</small>
+            </article>
+            <article class="metric-card">
+                <span class="metric-label">风险度</span>
+                <strong id="metric-risk">--</strong>
+                <small id="metric-account-status">账户状态 --</small>
+            </article>
+        </section>
+
+        <section class="panel account-ledger" aria-label="账户资金明细">
+            <div class="section-head">
+                <div>
+                    <p class="eyebrow">ACCOUNT LEDGER</p>
+                    <h2 id="account-name">账户资金明细</h2>
+                </div>
+                <span class="badge" id="account-trading-day">交易日 --</span>
+            </div>
+            <div class="detail-grid">
+                <div class="detail-item">
+                    <span>初始资金</span>
+                    <strong id="detail-initial-cash">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>现金余额</span>
+                    <strong id="detail-cash-balance">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>占用保证金</span>
+                    <strong id="detail-used-margin">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>冻结保证金</span>
+                    <strong id="detail-frozen-margin">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>冻结资金</span>
+                    <strong id="detail-frozen-cash">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>累计实际手续费</span>
+                    <strong id="detail-used-commission">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>冻结手续费</span>
+                    <strong id="detail-frozen-commission">--</strong>
+                </div>
+                <div class="detail-item">
+                    <span>账户类型</span>
+                    <strong id="detail-account-type">--</strong>
+                </div>
+            </div>
+            <p class="metric-definition">
+                累计净盈亏用于联调观察，计算为“累计已实现盈亏 + 累计浮动盈亏
+                - 累计实际手续费”；当日盈亏只扣当前交易日手续费。
+            </p>
+        </section>
+
+        <div class="workspace">
+            <section class="content-column">
+                <article class="panel">
+                    <div class="section-head">
+                        <div>
+                            <p class="eyebrow">REALTIME POSITIONS</p>
+                            <h2>实时持仓盈亏</h2>
+                        </div>
+                        <span id="position-count" class="badge">0 条持仓</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>合约</th>
+                                    <th>方向</th>
+                                    <th class="number">总/今/昨</th>
+                                    <th class="number">可用/冻结</th>
+                                    <th class="number">开仓均价</th>
+                                    <th class="number">最新价</th>
+                                    <th class="number">累计浮动盈亏</th>
+                                    <th class="number">当日持仓盈亏</th>
+                                    <th class="number">累计已实现盈亏</th>
+                                    <th class="number">当日平仓盈亏</th>
+                                    <th class="number">占用保证金</th>
+                                    <th>交易日</th>
+                                    <th>数据源</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-body">
+                                <tr class="empty-row">
+                                    <td colspan="14">加载账户后显示实时持仓</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </article>
+
+                <article class="panel">
+                    <div class="tabs" role="tablist">
+                        <button class="tab active" data-tab="orders" type="button">
+                            订单 <span id="order-count">0</span>
+                        </button>
+                        <button class="tab" data-tab="trades" type="button">
+                            成交 <span id="trade-count">0</span>
+                        </button>
+                    </div>
+
+                    <div id="orders-panel" class="tab-panel">
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>系统/客户端订单号</th>
+                                        <th>合约</th>
+                                        <th>买卖/开平</th>
+                                        <th class="number">委托价/成交均价</th>
+                                        <th class="number">总/成交/剩余/撤销</th>
+                                        <th class="number">冻结保证金</th>
+                                        <th class="number">冻结手续费</th>
+                                        <th class="number">冻结持仓</th>
+                                        <th>订单/提交状态</th>
+                                        <th>交易日</th>
+                                        <th>更新时间</th>
+                                        <th>操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="orders-body">
+                                    <tr class="empty-row">
+                                        <td colspan="12">暂无订单</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div id="trades-panel" class="tab-panel hidden">
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>成交编号</th>
+                                        <th>订单编号</th>
+                                        <th>合约</th>
+                                        <th>买卖/开平</th>
+                                        <th class="number">成交价</th>
+                                        <th class="number">数量</th>
+                                        <th class="number">成交额</th>
+                                        <th class="number">保证金</th>
+                                        <th class="number">手续费</th>
+                                        <th class="number">累计已实现盈亏</th>
+                                        <th class="number">当日平仓盈亏</th>
+                                        <th>交易日</th>
+                                        <th>成交时间</th>
+                                        <th>明细</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="trades-body">
+                                    <tr class="empty-row">
+                                        <td colspan="14">暂无成交</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </article>
+            </section>
+
+            <aside class="panel order-ticket">
+                <div class="section-head">
+                    <div>
+                        <p class="eyebrow">ORDER TICKET</p>
+                        <h2>限价委托</h2>
+                    </div>
+                    <span class="badge warning">测试环境</span>
+                </div>
+
+                <form id="order-form">
+                    <label class="field">
+                        <span>账户编号</span>
+                        <input id="order-account-id" name="account_id"
+                               value="PNL_DEMO_793A868B" required maxlength="64">
+                    </label>
+
+                    <div class="field-row">
+                        <label class="field">
+                            <span>交易所</span>
+                            <input id="exchange-id" name="exchange_id"
+                                   placeholder="DCE" required maxlength="32">
+                        </label>
+                        <label class="field">
+                            <span>合约代码</span>
+                            <input id="symbol" name="symbol"
+                                   placeholder="JD2609" required maxlength="64">
+                        </label>
+                    </div>
+
+                    <fieldset>
+                        <legend>买卖方向</legend>
+                        <div class="segmented">
+                            <label class="buy-option">
+                                <input type="radio" name="direction" value="BUY" checked>
+                                <span>买入 BUY</span>
+                            </label>
+                            <label class="sell-option">
+                                <input type="radio" name="direction" value="SELL">
+                                <span>卖出 SELL</span>
+                            </label>
+                        </div>
+                    </fieldset>
+
+                    <label class="field">
+                        <span>开平标志</span>
+                        <select id="offset-flag" name="offset_flag">
+                            <option value="OPEN">开仓 OPEN</option>
+                            <option value="CLOSE">平仓 CLOSE</option>
+                            <option value="CLOSE_TODAY">平今 CLOSE_TODAY</option>
+                            <option value="CLOSE_YESTERDAY">平昨 CLOSE_YESTERDAY</option>
+                        </select>
+                    </label>
+
+                    <div class="field-row">
+                        <label class="field">
+                            <span>限价</span>
+                            <input id="limit-price" name="limit_price"
+                                   type="number" min="0" step="any"
+                                   placeholder="0.00" required>
+                        </label>
+                        <label class="field">
+                            <span>数量</span>
+                            <input id="volume" name="volume" type="number"
+                                   min="1" step="1" value="1" required>
+                        </label>
+                    </div>
+
+                    <label class="field">
+                        <span>客户端订单编号</span>
+                        <div class="input-action">
+                            <input id="client-order-id" name="client_order_id"
+                                   required maxlength="64">
+                            <button id="regenerate-id" type="button"
+                                    title="重新生成订单编号">↻</button>
+                        </div>
+                    </label>
+
+                    <div class="order-notice">
+                        页面只调用正式下单 API。资金冻结、规则校验、撮合和结算
+                        仍由后端完成；提交后会真实写入本地测试数据库。
+                    </div>
+
+                    <button id="submit-order" class="button submit" type="submit">
+                        提交限价订单
+                    </button>
+                </form>
+            </aside>
+        </div>
+
+        <section class="runtime-note">
+            <strong>实时链路提示</strong>
+            <span>要看到盈亏随行情变化，请同时运行行情采集、撮合、成交事件、
+                实时盈亏与快照持久化 Worker。</span>
+        </section>
+    </main>
+
+    <dialog id="trade-detail-dialog" class="trade-dialog">
+        <div class="dialog-head">
+            <div>
+                <p class="eyebrow">CLOSE ALLOCATIONS</p>
+                <h2 id="trade-detail-title">平仓成交明细</h2>
+            </div>
+            <button id="close-trade-dialog" class="dialog-close"
+                    type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>持仓明细</th>
+                        <th>实际开平</th>
+                        <th>开仓日</th>
+                        <th class="number">开仓价</th>
+                        <th class="number">平仓价</th>
+                        <th class="number">平仓量</th>
+                        <th class="number">释放保证金</th>
+                        <th class="number">手续费</th>
+                        <th class="number">累计已实现盈亏</th>
+                        <th class="number">当日平仓盈亏</th>
+                    </tr>
+                </thead>
+                <tbody id="trade-detail-body"></tbody>
+            </table>
+        </div>
+    </dialog>
+
+    <div id="toast-region" class="toast-region" aria-live="polite"></div>
+    <script src="/static/trading_test.js" defer></script>
+</body>
+</html>

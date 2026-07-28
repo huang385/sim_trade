@@ -35,7 +35,10 @@ class AcceptedOrderProcessResult:
     """单条订单事件的业务处理结果。"""
 
     event_id: str
+    event_type: str
     order_id: str
+    exchange_id: str
+    symbol: str
     action: str
 
 
@@ -146,7 +149,10 @@ class AcceptedOrderEventService:
         if event.event_type in self.PASSTHROUGH_EVENT_TYPES:
             return AcceptedOrderProcessResult(
                 event_id=event.event_id,
+                event_type=event.event_type,
                 order_id=event.order_id,
+                exchange_id=event.exchange_id,
+                symbol=event.symbol,
                 action="IGNORED_TRADE_EVENT",
             )
         order = self.order_repository.get_by_order_id(db, event.order_id)
@@ -156,7 +162,10 @@ class AcceptedOrderEventService:
         if order is None:
             return AcceptedOrderProcessResult(
                 event_id=event.event_id,
+                event_type=event.event_type,
                 order_id=event.order_id,
+                exchange_id=event.exchange_id,
+                symbol=event.symbol,
                 action="ORDER_NOT_FOUND",
             )
 
@@ -183,7 +192,10 @@ class AcceptedOrderEventService:
             )
             return AcceptedOrderProcessResult(
                 event_id=event.event_id,
+                event_type=event.event_type,
                 order_id=event.order_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
                 action="REMOVED",
             )
 
@@ -194,7 +206,10 @@ class AcceptedOrderEventService:
         )
         return AcceptedOrderProcessResult(
             event_id=event.event_id,
+            event_type=event.event_type,
             order_id=event.order_id,
+            exchange_id=order.exchange_id,
+            symbol=order.symbol,
             action=(
                 "UPDATED"
                 if written and event.event_type == "ORDER_PARTIALLY_FILLED"

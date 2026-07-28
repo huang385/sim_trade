@@ -161,6 +161,30 @@ class MarketTickStreamConsumer:
             )
         )
 
+    def acknowledge_many(self, message_ids: list[str]) -> int:
+        """一次XACK确认多条已经可靠写入快照的行情消息。"""
+
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return 0
+        return int(
+            self.redis_client.xack(
+                self.stream_name,
+                self.group_name,
+                *ids,
+            )
+        )
+
+    def clear_failures(self, message_ids: list[str]) -> None:
+        """批量删除已经确认消息的失败计数。"""
+
+        keys = [
+            self.failure_key_factory(message_id)
+            for message_id in dict.fromkeys(message_ids)
+        ]
+        if keys:
+            self.redis_client.delete(*keys)
+
     def increment_failure(self, message_id: str) -> int:
         """原子增加消息失败次数并刷新TTL，避免计数Key永久残留。"""
 

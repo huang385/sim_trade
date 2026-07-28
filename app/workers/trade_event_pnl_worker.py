@@ -5,15 +5,11 @@ import socket
 from threading import Event
 
 from app.core.config import settings
-from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
-from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.redis_keys import pnl_trade_event_failure_key
-from app.services.active_position_cache import ActivePositionCache
-from app.services.realtime_pnl_service import RealtimePnlService
 from app.services.trade_created_pnl_service import (
     TradeCreatedPnlService,
     TradeCreatedPnlValidationError,
@@ -55,12 +51,11 @@ class TradeEventPnlWorker:
             )
             self.stream_consumer.acknowledge(message_id)
             self.stream_consumer.clear_failure(message_id)
-            if result.action == "REFRESHED":
+            if result.action == "DIRTY_MARKED":
                 logger.info(
-                    "成交后PnL快照刷新成功 id=%s zeroed=%s written=%s",
+                    "成交后PnL合约已标记Dirty id=%s version=%s",
                     message_id,
-                    result.positions_zeroed,
-                    result.snapshots_written,
+                    result.dirty_version,
                 )
             return "acknowledged"
         except TradeCreatedPnlValidationError as exc:
@@ -125,21 +120,8 @@ class TradeEventPnlWorker:
 
 def build_worker() -> TradeEventPnlWorker:
     store = RealtimePnlStore(redis_client)
-    cache = ActivePositionCache(
-        session_factory=SessionLocal,
-        refresh_ms=settings.active_position_cache_refresh_ms,
-        version_loader=store.get_position_cache_version,
-    )
-    realtime_service = RealtimePnlService(
-        active_position_cache=cache,
-        pnl_store=store,
-    )
     service = TradeCreatedPnlService(
-        session_factory=SessionLocal,
-        cache=cache,
         pnl_store=store,
-        market_tick_store=MarketTickStore(redis_client),
-        realtime_service=realtime_service,
     )
     consumer = OrderStreamConsumer(
         redis_client,

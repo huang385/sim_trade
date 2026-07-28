@@ -68,7 +68,10 @@ def test_valid_tick_is_validated_and_published():
             is_active=True,
         ),
     )
-    store.publish.assert_called_once_with(tick)
+    store.publish.assert_called_once_with(
+        tick,
+        subscription_generation=None,
+    )
 
 
 def test_old_event_time_from_live_callback_is_not_filtered():
@@ -86,7 +89,10 @@ def test_old_event_time_from_live_callback_is_not_filtered():
 
     assert result.action == MarketDataProcessAction.PUBLISHED
     assert result.tick.ingest_type == MarketTickIngestType.LIVE_CALLBACK
-    store.publish.assert_called_once_with(result.tick)
+    store.publish.assert_called_once_with(
+        result.tick,
+        subscription_generation=None,
+    )
 
 
 def test_rest_snapshot_is_explicitly_ignored_and_never_published():

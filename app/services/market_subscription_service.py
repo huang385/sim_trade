@@ -1,9 +1,16 @@
 from dataclasses import dataclass
 from threading import RLock
-from typing import Any
+from typing import Any, Protocol
 
 from app.common.code_utils import normalize_code
 from app.infrastructure.active_order_index import ActiveOrderIndex
+
+
+class ActivePositionContractSource(Protocol):
+    """行情订阅服务所需的最小活动持仓合约读取接口。"""
+
+    def list_active_contract_codes(self) -> set[str]:
+        """返回当前至少存在一条有效持仓的合约代码。"""
 
 
 @dataclass(frozen=True)
@@ -37,9 +44,13 @@ class MarketSubscriptionService:
         self,
         *,
         active_order_index: ActiveOrderIndex,
+        active_position_contract_source: ActivePositionContractSource,
         debounce_seconds: float,
     ):
         self.active_order_index = active_order_index
+        self.active_position_contract_source = (
+            active_position_contract_source
+        )
         self.debounce_seconds = debounce_seconds
         self._requested_codes: frozenset[str] = frozenset()
         self._subscribed_codes: set[str] = set()
@@ -50,7 +61,7 @@ class MarketSubscriptionService:
         self._lock = RLock()
 
     def _get_active_order_codes(self) -> set[str]:
-        """读取当前唯一订阅来源 active_orders:all。"""
+        """从active_orders:all读取仍需撮合的活动订单合约。"""
 
         desired: set[str] = set()
         for order_id in self.active_order_index.list_all_order_ids():
@@ -64,15 +75,33 @@ class MarketSubscriptionService:
                 continue
         return desired
 
+    def _get_active_position_codes(self) -> set[str]:
+        """从Redis持仓合约索引读取仍需盯市的有效持仓合约。"""
+
+        desired: set[str] = set()
+        for raw_code in (
+            self.active_position_contract_source
+            .list_active_contract_codes()
+        ):
+            try:
+                desired.add(normalize_code(raw_code))
+            except ValueError:
+                continue
+        return desired
+
     def get_desired_codes(self) -> frozenset[str]:
         """
         汇总目标订阅集合。
 
-        当前只使用活动订单；未来可在此合并持仓、风控监控和用户主动订阅，
-        而不需要改变 Worker 的订阅状态机。
+        活动订单需要行情进行撮合；有效持仓需要行情持续计算实时盈亏。
+        两者取并集并自动去重。只有某合约既无活动订单、也无有效持仓时，
+        才会在既有防抖流程结束后从订阅集合移除。
         """
 
-        return frozenset(self._get_active_order_codes())
+        return frozenset(
+            self._get_active_order_codes()
+            | self._get_active_position_codes()
+        )
 
     def observe(
         self,

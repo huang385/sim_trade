@@ -22,6 +22,7 @@ from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
     create_remote_sdk_client,
 )
+from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.instrument_repository import InstrumentRepository
 from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import (
@@ -76,6 +77,8 @@ class QueuedTick:
     data: dict[str, Any]
     raw: dict[str, Any]
     ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK
+    # Tick入队时所属的订阅代次；None只用于兼容独立测试和手工调用。
+    subscription_generation: int | None = None
 
 
 class MarketDataSubscriberWorker:
@@ -156,7 +159,13 @@ class MarketDataSubscriberWorker:
         self.stop_event.set()
         self._set_status(MarketDataSourceStatus.STOPPING)
 
-    def on_quote(self, data: dict[str, Any], raw: dict[str, Any]) -> None:
+    def on_quote(
+        self,
+        data: dict[str, Any],
+        raw: dict[str, Any],
+        *,
+        generation: int | None = None,
+    ) -> None:
         """SDK 回调：记录接收时间并非阻塞入队，不执行数据库或 Redis 操作。"""
 
         with self._state_lock:
@@ -173,6 +182,7 @@ class MarketDataSubscriberWorker:
                     data=dict(data),
                     raw=dict(raw),
                     ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+                    subscription_generation=generation,
                 )
             )
             self._increment("enqueued_count")
@@ -264,6 +274,7 @@ class MarketDataSubscriberWorker:
                 data=item.data,
                 raw=item.raw,
                 ingest_type=item.ingest_type,
+                subscription_generation=item.subscription_generation,
             )
             self._increment("processed_count")
             if result.action == MarketDataProcessAction.PUBLISHED:
@@ -328,7 +339,11 @@ class MarketDataSubscriberWorker:
             self.market_data_service.refresh_instrument_cache(db, codes)
         subscription = self.feed_client.start_tick_callbacks(
             codes,
-            on_quote=self.on_quote,
+            on_quote=lambda data, raw: self.on_quote(
+                data,
+                raw,
+                generation=generation,
+            ),
             on_subscribe=lambda report: self.on_subscribe(
                 report,
                 generation=generation,
@@ -422,6 +437,7 @@ class MarketDataSubscriberWorker:
                 {
                     "source": "YML_FEEDHUB",
                     "status": status.value,
+                    "subscription_generation": state.generation,
                     "requested_codes": ",".join(sorted(state.requested_codes)),
                     "subscribed_codes": ",".join(sorted(state.subscribed_codes)),
                     "failed_codes": ",".join(sorted(state.failed_codes)),
@@ -557,6 +573,9 @@ def build_worker() -> MarketDataSubscriberWorker:
     )
     subscription_service = MarketSubscriptionService(
         active_order_index=ActiveOrderIndex(redis_client),
+        # 活动持仓合约索引由实时盈亏Worker维护在Redis中。复用该索引可让
+        # 已成交持仓继续接收行情，同时避免订阅Worker高频查询PostgreSQL。
+        active_position_contract_source=RealtimePnlStore(redis_client),
         debounce_seconds=(
             settings.remote_market_data_subscription_debounce_seconds
         ),

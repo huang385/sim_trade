@@ -19,6 +19,11 @@ PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
 PNL_DIRTY_ACCOUNTS_KEY = "pnl:dirty_accounts"
 PNL_DIRTY_POSITION_VERSIONS_KEY = "pnl:dirty_position_versions"
 PNL_POSITION_CACHE_VERSION_KEY = "pnl:position_cache_version"
+PNL_DIRTY_CONTRACTS_KEY = "pnl:dirty_contracts"
+PNL_DIRTY_CONTRACT_VERSIONS_KEY = "pnl:dirty_contract_versions"
+PNL_ACCOUNT_INDEX_KEYS_KEY = "pnl:index_keys:accounts"
+PNL_CONTRACT_INDEX_KEYS_KEY = "pnl:index_keys:contracts"
+PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
 
 
@@ -86,6 +91,36 @@ def pnl_contract_positions_key(exchange_id: str, symbol: str) -> str:
     """返回合约当前已建立实时快照的持仓编号集合。"""
 
     return f"pnl:contract_positions:{exchange_id}:{symbol}"
+
+
+def pnl_dirty_contract_member(exchange_id: str, symbol: str) -> str:
+    """返回Dirty合约集合成员，百分号编码避免分隔符歧义。"""
+
+    from urllib.parse import quote
+
+    return (
+        f"{quote(exchange_id.strip().upper(), safe='')}"
+        f"|{quote(symbol.strip().upper(), safe='')}"
+    )
+
+
+def parse_pnl_dirty_contract_member(member: str) -> tuple[str, str]:
+    """把Dirty合约成员还原为标准交易所和合约代码。"""
+
+    from urllib.parse import unquote
+
+    exchange_id, symbol = member.split("|", 1)
+    return unquote(exchange_id), unquote(symbol)
+
+
+def pnl_dirty_contract_accounts_key(
+    exchange_id: str,
+    symbol: str,
+) -> str:
+    """返回成交Dirty合约关联账户集合。"""
+
+    member = pnl_dirty_contract_member(exchange_id, symbol)
+    return f"pnl:dirty_contract_accounts:{member}"
 
 
 def pnl_event_failure_key(message_id: str) -> str:

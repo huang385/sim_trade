@@ -18,11 +18,22 @@ from app.infrastructure.order_stream_consumer import (
     OrderStreamConsumer,
     StreamMessage,
 )
+from app.matching.registry import create_matching_engine
 from app.repositories.order_repository import OrderRepository
 from app.services.accepted_order_event_service import (
     AcceptedOrderEventService,
     UnsupportedOrderEventError,
 )
+from app.services.live_market_snapshot_service import (
+    LiveMarketSnapshotService,
+)
+from app.services.market_tick_matching_service import (
+    MarketTickMatchingService,
+)
+from app.services.order_arrival_matching_service import (
+    OrderArrivalMatchingService,
+)
+from app.services.trade_settlement_service import TradeSettlementService
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +71,7 @@ class OrderEventConsumerWorker:
         session_factory: Callable[[], Session],
         stream_consumer: OrderStreamConsumer,
         event_service: AcceptedOrderEventService,
+        arrival_matching_service: OrderArrivalMatchingService | None = None,
         batch_size: int,
         block_ms: int,
         pending_idle_ms: int,
@@ -69,6 +81,7 @@ class OrderEventConsumerWorker:
         self.session_factory = session_factory
         self.stream_consumer = stream_consumer
         self.event_service = event_service
+        self.arrival_matching_service = arrival_matching_service
         self.batch_size = batch_size
         self.block_ms = block_ms
         self.pending_idle_ms = pending_idle_ms
@@ -161,16 +174,37 @@ class OrderEventConsumerWorker:
                     db.rollback()
                     raise
 
+            arrival_result = None
+            if (
+                self.arrival_matching_service is not None
+                and result.event_type == "ORDER_ACCEPTED"
+                and result.action in {"REGISTERED", "DUPLICATE"}
+            ):
+                # 活动索引已经完成原子写入后，才允许用当前代WebSocket盘口
+                # 触发一次撮合。无可用盘口是正常等待，数据库或Redis异常则
+                # 保留订单事件Pending，重试仍由成交幂等约束保护。
+                arrival_result = (
+                    self.arrival_matching_service.match_if_ready(
+                        exchange_id=result.exchange_id,
+                        symbol=result.symbol,
+                    )
+                )
+
             self.stream_consumer.acknowledge(message_id)
             self.stream_consumer.clear_failure(message_id)
             logger.info(
                 "订单事件处理成功 stream_message_id=%s event_id=%s "
-                "order_id=%s consumer_name=%s action=%s",
+                "order_id=%s consumer_name=%s action=%s arrival_match=%s",
                 message_id,
                 result.event_id,
                 result.order_id,
                 self.consumer_name,
                 result.action,
+                (
+                    arrival_result.action
+                    if arrival_result is not None
+                    else "NOT_APPLICABLE"
+                ),
             )
             return "acknowledged"
 
@@ -322,10 +356,26 @@ def main() -> None:
         active_order_index=active_order_index,
         processed_ttl_seconds=settings.order_event_processed_ttl_seconds,
     )
+    matching_service = MarketTickMatchingService(
+        session_factory=SessionLocal,
+        active_order_index=active_order_index,
+        order_repository=OrderRepository(),
+        matching_engine=create_matching_engine(
+            settings.matching_engine_name
+        ),
+        settlement_service=TradeSettlementService(),
+    )
+    arrival_matching_service = OrderArrivalMatchingService(
+        live_market_snapshot_service=LiveMarketSnapshotService(
+            redis_client
+        ),
+        matching_service=matching_service,
+    )
     worker = OrderEventConsumerWorker(
         session_factory=SessionLocal,
         stream_consumer=stream_consumer,
         event_service=event_service,
+        arrival_matching_service=arrival_matching_service,
         batch_size=settings.order_consumer_batch_size,
         block_ms=settings.order_consumer_block_ms,
         pending_idle_ms=settings.order_pending_idle_ms,

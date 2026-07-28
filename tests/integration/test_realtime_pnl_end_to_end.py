@@ -150,7 +150,10 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
                 refresh_ms=1000,
             ),
             pnl_store=store,
+            market_tick_store=MarketTickStore(redis_client),
         ),
+        pnl_store=store,
+        market_tick_store=MarketTickStore(redis_client),
         batch_size=100,
         block_ms=1,
         pending_idle_ms=60000,
@@ -163,23 +166,30 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
     )
 
     try:
-        tick_store.publish(
-            MarketTick(
-                source_event_id=f"PNL-TICK-{suffix}",
-                ingest_type=MarketTickIngestType.LIVE_CALLBACK,
-                order_book_id=integration_context.symbol,
-                exchange_id=integration_context.exchange_id,
-                symbol=integration_context.symbol,
-                trading_day=integration_context.trading_day,
-                event_time=datetime.now(timezone.utc),
-                sequence_id=1,
-                last_price=Decimal("3520"),
-                cumulative_volume=1,
-                bid_volume_1=1,
-                ask_volume_1=1,
+        for sequence, price in enumerate(
+            ("3517", "3518", "3519", "3520"),
+            start=1,
+        ):
+            tick_store.publish(
+                MarketTick(
+                    source_event_id=(
+                        f"PNL-TICK-{suffix}-{sequence}"
+                    ),
+                    ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+                    order_book_id=integration_context.symbol,
+                    exchange_id=integration_context.exchange_id,
+                    symbol=integration_context.symbol,
+                    trading_day=integration_context.trading_day,
+                    event_time=datetime.now(timezone.utc),
+                    sequence_id=sequence,
+                    last_price=Decimal(price),
+                    cumulative_volume=sequence,
+                    bid_volume_1=1,
+                    ask_volume_1=1,
+                )
             )
-        )
-        worker.run_once()
+        # 生产循环按500ms自动刷新；集成测试显式结束当前窗口。
+        worker.run_once(force_flush=True)
 
         position_snapshot = store.get_position(position_id)
         account_snapshot = store.get_account(
@@ -190,6 +200,14 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
             == "2400.000000"
         )
         assert position_snapshot["daily_position_pnl"] == "400.000000"
+        pending = redis_client.xpending(stream_name, group_name)
+        pending_count = (
+            pending["pending"]
+            if isinstance(pending, dict)
+            else pending[0]
+        )
+        assert pending_count == 0
+        assert worker.stats_snapshot().ticks_coalesced == 3
         assert account_snapshot["daily_pnl"] == "400.000000"
         assert position_id in redis_client.smembers(
             PNL_DIRTY_POSITIONS_KEY
@@ -210,8 +228,10 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
             pnl_store=store,
             market_tick_store=MarketTickStore(redis_client),
         ).persist_batch(500)
-        assert result.positions_persisted == 1
-        assert result.accounts_persisted == 1
+        # Redis Dirty集合是系统级共享集合；本机若已有其他活动持仓，冷启动
+        # 完整对账可能让同一批同时持久化多条。下面继续精确校验本测试持仓。
+        assert result.positions_persisted >= 1
+        assert result.accounts_persisted >= 1
 
         with SessionLocal() as db:
             position = db.scalar(
