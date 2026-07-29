@@ -7,6 +7,11 @@ def make_index(details):
     index = Mock()
     index.list_all_order_ids.return_value = set(details)
     index.get_active_order.side_effect = details.get
+    index.list_active_contract_codes.return_value = {
+        detail["order_book_id"]
+        for detail in details.values()
+        if detail.get("order_book_id")
+    }
     return index
 
 
@@ -27,19 +32,22 @@ def test_no_active_orders_produces_empty_desired_set():
 
 
 def test_repeated_order_book_id_is_subscribed_only_once():
-    service = MarketSubscriptionService(
-        active_order_index=make_index(
+    index = make_index(
             {
                 "O1": {"order_book_id": "AG2609"},
                 "O2": {"order_book_id": "ag2609"},
                 "O3": {"order_book_id": "AU2608"},
             }
-        ),
+        )
+    service = MarketSubscriptionService(
+        active_order_index=index,
         active_position_contract_source=make_position_source(),
         debounce_seconds=3,
     )
 
     assert service.get_desired_codes() == frozenset({"AG2609", "AU2608"})
+    index.list_active_contract_codes.assert_called_once()
+    index.get_active_order.assert_not_called()
 
 
 def test_active_positions_are_subscribed_without_active_orders():

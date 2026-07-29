@@ -2,7 +2,7 @@ import json
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable
 
 from redis import Redis
 
@@ -167,6 +167,34 @@ class MarketTickStore:
 
     def get_latest(self, exchange_id: str, symbol: str) -> dict[str, str]:
         return self.redis_client.hgetall(market_latest_key(exchange_id, symbol))
+
+    def get_latest_many(
+        self,
+        contract_keys: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], dict[str, str]]:
+        """
+        使用一次非事务 Pipeline 批量读取多个合约的最新行情。
+
+        合约键先标准化并去重，随后按稳定顺序排队，确保 Pipeline 返回值能够
+        与交易所、合约一一对应。空输入直接返回，不向 Redis 发送空命令。
+        """
+
+        keys = sorted(
+            {
+                (
+                    str(exchange_id).strip().upper(),
+                    str(symbol).strip().upper(),
+                )
+                for exchange_id, symbol in contract_keys
+            }
+        )
+        if not keys:
+            return {}
+
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for exchange_id, symbol in keys:
+            pipeline.hgetall(market_latest_key(exchange_id, symbol))
+        return dict(zip(keys, pipeline.execute(), strict=True))
 
     def update_source_status(self, values: dict[str, Any]) -> None:
         """幂等更新行情源状态和累计计数，调用方不得传入敏感凭证。"""

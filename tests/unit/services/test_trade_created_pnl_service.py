@@ -19,7 +19,7 @@ class FakeStore:
         self.dirty = []
         self.snapshot_writes = 0
 
-    def mark_contract_dirty(self, **kwargs):
+    def mark_contract_dirty_once(self, **kwargs):
         self.dirty.append(kwargs)
         return "7"
 
@@ -59,24 +59,51 @@ def test_trade_only_marks_cross_process_dirty_contract():
     assert cache.invalidated is True
     assert store.dirty == [
         {
+            "event_id": "E001",
             "exchange_id": "SHFE",
             "symbol": "RB2610",
             "account_id": "A001",
+            "processed_ttl_seconds": 604800,
         }
     ]
     assert store.snapshot_writes == 0
 
 
-def test_non_trade_event_is_skipped_without_dirty_or_snapshot_write():
+def test_non_fact_event_is_skipped_without_dirty_or_snapshot_write():
     store = FakeStore()
     result = TradeCreatedPnlService(
         cache=FakeCache(),
         pnl_store=store,
     ).process(
         stream_message_id="1-0",
-        fields={"event_type": "ORDER_ACCEPTED", "payload": "{}"},
+        fields={"event_type": "ORDER_FILLED", "payload": "{}"},
     )
 
     assert result.action == "SKIPPED"
     assert store.dirty == []
     assert store.snapshot_writes == 0
+
+
+def test_order_accepted_marks_account_facts_dirty_after_commit_event():
+    store = FakeStore()
+    result = TradeCreatedPnlService(
+        cache=FakeCache(),
+        pnl_store=store,
+    ).process(
+        stream_message_id="2-0",
+        fields={
+            "event_id": "E002",
+            "event_type": "ORDER_ACCEPTED",
+            "payload": json.dumps(
+                {
+                    "event_id": "E002",
+                    "account_id": "A001",
+                    "exchange_id": "DCE",
+                    "symbol": "JD2609",
+                }
+            ),
+        },
+    )
+
+    assert result.action == "DIRTY_MARKED"
+    assert store.dirty[0]["event_id"] == "E002"

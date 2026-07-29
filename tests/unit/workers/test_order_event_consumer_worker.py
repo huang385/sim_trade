@@ -80,6 +80,7 @@ def test_accepted_order_triggers_arrival_matching_before_ack():
 
     assert result == "acknowledged"
     arrival_matching_service.match_if_ready.assert_called_once_with(
+        order_id="O-1",
         exchange_id="DCE",
         symbol="JD2609",
     )

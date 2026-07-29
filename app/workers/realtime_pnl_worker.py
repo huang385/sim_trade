@@ -24,6 +24,7 @@ from app.services.active_position_cache import ActivePositionCache
 from app.services.realtime_pnl_service import (
     ContractPnlRequest,
     PnlEventValidationError,
+    PnlWorkerLeaseLostError,
     RealtimePnlService,
 )
 
@@ -216,28 +217,58 @@ class RealtimePnlWorker:
             buffered.latest_tick = tick
         return "buffered"
 
-    def _current_tick(
-        self,
-        key: ContractKey,
-        buffered: BufferedContract | None,
-    ) -> MarketTick | None:
+    def _renew_current_lease(self) -> bool:
         """
-        优先读取market:latest，确保旧Pending只作为触发器而不回放旧价格。
+        向Redis确认当前实例仍是唯一写入者并刷新TTL。
+
+        Redis异常由调用方按失败关闭处理；返回False时本轮不得写快照或ACK。
         """
 
-        if self.market_tick_store is not None:
-            latest = self.market_tick_store.get_latest(*key)
+        renewed = self.pnl_store.renew_worker_lease(
+            self.lease_owner,
+            self.lease_ttl_seconds,
+        )
+        if renewed:
+            self._next_lease_renew_at = (
+                self.monotonic() + self.lease_renew_seconds
+            )
+        return renewed
+
+    def _current_ticks(
+        self,
+        keys: set[ContractKey],
+    ) -> dict[ContractKey, MarketTick | None]:
+        """
+        一次Pipeline读取本周期全部最新行情。
+
+        旧Pending只作为触发器，必须采用market:latest当前价格；Redis Hash不可用
+        时，正常新消息仍可退回本周期已经解析过的最新Tick。
+        """
+
+        latest_rows = (
+            self.market_tick_store.get_latest_many(keys)
+            if self.market_tick_store is not None
+            else {}
+        )
+        result: dict[ContractKey, MarketTick | None] = {}
+        for key in sorted(keys):
+            latest = latest_rows.get(key, {})
             if latest:
                 try:
                     tick = MarketTickStore.mapping_to_tick(latest)
                     if tick.last_price is not None and tick.last_price > 0:
-                        return tick
+                        result[key] = tick
+                        continue
                 except Exception:
                     logger.warning(
                         "PnL最新行情快照格式无效 contract=%s:%s",
                         *key,
                     )
-        return buffered.latest_tick if buffered is not None else None
+            buffered = self._buffer.get(key)
+            result[key] = (
+                buffered.latest_tick if buffered is not None else None
+            )
+        return result
 
     def _retain_or_dead_letter(
         self,
@@ -274,6 +305,9 @@ class RealtimePnlWorker:
             self._next_flush_at = now
 
     def flush(self, *, force_reconciliation: bool = False) -> None:
+        if not self._renew_current_lease():
+            logger.warning("实时PnL租约已失效，本轮不写入且保留Pending")
+            return
         started = self.monotonic()
         dirty_rows = self.pnl_store.list_dirty_contracts()
         dirty = {key: (version, accounts) for key, version, accounts in dirty_rows}
@@ -286,7 +320,7 @@ class RealtimePnlWorker:
         }
         cycle = self.service.active_position_cache.get_cycle_snapshot(
             extra_account_ids=extra_accounts,
-            force_refresh=bool(dirty) or force_reconciliation,
+            force_refresh=force_reconciliation,
         )
         refresh_delta = max(
             cycle.refresh_count - self._last_cache_refresh_count,
@@ -322,9 +356,10 @@ class RealtimePnlWorker:
 
         requests: list[ContractPnlRequest] = []
         skipped_unchanged: set[ContractKey] = set()
+        current_ticks = self._current_ticks(keys)
         for key in sorted(keys):
             buffered = self._buffer.get(key)
-            tick = self._current_tick(key, buffered)
+            tick = current_ticks.get(key)
             dirty_version, dirty_accounts = dirty.get(
                 key,
                 (None, set()),
@@ -347,6 +382,12 @@ class RealtimePnlWorker:
                 )
             )
 
+        if skipped_unchanged and not self._renew_current_lease():
+            logger.warning(
+                "实时PnL租约在确认未变化行情前失效，消息保留Pending"
+            )
+            self._schedule_next_flush(self.monotonic())
+            return
         for key in skipped_unchanged:
             buffered = self._buffer.get(key)
             if buffered is not None:
@@ -367,7 +408,18 @@ class RealtimePnlWorker:
                 cycle_snapshot=cycle,
                 dirty_version=f"cycle:{int(started * 1000)}",
                 force_reconciliation=force_reconciliation,
+                lease_owner=self.lease_owner,
             )
+        except PnlWorkerLeaseLostError:
+            retained = sum(
+                len(item.message_ids) for item in self._buffer.values()
+            )
+            self._update_stats(pending_retained=retained)
+            logger.warning(
+                "实时PnL最终写入被租约屏障拒绝，消息保留Pending"
+            )
+            self._schedule_next_flush(self.monotonic())
+            return
         except Exception:
             for key in list(self._buffer):
                 self._retain_or_dead_letter(
@@ -385,9 +437,23 @@ class RealtimePnlWorker:
             self._schedule_next_flush(self.monotonic())
             return
 
+        # 最终快照已经通过Lua租约屏障写入；ACK前再次续租。若此时失去租约，
+        # 保留原消息由新Worker幂等重算，不更新任何本地成功状态。
+        if not self._renew_current_lease():
+            retained = sum(
+                len(item.message_ids) for item in self._buffer.values()
+            )
+            self._update_stats(pending_retained=retained)
+            logger.warning(
+                "实时PnL写入后租约失效，本轮不ACK并交由新Worker恢复"
+            )
+            self._schedule_next_flush(self.monotonic())
+            return
+
+        request_by_key = {request.key: request for request in requests}
         successful = set(result.successful_contracts)
         for key in successful:
-            request = next(item for item in requests if item.key == key)
+            request = request_by_key[key]
             if request.tick is not None:
                 self._last_successful_prices[key] = request.tick.last_price
             buffered = self._buffer.get(key)
@@ -453,6 +519,9 @@ class RealtimePnlWorker:
         return min(self.block_ms, max(1, remaining_ms))
 
     def run_once(self, *, force_flush: bool = False) -> None:
+        if not self._renew_current_lease():
+            logger.warning("实时PnL租约已失效，本轮不读取或确认行情")
+            return
         messages = self.stream_consumer.claim_stale_messages(
             pending_idle_ms=self.pending_idle_ms,
             batch_size=self.batch_size,
@@ -525,8 +594,14 @@ class RealtimePnlWorker:
                     logger.exception("PnL行情消费循环异常")
                     self.stop_event.wait(self.retry_interval_seconds)
         finally:
-            if self._buffer:
-                self.flush()
+            try:
+                if self._buffer and self._renew_current_lease():
+                    self.flush()
+            except Exception:
+                # Redis不可用或无法确认租约时采用失败关闭，不执行退出写入。
+                logger.exception(
+                    "实时PnL退出时无法确认租约，已放弃刷新并保留Pending"
+                )
             if lease_acquired:
                 self.pnl_store.release_worker_lease(self.lease_owner)
 

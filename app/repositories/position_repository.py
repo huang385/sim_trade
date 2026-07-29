@@ -104,6 +104,33 @@ class PositionRepository:
         )
 
     @staticmethod
+    def list_by_position_ids_for_update(
+        db: Session,
+        *,
+        account_id: str,
+        position_ids: Sequence[str],
+    ) -> Sequence[Position]:
+        """
+        按固定数据库主键顺序批量锁定一个账户的Dirty持仓。
+
+        account_id条件防止调用方传入跨账户编号；统一排序与成交结算使用的
+        Account→Position锁顺序一致，降低并发持久化死锁风险。
+        """
+
+        if not position_ids:
+            return []
+        statement = (
+            select(Position)
+            .where(
+                Position.account_id == account_id,
+                Position.position_id.in_(tuple(position_ids)),
+            )
+            .order_by(Position.id)
+            .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def list_account_ids_for_positions(
         db: Session,
         position_ids: Sequence[str],
@@ -246,6 +273,27 @@ class PositionRepository:
                 PositionDetail.remaining_volume > 0,
             )
             .order_by(PositionDetail.id)
+            .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def list_open_details_by_position_ids_for_update(
+        db: Session,
+        *,
+        position_ids: Sequence[str],
+    ) -> Sequence[PositionDetail]:
+        """按持仓编号和数据库主键稳定排序，批量锁定全部有效持仓明细。"""
+
+        if not position_ids:
+            return []
+        statement = (
+            select(PositionDetail)
+            .where(
+                PositionDetail.position_id.in_(tuple(position_ids)),
+                PositionDetail.remaining_volume > 0,
+            )
+            .order_by(PositionDetail.position_id, PositionDetail.id)
             .with_for_update()
         )
         return db.scalars(statement).all()

@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from app.services.market_tick_matching_service import ParsedMarketTickEvent
 from app.services.order_arrival_matching_service import (
     OrderArrivalMatchingService,
 )
@@ -16,6 +17,7 @@ def test_waits_when_current_subscription_has_no_ready_tick():
     )
 
     result = service.match_if_ready(
+        order_id="O-1",
         exchange_id="DCE",
         symbol="JD2609",
     )
@@ -27,12 +29,12 @@ def test_waits_when_current_subscription_has_no_ready_tick():
 def test_ready_tick_reuses_existing_matching_service():
     event = SimpleNamespace(
         stream_message_id="123-0",
-        fields={"event_id": "TICK-1"},
+        parsed_event=Mock(spec=ParsedMarketTickEvent),
     )
     snapshot_service = Mock()
     snapshot_service.get_matching_event.return_value = event
     matching_service = Mock()
-    matching_service.process.return_value = SimpleNamespace(
+    matching_service.process_candidate_order.return_value = SimpleNamespace(
         settled_count=1
     )
     service = OrderArrivalMatchingService(
@@ -41,12 +43,14 @@ def test_ready_tick_reuses_existing_matching_service():
     )
 
     result = service.match_if_ready(
+        order_id="O-1",
         exchange_id="DCE",
         symbol="JD2609",
     )
 
     assert result.action == "SETTLED"
-    matching_service.process.assert_called_once_with(
+    matching_service.process_candidate_order.assert_called_once_with(
+        order_id="O-1",
         stream_message_id="123-0",
-        fields=event.fields,
+        event=event.parsed_event,
     )

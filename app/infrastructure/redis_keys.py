@@ -9,6 +9,8 @@ ORDER_EVENT_DEAD_LETTER_STREAM = settings.order_dead_letter_stream
 
 # 全部活动订单编号集合，用于重建对账，禁止使用 KEYS 扫描订单详情。
 ACTIVE_ORDERS_ALL_KEY = "active_orders:all"
+# 行情订阅只关心仍有活动订单的合约，独立Set避免逐订单读取Hash。
+ACTIVE_ORDER_CONTRACTS_KEY = "active_order_contracts"
 
 MARKET_TICK_STREAM = settings.market_tick_stream_name
 MARKET_MATCHING_CONSUMER_GROUP = settings.market_matching_consumer_group
@@ -43,6 +45,36 @@ def account_active_orders_key(account_id: str) -> str:
     """返回指定账户的活动订单 Set 键名。"""
 
     return f"account_active_orders:{account_id}"
+
+
+def active_order_contract_member(
+    exchange_id: str,
+    symbol: str,
+    order_book_id: str,
+) -> str:
+    """编码活动订单合约成员，同时保留订阅代码和合约Set路由信息。"""
+
+    from urllib.parse import quote
+
+    return "|".join(
+        quote(value.strip().upper(), safe="")
+        for value in (exchange_id, symbol, order_book_id)
+    )
+
+
+def parse_active_order_contract_member(
+    member: str,
+) -> tuple[str, str, str]:
+    """还原活动订单合约成员中的交易所、合约和标准订阅代码。"""
+
+    from urllib.parse import unquote
+
+    exchange_id, symbol, order_book_id = member.split("|", 2)
+    return (
+        unquote(exchange_id),
+        unquote(symbol),
+        unquote(order_book_id),
+    )
 
 
 def processed_order_event_key(event_id: str) -> str:
@@ -133,3 +165,9 @@ def pnl_trade_event_failure_key(message_id: str) -> str:
     """返回成交后PnL刷新消费者的失败次数键名。"""
 
     return f"pnl_trade_event_failure:{message_id}"
+
+
+def processed_pnl_fact_event_key(event_id: str) -> str:
+    """返回账户/持仓事实失效事件的Redis幂等键。"""
+
+    return f"processed_pnl_fact_event:{event_id}"

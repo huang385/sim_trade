@@ -158,6 +158,41 @@ class MarketTickMatchingService:
                 event.exchange_id, event.symbol
             )
         )
+        return self._process_order_ids(
+            order_ids=order_ids,
+            event=event,
+            stream_message_id=stream_message_id,
+        )
+
+    def process_candidate_order(
+        self,
+        *,
+        order_id: str,
+        event: ParsedMarketTickEvent,
+        stream_message_id: str,
+    ) -> MarketTickMatchResult:
+        """
+        使用当前类型化盘口只检查一笔已知新到达订单。
+
+        本入口不扫描合约活动订单Set，但仍会查询PostgreSQL确认订单事实，并在
+        成交结算前由TradeSettlementService再次SELECT FOR UPDATE。
+        """
+
+        return self._process_order_ids(
+            order_ids=[order_id],
+            event=event,
+            stream_message_id=stream_message_id,
+        )
+
+    def _process_order_ids(
+        self,
+        *,
+        order_ids: list[str],
+        event: ParsedMarketTickEvent,
+        stream_message_id: str,
+    ) -> MarketTickMatchResult:
+        """对调用方明确给出的候选订单逐笔执行事实校验、撮合和结算。"""
+
         # 同一条 Tick 的所有候选订单共享一份不可变行情快照，避免在高频
         # 循环中重复构造对象，同时仍保持 VN 模式下盘口量互不扣减的语义。
         market_snapshot = MatchingMarketData(

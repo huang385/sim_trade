@@ -96,3 +96,28 @@ def test_source_status_removes_obsolete_fields_only_once():
 
     redis_client.hdel.assert_called_once()
     assert redis_client.hset.call_count == 2
+
+
+def test_get_latest_many_uses_one_pipeline_and_stable_contract_mapping():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [
+        {"last_price": "100"},
+        {"last_price": "200"},
+    ]
+    store = MarketTickStore(redis_client)
+
+    result = store.get_latest_many(
+        [
+            ("shfe", "rb2610"),
+            ("DCE", "JD2609"),
+            ("SHFE", "RB2610"),
+        ]
+    )
+
+    assert result == {
+        ("DCE", "JD2609"): {"last_price": "100"},
+        ("SHFE", "RB2610"): {"last_price": "200"},
+    }
+    redis_client.pipeline.assert_called_once_with(transaction=False)
+    assert pipeline.hgetall.call_count == 2

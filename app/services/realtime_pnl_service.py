@@ -34,6 +34,10 @@ class PnlEventValidationError(ValueError):
     """行情消息结构固定错误，继续重试不会恢复。"""
 
 
+class PnlWorkerLeaseLostError(RuntimeError):
+    """最终写入前租约已经失效，本轮结果必须丢弃并保留Pending。"""
+
+
 @dataclass(frozen=True)
 class ContractPnlRequest:
     """单个合约在一个500ms周期内的最终计算输入。"""
@@ -165,6 +169,8 @@ class RealtimePnlService:
     def _calculate_missing_position(
         self,
         position: PositionPnlSnapshot,
+        *,
+        latest_by_key: Mapping[ContractKey, MarketTick | None],
     ) -> PositionPnlResult:
         """
         冷启动快照缺失时用Redis最新行情完整重算。
@@ -172,25 +178,16 @@ class RealtimePnlService:
         如果没有有效行情，退回PostgreSQL最近快照；不会把已有浮盈错误当成0。
         """
 
-        if self.market_tick_store is not None:
-            latest = self.market_tick_store.get_latest(
-                position.exchange_id,
-                position.symbol,
+        key = (
+            position.exchange_id.strip().upper(),
+            position.symbol.strip().upper(),
+        )
+        tick = latest_by_key.get(key)
+        if tick is not None and tick.last_price is not None and tick.last_price > 0:
+            return self.calculator.calculate_position(
+                mark_price=tick.last_price,
+                snapshot=position,
             )
-            if latest:
-                try:
-                    tick = MarketTickStore.mapping_to_tick(latest)
-                    if tick.last_price is not None and tick.last_price > 0:
-                        return self.calculator.calculate_position(
-                            mark_price=tick.last_price,
-                            snapshot=position,
-                        )
-                except Exception:
-                    logger.warning(
-                        "冷启动PnL行情不可用 contract=%s:%s",
-                        position.exchange_id,
-                        position.symbol,
-                    )
         return PositionPnlResult(
             cumulative_unrealized_pnl=(
                 position.persisted_unrealized_pnl
@@ -205,6 +202,7 @@ class RealtimePnlService:
         cycle_snapshot: ActivePositionCycleSnapshot,
         dirty_version: str,
         force_reconciliation: bool = False,
+        lease_owner: str | None = None,
     ) -> RealtimePnlProcessResult:
         """计算多个合约，并在同一批次内每个账户只生成一个最终快照。"""
 
@@ -216,12 +214,9 @@ class RealtimePnlService:
             request.key: cycle_snapshot.get_by_contract(*request.key)
             for request in requests
         }
-        indexed_ids = {
-            request.key: self.pnl_store.list_contract_position_ids(
-                *request.key
-            )
-            for request in requests
-        }
+        indexed_ids = self.pnl_store.list_contract_position_ids_many(
+            request.key for request in requests
+        )
         all_position_ids: set[str] = set()
         for key, positions in current_by_key.items():
             all_position_ids.update(item.position_id for item in positions)
@@ -409,15 +404,17 @@ class RealtimePnlService:
 
         # 完整汇总需要批量读到账户全部活动持仓。普通周期仅在账户快照缺失时
         # 进入该分支，作为冷启动恢复。
+        dirty_account_ids = {
+            account_id
+            for request in requests
+            for account_id in request.dirty_account_ids
+        }
         full_accounts = {
             account_id
             for account_id in affected_accounts
             if force_reconciliation
             or not old_accounts.get(account_id)
-            or any(
-                account_id in request.dirty_account_ids
-                for request in requests
-            )
+            or account_id in dirty_account_ids
         }
         full_position_ids = {
             position.position_id
@@ -429,6 +426,43 @@ class RealtimePnlService:
             old_positions.update(
                 self.pnl_store.get_positions_many(missing_old)
             )
+
+        # 完整对账可能需要补算本轮请求之外的同账户持仓。先对相关合约去重，
+        # 再用一个Pipeline读取最新行情，禁止逐持仓访问Redis。
+        latest_ticks: dict[ContractKey, MarketTick | None] = {
+            request.key: request.tick for request in requests
+        }
+        missing_contract_keys = {
+            (
+                position.exchange_id.strip().upper(),
+                position.symbol.strip().upper(),
+            )
+            for account_id in full_accounts
+            for position in cycle_snapshot.get_by_account(account_id)
+            if (
+                position.exchange_id.strip().upper(),
+                position.symbol.strip().upper(),
+            )
+            not in latest_ticks
+        }
+        if missing_contract_keys and self.market_tick_store is not None:
+            latest_rows = self.market_tick_store.get_latest_many(
+                missing_contract_keys
+            )
+            for key, latest in latest_rows.items():
+                try:
+                    tick = (
+                        MarketTickStore.mapping_to_tick(latest)
+                        if latest
+                        else None
+                    )
+                except Exception:
+                    tick = None
+                    logger.warning(
+                        "冷启动PnL行情不可用 contract=%s:%s",
+                        *key,
+                    )
+                latest_ticks[key] = tick
 
         account_models: list[AccountRealtimePnl] = []
         reconciled_accounts = 0
@@ -463,7 +497,8 @@ class RealtimePnlService:
                             )
                         else:
                             result = self._calculate_missing_position(
-                                position
+                                position,
+                                latest_by_key=latest_ticks,
                             )
                     cumulative += result.cumulative_unrealized_pnl
                     daily_position += result.daily_position_pnl
@@ -558,23 +593,41 @@ class RealtimePnlService:
             if position_id in allowed_position_ids
         ]
         if models or account_models:
-            written_positions, written_accounts = (
-                self.pnl_store.write_cycle_snapshots(
-                    positions=models,
-                    accounts=account_models,
-                    dirty_version=dirty_version,
-                    active_positions=[
-                        item
-                        for item in active_index_additions
-                        if (item[1], item[2]) in successful
-                    ],
-                    closed_positions=[
-                        item
-                        for item in closed_index_removals
-                        if (item[1], item[2]) in successful
-                    ],
+            active_positions = [
+                item
+                for item in active_index_additions
+                if (item[1], item[2]) in successful
+            ]
+            closed_positions = [
+                item
+                for item in closed_index_removals
+                if (item[1], item[2]) in successful
+            ]
+            if lease_owner is None:
+                written_positions, written_accounts = (
+                    self.pnl_store.write_cycle_snapshots(
+                        positions=models,
+                        accounts=account_models,
+                        dirty_version=dirty_version,
+                        active_positions=active_positions,
+                        closed_positions=closed_positions,
+                    )
                 )
-            )
+            else:
+                lease_owned, written_positions, written_accounts = (
+                    self.pnl_store.write_cycle_snapshots_if_lease_owned(
+                        lease_owner=lease_owner,
+                        positions=models,
+                        accounts=account_models,
+                        dirty_version=dirty_version,
+                        active_positions=active_positions,
+                        closed_positions=closed_positions,
+                    )
+                )
+                if not lease_owned:
+                    raise PnlWorkerLeaseLostError(
+                        "实时PnL最终写入前租约已失效"
+                    )
         else:
             written_positions = written_accounts = 0
 

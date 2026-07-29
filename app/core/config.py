@@ -83,7 +83,8 @@ class Settings(BaseSettings):
     pnl_consumer_retry_interval_seconds: float = 1.0
     # 行情持续消费，但实时盈亏只按该周期合并同一合约的最新行情。
     pnl_calculation_interval_ms: int = 500
-    active_position_cache_refresh_ms: int = 1000
+    # 订单/撤单/成交Outbox会主动递增缓存版本，60秒TTL只作为最终对账兜底。
+    active_position_cache_refresh_ms: int = 60000
     pnl_full_reconciliation_interval_seconds: int = 60
     pnl_worker_lease_ttl_seconds: int = 15
     pnl_worker_lease_renew_seconds: int = 5
@@ -94,7 +95,7 @@ class Settings(BaseSettings):
     pnl_persist_max_batches_per_cycle: int = 10
     pnl_persist_time_budget_ms: int = 800
 
-    # TRADE_CREATED独立消费组用于成交提交后立即失效活动持仓缓存。
+    # 订单事实事件独立消费组用于提交后立即失效账户和活动持仓缓存。
     pnl_trade_consumer_group: str = "group:pnl-trade-engine"
     pnl_trade_consumer_name: str | None = None
     pnl_trade_consumer_batch_size: int = 100

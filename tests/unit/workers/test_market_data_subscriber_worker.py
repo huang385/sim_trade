@@ -53,6 +53,11 @@ def make_worker(
     index = Mock()
     index.list_all_order_ids.side_effect = lambda: set(details)
     index.get_active_order.side_effect = details.get
+    index.list_active_contract_codes.side_effect = lambda: {
+        detail["order_book_id"]
+        for detail in details.values()
+        if detail.get("order_book_id")
+    }
     active_position_source = Mock()
     active_position_source.list_active_contract_codes.return_value = set()
     subscription_service = MarketSubscriptionService(

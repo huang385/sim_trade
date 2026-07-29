@@ -1,9 +1,9 @@
+import json
 from datetime import datetime
 from decimal import Decimal
 from typing import Iterable
 
 from redis import Redis
-from redis.exceptions import WatchError
 
 from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
@@ -22,6 +22,7 @@ from app.infrastructure.redis_keys import (
     pnl_dirty_contract_accounts_key,
     pnl_dirty_contract_member,
     pnl_position_key,
+    processed_pnl_fact_event_key,
 )
 from app.schemas.pnl_schema import (
     AccountRealtimePnl,
@@ -70,6 +71,43 @@ redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], tostring(version))
 redis.call('SADD', KEYS[4], ARGV[2])
 return tostring(version)
+"""
+
+MARK_CONTRACT_DIRTY_ONCE_SCRIPT = """
+if redis.call('EXISTS', KEYS[5]) == 1 then
+    return ''
+end
+local version = redis.call('INCR', KEYS[1])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('HSET', KEYS[3], ARGV[1], tostring(version))
+redis.call('SADD', KEYS[4], ARGV[2])
+redis.call('SET', KEYS[5], tostring(version), 'EX', ARGV[3])
+return tostring(version)
+"""
+
+
+# Redis 5中租约键自然过期与WATCH的组合不能提供本场景要求的严格屏障，因此
+# 最终快照写入使用Lua完成“检查持有者+执行预生成命令”。Lua只搬运Python
+# 已经计算好的字符串，不解析、不比较、更不计算任何金额。
+WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+    return 0
+end
+local operations = cjson.decode(ARGV[2])
+for _, operation in ipairs(operations) do
+    local command = operation[1]
+    local key = operation[2]
+    if command == 'HSET' then
+        for index = 3, #operation, 2 do
+            redis.call('HSET', key, operation[index], operation[index + 1])
+        end
+    elseif command == 'SADD' then
+        redis.call('SADD', key, operation[3])
+    elseif command == 'SREM' then
+        redis.call('SREM', key, operation[3])
+    end
+end
+return 1
 """
 
 
@@ -137,6 +175,37 @@ class RealtimePnlStore:
                 account_id,
             )
         )
+
+    def mark_contract_dirty_once(
+        self,
+        *,
+        event_id: str,
+        exchange_id: str,
+        symbol: str,
+        account_id: str,
+        processed_ttl_seconds: int,
+    ) -> str | None:
+        """
+        以事件编号幂等标记账户/持仓事实变化并递增缓存版本。
+
+        Outbox消息可能在ACK前重投；同一事件只允许触发一次版本变化，避免重复
+        投递让实时Worker无意义地反复全量刷新活动持仓缓存。
+        """
+
+        member = pnl_dirty_contract_member(exchange_id, symbol)
+        version = self.redis_client.eval(
+            MARK_CONTRACT_DIRTY_ONCE_SCRIPT,
+            5,
+            PNL_POSITION_CACHE_VERSION_KEY,
+            PNL_DIRTY_CONTRACTS_KEY,
+            PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+            pnl_dirty_contract_accounts_key(exchange_id, symbol),
+            processed_pnl_fact_event_key(event_id),
+            member,
+            account_id,
+            processed_ttl_seconds,
+        )
+        return str(version) if version not in (None, "") else None
 
     def list_dirty_contracts(
         self,
@@ -327,6 +396,100 @@ class RealtimePnlStore:
         pipeline.execute()
         return len(position_items), len(account_items)
 
+    def write_cycle_snapshots_if_lease_owned(
+        self,
+        *,
+        lease_owner: str,
+        positions: Iterable[PositionRealtimePnl],
+        accounts: Iterable[AccountRealtimePnl],
+        dirty_version: str,
+        active_positions: Iterable[tuple[str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str]],
+    ) -> tuple[bool, int, int]:
+        """
+        仅在当前实例仍持有租约时原子写入一个PnL周期的全部Redis变化。
+
+        返回False表示租约已经过期或被其他Worker取得，此时脚本不会执行任何
+        快照、Dirty或索引写入。金额始终作为字符串传入Lua，脚本不做资金计算。
+        """
+
+        position_items = list(positions)
+        account_items = list(accounts)
+        additions = list(active_positions)
+        removals = list(closed_positions)
+        operations: list[list[str]] = []
+
+        for item in position_items:
+            hash_operation = ["HSET", pnl_position_key(item.position_id)]
+            for field, value in _mapping(item).items():
+                hash_operation.extend((field, value))
+            operations.append(hash_operation)
+            operations.append(
+                ["SADD", PNL_DIRTY_POSITIONS_KEY, item.position_id]
+            )
+            operations.append(
+                [
+                    "HSET",
+                    PNL_DIRTY_POSITION_VERSIONS_KEY,
+                    item.position_id,
+                    dirty_version,
+                ]
+            )
+
+        for item in account_items:
+            hash_operation = ["HSET", pnl_account_key(item.account_id)]
+            for field, value in _mapping(item).items():
+                hash_operation.extend((field, value))
+            operations.append(hash_operation)
+            operations.append(
+                ["SADD", PNL_DIRTY_ACCOUNTS_KEY, item.account_id]
+            )
+
+        for account_id, exchange_id, symbol, position_id in additions:
+            account_key = pnl_account_positions_key(account_id)
+            contract_key = pnl_contract_positions_key(exchange_id, symbol)
+            operations.extend(
+                (
+                    ["SADD", account_key, position_id],
+                    ["SADD", contract_key, position_id],
+                    ["SADD", PNL_ACCOUNT_INDEX_KEYS_KEY, account_key],
+                    ["SADD", PNL_CONTRACT_INDEX_KEYS_KEY, contract_key],
+                )
+            )
+
+        for account_id, exchange_id, symbol, position_id in removals:
+            operations.extend(
+                (
+                    [
+                        "SREM",
+                        pnl_account_positions_key(account_id),
+                        position_id,
+                    ],
+                    [
+                        "SREM",
+                        pnl_contract_positions_key(exchange_id, symbol),
+                        position_id,
+                    ],
+                )
+            )
+
+        written = bool(
+            self.redis_client.eval(
+                WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT,
+                1,
+                PNL_WORKER_LEASE_KEY,
+                lease_owner,
+                json.dumps(
+                    operations,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        if not written:
+            return False, 0, 0
+        return True, len(position_items), len(account_items)
+
     def get_positions_many(
         self,
         position_ids: Iterable[str],
@@ -376,6 +539,34 @@ class RealtimePnlStore:
                 pnl_contract_positions_key(exchange_id, symbol)
             )
         )
+
+    def list_contract_position_ids_many(
+        self,
+        contract_keys: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], set[str]]:
+        """使用一次Pipeline批量读取多个合约的实时持仓索引。"""
+
+        keys = sorted(
+            {
+                (
+                    str(exchange_id).strip().upper(),
+                    str(symbol).strip().upper(),
+                )
+                for exchange_id, symbol in contract_keys
+            }
+        )
+        if not keys:
+            return {}
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for exchange_id, symbol in keys:
+            pipeline.smembers(
+                pnl_contract_positions_key(exchange_id, symbol)
+            )
+        values = pipeline.execute()
+        return {
+            key: set(position_ids or ())
+            for key, position_ids in zip(keys, values, strict=True)
+        }
 
     def list_active_contract_codes(self) -> set[str]:
         """

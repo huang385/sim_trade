@@ -10,7 +10,6 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex
-from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.redis_keys import (
     ACTIVE_ORDERS_ALL_KEY,
     account_active_orders_key,
@@ -29,6 +28,7 @@ from app.services.accepted_order_event_service import (
 from app.services.live_market_snapshot_service import LiveMatchingEvent
 from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
+    ParsedMarketTickEvent,
 )
 from app.services.order_arrival_matching_service import (
     OrderArrivalMatchingService,
@@ -108,14 +108,12 @@ def test_accepted_order_matches_against_current_live_cached_tick(
         snapshot_service.get_matching_event.return_value = (
             LiveMatchingEvent(
                 stream_message_id=f"arrival-{suffix}-0",
-                fields={
-                    "event_id": tick.source_event_id,
-                    "event_type": "MARKET_TICK",
-                    "exchange_id": tick.exchange_id,
-                    "symbol": tick.symbol,
-                    "order_book_id": tick.order_book_id,
-                    "payload": MarketTickStore.tick_to_payload(tick),
-                },
+                parsed_event=ParsedMarketTickEvent(
+                    event_id=tick.source_event_id,
+                    exchange_id=tick.exchange_id,
+                    symbol=tick.symbol,
+                    tick=tick,
+                ),
             )
         )
         result = OrderArrivalMatchingService(
@@ -128,6 +126,7 @@ def test_accepted_order_matches_against_current_live_cached_tick(
                 settlement_service=TradeSettlementService(),
             ),
         ).match_if_ready(
+            order_id=order_id,
             exchange_id=integration_context.exchange_id,
             symbol=integration_context.symbol,
         )

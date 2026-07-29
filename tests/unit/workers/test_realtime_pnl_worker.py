@@ -4,6 +4,7 @@ from types import MappingProxyType, SimpleNamespace
 from app.schemas.market_tick_schema import MarketTick
 from app.services.active_position_cache import ActivePositionCycleSnapshot
 from app.services.realtime_pnl_service import (
+    PnlWorkerLeaseLostError,
     RealtimePnlProcessResult,
     RealtimePnlService,
 )
@@ -87,9 +88,11 @@ class FakeConsumer:
 class FakeCache:
     def __init__(self):
         self.calls = 0
+        self.call_kwargs = []
 
-    def get_cycle_snapshot(self, **_kwargs):
+    def get_cycle_snapshot(self, **kwargs):
         self.calls += 1
+        self.call_kwargs.append(kwargs)
         return ActivePositionCycleSnapshot(
             by_contract=MappingProxyType({}),
             by_account=MappingProxyType({}),
@@ -103,6 +106,8 @@ class FakePnlStore:
     def __init__(self):
         self.dirty = []
         self.completed = []
+        self.lease_valid = True
+        self.renew_calls = 0
 
     def list_dirty_contracts(self):
         return list(self.dirty)
@@ -114,13 +119,20 @@ class FakePnlStore:
     def rebuild_active_indexes(self, **_kwargs):
         return True
 
+    def renew_worker_lease(self, _owner, _ttl_seconds):
+        self.renew_calls += 1
+        return self.lease_valid
+
 
 class FakeMarketStore:
     def __init__(self):
         self.latest = {}
 
-    def get_latest(self, exchange_id, symbol):
-        return self.latest.get((exchange_id, symbol), {})
+    def get_latest_many(self, contract_keys):
+        return {
+            key: self.latest.get(key, {})
+            for key in sorted(set(contract_keys))
+        }
 
 
 class FakeService:
@@ -317,3 +329,62 @@ def test_dynamic_block_does_not_exceed_remaining_flush_time():
     worker.run_once()
 
     assert 149 <= consumer.block_values[0] <= 150
+
+
+def test_lost_lease_does_not_read_or_ack_messages():
+    store = FakePnlStore()
+    store.lease_valid = False
+    worker, consumer, service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert consumer.acked_batches == []
+    assert consumer.messages
+    assert service.calls == []
+
+
+def test_lease_lost_during_calculation_keeps_buffer_pending():
+    store = FakePnlStore()
+
+    class LeaseLosingService(FakeService):
+        def process_batch(self, *, requests, **_kwargs):
+            self.calls.append(requests)
+            self.pnl_store.lease_valid = False
+            raise PnlWorkerLeaseLostError("lease expired")
+
+    service = LeaseLosingService(store)
+    worker, consumer, _service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert consumer.acked_batches == []
+    assert ("DCE", "JD2609") in worker._buffer
+
+
+def test_failed_dirty_does_not_force_full_cache_refresh_every_cycle():
+    store = FakePnlStore()
+    store.dirty = [(("DCE", "JD2609"), "9", {"A001"})]
+    service = FakeService(store, successful=set())
+    worker, _consumer, _service, _store, clock = make_worker(
+        [],
+        service=service,
+        store=store,
+    )
+    worker._next_reconciliation_at = 999
+
+    worker.run_once(force_flush=True)
+    clock.value = 0.5
+    worker.run_once(force_flush=True)
+
+    assert service.active_position_cache.calls == 2
+    assert all(
+        call["force_refresh"] is False
+        for call in service.active_position_cache.call_kwargs
+    )

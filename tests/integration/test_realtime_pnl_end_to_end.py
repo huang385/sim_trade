@@ -166,6 +166,12 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
     )
 
     try:
+        # run_once绕过生产run_forever的抢租约循环，测试必须先显式取得
+        # 单写者租约，才能验证受租约屏障保护的实时快照写入。
+        assert store.acquire_worker_lease(
+            worker.lease_owner,
+            worker.lease_ttl_seconds,
+        )
         for sequence, price in enumerate(
             ("3517", "3518", "3519", "3520"),
             start=1,
@@ -264,6 +270,7 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
         )
         assert fallback_response.json()["daily_pnl"] == "400.000000"
     finally:
+        store.release_worker_lease(worker.lease_owner)
         redis_client.delete(*redis_keys)
         redis_client.srem(PNL_DIRTY_POSITIONS_KEY, position_id)
         redis_client.hdel(

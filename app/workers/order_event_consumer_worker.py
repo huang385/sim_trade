@@ -185,6 +185,7 @@ class OrderEventConsumerWorker:
                 # 保留订单事件Pending，重试仍由成交幂等约束保护。
                 arrival_result = (
                     self.arrival_matching_service.match_if_ready(
+                        order_id=result.order_id,
                         exchange_id=result.exchange_id,
                         symbol=result.symbol,
                     )

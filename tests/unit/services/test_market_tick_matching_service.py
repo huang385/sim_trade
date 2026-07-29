@@ -248,3 +248,24 @@ def test_one_order_failure_does_not_stop_later_order_but_tick_retries():
     # 第二笔仍先完成；整条 Tick 不 ACK，重试时第一笔继续处理，第二笔走幂等。
     assert len(engine.calls) == 2
     assert settlement.settle.call_count == 2
+
+
+def test_order_arrival_only_queries_and_matches_the_new_candidate():
+    new_order = make_order("O-NEW")
+    service, engine, settlement = make_service(orders=[new_order])
+    service.active_order_index.list_instrument_order_ids.return_value = {
+        f"O-{index}" for index in range(100)
+    }
+    event = service.parse_event(make_fields())
+
+    result = service.process_candidate_order(
+        order_id="O-NEW",
+        event=event,
+        stream_message_id="1-0",
+    )
+
+    assert result.candidate_count == 1
+    service.active_order_index.list_instrument_order_ids.assert_not_called()
+    service.order_repository.get_by_order_id.assert_called_once()
+    assert len(engine.calls) == 1
+    settlement.settle.assert_called_once()

@@ -24,7 +24,7 @@ def generate_consumer_name() -> str:
 
 
 class TradeEventPnlWorker:
-    """独立消费TRADE_CREATED，在成交提交后刷新或清零Redis盈亏快照。"""
+    """消费订单事实事件，在事务提交后可靠失效账户和持仓计算缓存。"""
 
     def __init__(
         self,
@@ -53,7 +53,7 @@ class TradeEventPnlWorker:
             self.stream_consumer.clear_failure(message_id)
             if result.action == "DIRTY_MARKED":
                 logger.info(
-                    "成交后PnL合约已标记Dirty id=%s version=%s",
+                    "账户事实变化后PnL合约已标记Dirty id=%s version=%s",
                     message_id,
                     result.dirty_version,
                 )
@@ -77,10 +77,10 @@ class TradeEventPnlWorker:
                 )
                 self.stream_consumer.acknowledge(message_id)
                 self.stream_consumer.clear_failure(message_id)
-                logger.error("成交后PnL刷新超过重试上限 id=%s", message_id)
+                logger.error("PnL事实刷新超过重试上限 id=%s", message_id)
                 return "dead_lettered"
             logger.warning(
-                "成交后PnL刷新失败，保留Pending id=%s retry_count=%s",
+                "PnL事实刷新失败，保留Pending id=%s retry_count=%s",
                 message_id,
                 failures,
             )
@@ -106,13 +106,13 @@ class TradeEventPnlWorker:
                     self.stream_consumer.ensure_group()
                     group_ready = True
                     logger.info(
-                        "成交PnL Consumer Group已就绪 stream=%s group=%s",
+                        "PnL事实Consumer Group已就绪 stream=%s group=%s",
                         self.stream_consumer.stream_name,
                         self.stream_consumer.group_name,
                     )
                 self.run_once()
             except Exception:
-                logger.exception("成交后PnL事件消费循环异常")
+                logger.exception("PnL事实事件消费循环异常")
                 self.stop_event.wait(
                     settings.pnl_trade_retry_interval_seconds
                 )
@@ -122,6 +122,7 @@ def build_worker() -> TradeEventPnlWorker:
     store = RealtimePnlStore(redis_client)
     service = TradeCreatedPnlService(
         pnl_store=store,
+        processed_ttl_seconds=settings.pnl_trade_failure_ttl_seconds,
     )
     consumer = OrderStreamConsumer(
         redis_client,

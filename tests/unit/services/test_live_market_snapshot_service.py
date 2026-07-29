@@ -49,8 +49,8 @@ def test_current_live_callback_is_returned_as_matching_event():
 
     assert event is not None
     assert event.stream_message_id == "123-0"
-    assert event.fields["event_id"] == tick.source_event_id
-    assert event.fields["event_type"] == "MARKET_TICK"
+    assert event.parsed_event.event_id == tick.source_event_id
+    assert event.parsed_event.tick == tick
 
 
 @pytest.mark.parametrize(

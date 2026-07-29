@@ -81,6 +81,45 @@ def test_worker_lease_release_is_owner_checked_by_lua():
     assert args[-1] == "worker-1"
 
 
+def test_lease_guarded_cycle_write_rejects_without_pipeline_write():
+    redis_client = Mock()
+    redis_client.eval.return_value = 0
+    store = RealtimePnlStore(redis_client)
+
+    accepted, positions, accounts = (
+        store.write_cycle_snapshots_if_lease_owned(
+            lease_owner="worker-old",
+            positions=[],
+            accounts=[],
+            dirty_version="cycle-1",
+            active_positions=[],
+            closed_positions=[],
+        )
+    )
+
+    assert (accepted, positions, accounts) == (False, 0, 0)
+    redis_client.pipeline.assert_not_called()
+    assert redis_client.eval.call_args.args[-2] == "worker-old"
+
+
+def test_contract_position_ids_many_uses_one_pipeline():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [{"P2"}, {"P1"}]
+    store = RealtimePnlStore(redis_client)
+
+    result = store.list_contract_position_ids_many(
+        [("SHFE", "RB2610"), ("dce", "jd2609")]
+    )
+
+    assert result == {
+        ("DCE", "JD2609"): {"P2"},
+        ("SHFE", "RB2610"): {"P1"},
+    }
+    redis_client.pipeline.assert_called_once_with(transaction=False)
+    assert pipeline.smembers.call_count == 2
+
+
 def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
     redis_client = Mock()
     redis_client.smembers.return_value = {

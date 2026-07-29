@@ -93,6 +93,12 @@ class FakeStore:
             )
         )
 
+    def list_contract_position_ids_many(self, contract_keys):
+        return {
+            key: self.list_contract_position_ids(*key)
+            for key in contract_keys
+        }
+
     def get_positions_many(self, position_ids):
         return {
             position_id: self.positions.get(position_id, {})

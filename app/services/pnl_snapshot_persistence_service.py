@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy.orm import Session
-
 from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
@@ -75,26 +73,17 @@ class PnlSnapshotPersistenceService:
 
     def _calculate_locked_position(
         self,
-        db: Session,
         position,
+        *,
+        details,
+        instrument,
+        latest: dict[str, str],
     ) -> PositionPnlResult | None:
         if position.total_volume <= 0:
             return PositionPnlResult(
                 cumulative_unrealized_pnl=Decimal("0.000000"),
                 daily_position_pnl=Decimal("0.000000"),
             )
-        details = self.position_repository.list_open_details_for_update(
-            db,
-            position_id=position.position_id,
-        )
-        instrument = self.instrument_repository.get_by_order_book_id(
-            db,
-            position.order_book_id,
-        )
-        latest = self.market_tick_store.get_latest(
-            position.exchange_id,
-            position.symbol,
-        )
         if (
             instrument is None
             or not latest
@@ -159,7 +148,8 @@ class PnlSnapshotPersistenceService:
 
         persisted_ids: list[str] = []
         accounts_persisted = 0
-        for account_id, position_ids in by_account.items():
+        for account_id in sorted(by_account):
+            position_ids = by_account[account_id]
             try:
                 with self.session_factory() as db:
                     account = (
@@ -169,25 +159,81 @@ class PnlSnapshotPersistenceService:
                     if account is None:
                         db.rollback()
                         continue
+
+                    # 同一账户的Position和PositionDetail均在一次SQL中按稳定
+                    # 顺序锁定；Instrument与行情也按不同合约批量读取。
+                    positions = (
+                        self.position_repository
+                        .list_by_position_ids_for_update(
+                            db,
+                            account_id=account_id,
+                            position_ids=position_ids,
+                        )
+                    )
+                    locked_position_ids = [
+                        position.position_id for position in positions
+                    ]
+                    details = (
+                        self.position_repository
+                        .list_open_details_by_position_ids_for_update(
+                            db,
+                            position_ids=locked_position_ids,
+                        )
+                    )
+                    details_by_position: dict[str, list] = {}
+                    for detail in details:
+                        details_by_position.setdefault(
+                            detail.position_id,
+                            [],
+                        ).append(detail)
+
+                    instruments = (
+                        self.instrument_repository.list_by_order_book_ids(
+                            db,
+                            {
+                                position.order_book_id
+                                for position in positions
+                            },
+                        )
+                    )
+                    instrument_by_order_book_id = {
+                        instrument.order_book_id: instrument
+                        for instrument in instruments
+                    }
+                    latest_by_contract = (
+                        self.market_tick_store.get_latest_many(
+                            {
+                                (
+                                    position.exchange_id,
+                                    position.symbol,
+                                )
+                                for position in positions
+                            }
+                        )
+                    )
+
                     cumulative_delta = Decimal("0")
                     daily_delta = Decimal("0")
                     updated_positions = []
-                    for position_id in position_ids:
-                        position = (
-                            self.position_repository
-                            .get_by_position_id_for_update(
-                                db,
-                                position_id,
-                            )
-                        )
-                        if (
-                            position is None
-                            or position.account_id != account_id
-                        ):
-                            continue
+                    for position in positions:
                         result = self._calculate_locked_position(
-                            db,
                             position,
+                            details=details_by_position.get(
+                                position.position_id,
+                                (),
+                            ),
+                            instrument=(
+                                instrument_by_order_book_id.get(
+                                    position.order_book_id
+                                )
+                            ),
+                            latest=latest_by_contract.get(
+                                (
+                                    position.exchange_id.strip().upper(),
+                                    position.symbol.strip().upper(),
+                                ),
+                                {},
+                            ),
                         )
                         if result is None:
                             continue

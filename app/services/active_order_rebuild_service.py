@@ -147,6 +147,14 @@ class ActiveOrderRebuildService:
                     order_id,
                 )
 
+        # 新旧事件与重建可能并发运行；这里只通过Lua删除合约订单Set已经为空
+        # 的成员，不做DEL后整集合覆盖，避免抹掉扫描期间刚注册的新订单。
+        try:
+            self.active_order_index.reconcile_active_contracts()
+        except Exception:
+            failed += 1
+            logger.exception("活动订单合约索引对账失败")
+
         return ActiveOrderRebuildResult(
             scanned=scanned,
             upserted=upserted,

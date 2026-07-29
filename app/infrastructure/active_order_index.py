@@ -6,25 +6,29 @@ from typing import Any
 from redis import Redis
 
 from app.infrastructure.redis_keys import (
+    ACTIVE_ORDER_CONTRACTS_KEY,
     ACTIVE_ORDERS_ALL_KEY,
     account_active_orders_key,
+    active_order_contract_member,
     active_order_key,
     instrument_active_orders_key,
+    parse_active_order_contract_member,
     processed_order_event_key,
 )
 
 
-# 一个 Lua 脚本同时写详情、三个倒排集合和事件幂等标记。
+# 一个Lua脚本同时写详情、订单倒排集合、活动合约集合和事件幂等标记。
 # 这样即使 Consumer 在 Redis 操作中途退出，也不会留下只写了一半的索引。
 ADD_ACTIVE_ORDER_SCRIPT = """
 local is_new_event = 0
 if redis.call('EXISTS', KEYS[5]) == 0 then
     is_new_event = 1
 end
-redis.call('HSET', KEYS[1], unpack(ARGV, 3))
+redis.call('HSET', KEYS[1], unpack(ARGV, 4))
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('SADD', KEYS[3], ARGV[1])
 redis.call('SADD', KEYS[4], ARGV[1])
+redis.call('SADD', KEYS[6], ARGV[3])
 if is_new_event == 1 then
     redis.call('SET', KEYS[5], '1', 'EX', ARGV[2])
 end
@@ -38,6 +42,9 @@ redis.call('DEL', KEYS[1])
 redis.call('SREM', KEYS[2], ARGV[1])
 redis.call('SREM', KEYS[3], ARGV[1])
 redis.call('SREM', KEYS[4], ARGV[1])
+if redis.call('SCARD', KEYS[2]) == 0 and ARGV[3] ~= '' then
+    redis.call('SREM', KEYS[6], ARGV[3])
+end
 if KEYS[5] ~= '' then
     redis.call('SET', KEYS[5], '1', 'EX', ARGV[2])
 end
@@ -45,13 +52,22 @@ return 1
 """
 
 
-# 重建不属于Stream事件处理：只覆盖Hash和三个Set，不写processed事件标记。
+# 重建不属于Stream事件处理：覆盖Hash和派生Set，不写processed事件标记。
 UPSERT_ACTIVE_ORDER_FOR_REBUILD_SCRIPT = """
-redis.call('HSET', KEYS[1], unpack(ARGV, 2))
+redis.call('HSET', KEYS[1], unpack(ARGV, 3))
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('SADD', KEYS[3], ARGV[1])
 redis.call('SADD', KEYS[4], ARGV[1])
+redis.call('SADD', KEYS[5], ARGV[2])
 return 1
+"""
+
+
+REMOVE_EMPTY_ACTIVE_CONTRACT_SCRIPT = """
+if redis.call('SCARD', KEYS[1]) == 0 then
+    return redis.call('SREM', KEYS[2], ARGV[1])
+end
+return 0
 """
 
 
@@ -139,14 +155,20 @@ class ActiveOrderIndex:
             hash_arguments.extend((field, value))
         result = self.redis_client.eval(
             ADD_ACTIVE_ORDER_SCRIPT,
-            5,
+            6,
             active_order_key(order.order_id),
             instrument_active_orders_key(order.exchange_id, order.symbol),
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_order_event_key(event_id),
+            ACTIVE_ORDER_CONTRACTS_KEY,
             order.order_id,
             processed_ttl_seconds,
+            active_order_contract_member(
+                order.exchange_id,
+                order.symbol,
+                getattr(order, "order_book_id", order.symbol),
+            ),
             *hash_arguments,
         )
         return bool(result)
@@ -164,12 +186,18 @@ class ActiveOrderIndex:
             hash_arguments.extend((field, value))
         self.redis_client.eval(
             UPSERT_ACTIVE_ORDER_FOR_REBUILD_SCRIPT,
-            4,
+            5,
             active_order_key(order.order_id),
             instrument_active_orders_key(order.exchange_id, order.symbol),
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
+            ACTIVE_ORDER_CONTRACTS_KEY,
             order.order_id,
+            active_order_contract_member(
+                order.exchange_id,
+                order.symbol,
+                getattr(order, "order_book_id", order.symbol),
+            ),
             *hash_arguments,
         )
 
@@ -203,16 +231,26 @@ class ActiveOrderIndex:
         processed_key = (
             processed_order_event_key(event_id) if event_id else ""
         )
+        detail = self.get_active_order(order_id)
+        contract_member = ""
+        if detail.get("order_book_id"):
+            contract_member = active_order_contract_member(
+                exchange_id,
+                symbol,
+                detail["order_book_id"],
+            )
         self.redis_client.eval(
             REMOVE_ACTIVE_ORDER_SCRIPT,
-            5,
+            6,
             active_order_key(order_id),
             instrument_active_orders_key(exchange_id, symbol),
             account_active_orders_key(account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_key,
+            ACTIVE_ORDER_CONTRACTS_KEY,
             order_id,
             processed_ttl_seconds,
+            contract_member,
         )
 
     def get_active_order(self, order_id: str) -> dict[str, str]:
@@ -242,6 +280,62 @@ class ActiveOrderIndex:
         """从全局Set读取全部活动订单编号，不使用Redis KEYS扫描。"""
 
         return self.redis_client.smembers(ACTIVE_ORDERS_ALL_KEY)
+
+    def list_active_contract_codes(self) -> set[str]:
+        """一次读取全部活动订单订阅代码，不再逐订单读取详情Hash。"""
+
+        codes: set[str] = set()
+        for member in self.redis_client.smembers(
+            ACTIVE_ORDER_CONTRACTS_KEY
+        ):
+            try:
+                _exchange_id, _symbol, order_book_id = (
+                    parse_active_order_contract_member(str(member))
+                )
+            except (TypeError, ValueError):
+                continue
+            if order_book_id:
+                codes.add(order_book_id)
+        return codes
+
+    def reconcile_active_contracts(self) -> int:
+        """
+        重建结束后原子清除对应合约订单Set已经为空的派生成员。
+
+        检查SCARD和删除成员位于同一Lua中，并发新订单要么先加入、要么在清理
+        后重新加入，因此不会把仍有活动订单的合约永久误删。
+        """
+
+        removed = 0
+        members = sorted(
+            self.redis_client.smembers(ACTIVE_ORDER_CONTRACTS_KEY)
+        )
+        for member in members:
+            try:
+                exchange_id, symbol, _order_book_id = (
+                    parse_active_order_contract_member(str(member))
+                )
+            except (TypeError, ValueError):
+                self.redis_client.srem(
+                    ACTIVE_ORDER_CONTRACTS_KEY,
+                    member,
+                )
+                removed += 1
+                continue
+            removed += int(
+                self.redis_client.eval(
+                    REMOVE_EMPTY_ACTIVE_CONTRACT_SCRIPT,
+                    2,
+                    instrument_active_orders_key(
+                        exchange_id,
+                        symbol,
+                    ),
+                    ACTIVE_ORDER_CONTRACTS_KEY,
+                    member,
+                )
+                or 0
+            )
+        return removed
 
     def remove_orphan_order_id(self, order_id: str) -> None:
         """

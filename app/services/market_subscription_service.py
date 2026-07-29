@@ -61,14 +61,10 @@ class MarketSubscriptionService:
         self._lock = RLock()
 
     def _get_active_order_codes(self) -> set[str]:
-        """从active_orders:all读取仍需撮合的活动订单合约。"""
+        """从独立活动合约Set读取仍需撮合的订单合约。"""
 
         desired: set[str] = set()
-        for order_id in self.active_order_index.list_all_order_ids():
-            detail = self.active_order_index.get_active_order(order_id)
-            raw_code = detail.get("order_book_id")
-            if not raw_code:
-                continue
+        for raw_code in self.active_order_index.list_active_contract_codes():
             try:
                 desired.add(normalize_code(raw_code))
             except ValueError:

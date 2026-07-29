@@ -9,6 +9,7 @@ from app.infrastructure.redis_keys import (
     market_latest_key,
 )
 from app.schemas.market_tick_schema import MarketTickIngestType
+from app.services.market_tick_matching_service import ParsedMarketTickEvent
 
 
 @dataclass(frozen=True)
@@ -16,7 +17,7 @@ class LiveMatchingEvent:
     """订单到达时可复用的一条当前WebSocket盘口事件。"""
 
     stream_message_id: str
-    fields: dict[str, str]
+    parsed_event: ParsedMarketTickEvent
 
 
 class LiveMarketSnapshotService:
@@ -95,12 +96,10 @@ class LiveMarketSnapshotService:
 
         return LiveMatchingEvent(
             stream_message_id=stream_message_id,
-            fields={
-                "event_id": tick.source_event_id,
-                "event_type": MarketTickStore.EVENT_TYPE,
-                "exchange_id": tick.exchange_id,
-                "symbol": tick.symbol,
-                "order_book_id": tick.order_book_id,
-                "payload": MarketTickStore.tick_to_payload(tick),
-            },
+            parsed_event=ParsedMarketTickEvent(
+                event_id=tick.source_event_id,
+                exchange_id=tick.exchange_id,
+                symbol=tick.symbol,
+                tick=tick,
+            ),
         )

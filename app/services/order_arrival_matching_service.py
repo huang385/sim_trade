@@ -39,6 +39,7 @@ class OrderArrivalMatchingService:
     def match_if_ready(
         self,
         *,
+        order_id: str,
         exchange_id: str,
         symbol: str,
     ) -> OrderArrivalMatchResult:
@@ -51,9 +52,10 @@ class OrderArrivalMatchingService:
                 action="WAITING_FOR_LIVE_TICK"
             )
 
-        result = self.matching_service.process(
+        result = self.matching_service.process_candidate_order(
+            order_id=order_id,
             stream_message_id=event.stream_message_id,
-            fields=event.fields,
+            event=event.parsed_event,
         )
         return OrderArrivalMatchResult(
             action=(
