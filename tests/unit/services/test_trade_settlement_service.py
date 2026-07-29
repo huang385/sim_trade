@@ -61,6 +61,7 @@ def seed(
         db.add(
             Account(
                 account_id="A001",
+                user_id="U001",
                 account_name="test",
                 initial_cash=Decimal("200000"),
                 cash_balance=Decimal("200000"),

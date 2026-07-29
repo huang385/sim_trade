@@ -22,6 +22,8 @@ def test_trading_test_page_and_assets_are_available() -> None:
     assert 'id="detail-used-commission"' in page_response.text
     assert "当日平仓盈亏" in page_response.text
     assert 'id="trade-detail-dialog"' in page_response.text
+    assert 'id="login-form"' in page_response.text
+    assert 'id="logout-button"' in page_response.text
 
     assert css_response.status_code == 200
     assert "--cyan:" in css_response.text
@@ -35,3 +37,7 @@ def test_trading_test_page_and_assets_are_available() -> None:
     assert "pnl.daily_commission" in js_response.text
     assert "trade.daily_close_pnl" in js_response.text
     assert "/position-allocations" in js_response.text
+    assert "/api/auth/login" in js_response.text
+    assert "/api/auth/refresh" in js_response.text
+    assert "Authorization: `Bearer ${state.accessToken}`" in js_response.text
+    assert "localStorage.setItem" not in js_response.text

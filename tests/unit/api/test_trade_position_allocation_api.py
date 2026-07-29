@@ -10,6 +10,7 @@ from app.api.trade_api import get_trade_query_service
 from app.common.exceptions import ResourceNotFoundError
 from app.core.database import get_db
 from app.main import app
+from tests.api_auth_helpers import install_admin_auth_overrides
 
 
 NOW = datetime(2026, 7, 27, 1, tzinfo=timezone.utc)
@@ -58,6 +59,7 @@ def trade_allocation_api():
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_trade_query_service] = lambda: service
+    install_admin_auth_overrides()
     try:
         yield TestClient(app), service, database_session
     finally:
@@ -70,6 +72,7 @@ def test_close_trade_returns_cross_day_position_allocations(
     """一笔普通CLOSE跨今昨仓时返回两条且标志准确。"""
 
     client, service, database_session = trade_allocation_api
+    service.get.return_value = SimpleNamespace(account_id="A001")
     service.list_position_allocations.return_value = [
         make_allocation(1, "CLOSE_YESTERDAY"),
         make_allocation(2, "CLOSE_TODAY"),
@@ -96,6 +99,7 @@ def test_close_trade_returns_cross_day_position_allocations(
     service.list_position_allocations.assert_called_once_with(
         database_session,
         "T-CLOSE",
+        trade=service.get.return_value,
     )
 
 
@@ -105,6 +109,7 @@ def test_open_trade_returns_empty_position_allocations(
     """开仓Trade存在但没有关闭任何持仓，因此返回空列表。"""
 
     client, service, _ = trade_allocation_api
+    service.get.return_value = SimpleNamespace(account_id="A001")
     service.list_position_allocations.return_value = []
 
     response = client.get(
@@ -117,7 +122,7 @@ def test_open_trade_returns_empty_position_allocations(
 
 def test_missing_trade_returns_trade_not_found(trade_allocation_api):
     client, service, _ = trade_allocation_api
-    service.list_position_allocations.side_effect = ResourceNotFoundError(
+    service.get.side_effect = ResourceNotFoundError(
         "成交不存在",
         error_code="TRADE_NOT_FOUND",
     )

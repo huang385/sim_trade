@@ -2,6 +2,12 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import require_active_user
+from app.models.app_user import AppUser
+from app.api.auth_api import get_account_authorization_service
+from app.services.account_authorization_service import (
+    AccountAuthorizationService,
+)
 from app.schemas.order_schema import (
     OrderCancelRequest,
     OrderCreateRequest,
@@ -25,6 +31,10 @@ router = APIRouter(
 @router.post("", response_model=OrderResponse)
 def create_order(
     request: OrderCreateRequest,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -37,6 +47,9 @@ def create_order(
     相同账户和 client_order_id 重复提交时返回原订单。
     """
 
+    authorization.require_account_access(
+        db, current_user, request.account_id
+    )
     return service.create_order(db=db, request=request)
 
 
@@ -45,6 +58,10 @@ def list_order_page(
     account_id: str = Query(min_length=1, max_length=64),
     cursor: str | None = Query(default=None, min_length=1),
     limit: int = Query(default=100, ge=1, le=500),
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -55,6 +72,7 @@ def list_order_page(
     next_cursor继续翻页，不需要知道数据库内部主键。
     """
 
+    authorization.require_account_access(db, current_user, account_id)
     return service.list_order_page(
         db,
         account_id,
@@ -67,6 +85,10 @@ def list_order_page(
 def cancel_order(
     order_id: str,
     request: OrderCancelRequest,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: OrderCancellationService = Depends(
         get_order_cancellation_service
@@ -79,16 +101,30 @@ def cancel_order(
     PostgreSQL 事务全部由 OrderCancellationService 负责。
     """
 
+    # Service锁定真实订单后立即执行该授权回调，不能信任请求体account_id，
+    # 也不会为授权额外普通查询一次订单。
+    def require_order_account_access(account_id: str):
+        return authorization.require_account_access(
+            db,
+            current_user,
+            account_id,
+        )
+
     return service.cancel_order(
         db=db,
         order_id=order_id,
         request=request,
+        account_access_checker=require_order_account_access,
     )
 
 
 @router.get("/{order_id}", response_model=OrderResponse)
 def get_order(
     order_id: str,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -99,7 +135,11 @@ def get_order(
     client_order_id。
     """
 
-    return service.get_order(db=db, order_id=order_id)
+    order = service.get_order(db=db, order_id=order_id)
+    authorization.require_account_access(
+        db, current_user, order.account_id
+    )
+    return order
 
 
 @router.get("", response_model=list[OrderResponse])
@@ -107,6 +147,10 @@ def list_orders(
     account_id: str = Query(min_length=1, max_length=64),
     after_id: int | None = Query(default=None, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -117,6 +161,7 @@ def list_orders(
     时间范围、状态过滤和游标分页。
     """
 
+    authorization.require_account_access(db, current_user, account_id)
     return service.list_orders(
         db=db,
         account_id=account_id,

@@ -730,11 +730,15 @@ class TradeQueryService:
         self,
         db: Session,
         trade_id: str,
+        *,
+        trade=None,
     ):
         """查询一笔平仓成交具体消费的 PositionDetail 明细。"""
 
         normalized_trade_id = trade_id.strip()
-        trade = self.repository.get_by_trade_id(db, normalized_trade_id)
+        trade = trade or self.repository.get_by_trade_id(
+            db, normalized_trade_id
+        )
         if trade is None:
             raise ResourceNotFoundError(
                 "成交不存在",

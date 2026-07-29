@@ -3,6 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.redis_client import redis_client
+from app.core.security import require_active_user
+from app.models.app_user import AppUser
+from app.api.auth_api import get_account_authorization_service
+from app.services.account_authorization_service import (
+    AccountAuthorizationService,
+)
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.schemas.pnl_schema import (
     AccountRealtimePnlResponse,
@@ -29,6 +35,10 @@ def get_realtime_pnl_query_service() -> RealtimePnlQueryService:
 )
 def get_account_realtime_pnl(
     account_id: str,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
@@ -36,7 +46,12 @@ def get_account_realtime_pnl(
 ):
     """查询账户盘中实时盈亏，Redis无快照时返回PostgreSQL持久化结果。"""
 
-    return service.get_account(db, account_id)
+    account = authorization.require_account_access(
+        db,
+        current_user,
+        account_id,
+    )
+    return service.get_account(db, account_id, account=account)
 
 
 @router.get(
@@ -45,6 +60,10 @@ def get_account_realtime_pnl(
 )
 def get_account_trading_snapshot(
     account_id: str,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
@@ -52,7 +71,16 @@ def get_account_trading_snapshot(
 ):
     """一次返回页面所需的账户、持仓和实时盈亏，消除轮询N+1请求。"""
 
-    return service.get_account_trading_snapshot(db, account_id)
+    account = authorization.require_account_access(
+        db,
+        current_user,
+        account_id,
+    )
+    return service.get_account_trading_snapshot(
+        db,
+        account_id,
+        account=account,
+    )
 
 
 @router.get(
@@ -61,6 +89,10 @@ def get_account_trading_snapshot(
 )
 def get_position_realtime_pnl(
     position_id: str,
+    current_user: AppUser = Depends(require_active_user),
+    authorization: AccountAuthorizationService = Depends(
+        get_account_authorization_service
+    ),
     db: Session = Depends(get_db),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
@@ -68,4 +100,8 @@ def get_position_realtime_pnl(
 ):
     """查询单个持仓盘中实时盈亏，响应会明确标记实际数据来源。"""
 
-    return service.get_position(db, position_id)
+    result = service.get_position(db, position_id)
+    authorization.require_account_access(
+        db, current_user, result.account_id
+    )
+    return result

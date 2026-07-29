@@ -117,7 +117,9 @@ def test_api_cancels_accepted_order_and_repeat_is_idempotent(
         assert account.frozen_margin == Decimal("0.000000")
         assert account.frozen_commission == Decimal("0.000000")
         assert len(cancel_events) == 1
-        assert cancel_events[0].status == "PENDING"
+        # 外部Outbox Worker可能与测试并行运行：事务刚提交时是PENDING，
+        # 若已被可靠发布则会变为SENT；两者都证明事件已原子落库且未重复。
+        assert cancel_events[0].status in {"PENDING", "SENT"}
 
 
 def test_partial_fill_then_cancel_preserves_trade_position_and_used_funds(

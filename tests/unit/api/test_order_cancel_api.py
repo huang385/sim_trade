@@ -12,6 +12,7 @@ from app.main import app
 from app.services.order_cancellation_service import (
     get_order_cancellation_service,
 )
+from tests.api_auth_helpers import install_admin_auth_overrides
 
 
 def make_order(**overrides):
@@ -59,6 +60,7 @@ def cancel_api():
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_order_cancellation_service] = lambda: service
+    install_admin_auth_overrides()
     try:
         yield TestClient(app), service, database_session
     finally:
@@ -84,6 +86,7 @@ def test_cancel_api_returns_cancelled_order_and_strips_account(cancel_api):
     assert call["db"] is database_session
     assert call["order_id"] == "O-1"
     assert call["request"].account_id == "A001"
+    assert callable(call["account_access_checker"])
 
 
 def test_cancel_api_returns_partially_cancelled_and_is_repeatable(cancel_api):

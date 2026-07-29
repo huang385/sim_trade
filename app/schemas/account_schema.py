@@ -15,7 +15,7 @@ class AccountCreate(BaseModel):
     account_id: str = Field(min_length=1, max_length=64)
 
     # 用户编号，一个用户可以拥有多个账户
-    user_id: str | None = Field(default=None, max_length=64)
+    user_id: str = Field(min_length=1, max_length=64)
 
     # 账户名称
     account_name: str = Field(min_length=1, max_length=128)
@@ -37,7 +37,7 @@ class AccountResponse(BaseModel):
 
     id: int
     account_id: str
-    user_id: str | None
+    user_id: str
     account_name: str
     account_type: str
 

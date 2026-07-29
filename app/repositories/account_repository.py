@@ -65,6 +65,37 @@ class AccountRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_by_user_id(
+        db: Session,
+        user_id: str,
+    ) -> Sequence[Account]:
+        """一次查询返回普通用户拥有的全部交易账户。"""
+
+        return db.scalars(
+            select(Account)
+            .where(Account.user_id == user_id)
+            .order_by(Account.id)
+        ).all()
+
+    @staticmethod
+    def get_owned_account(
+        db: Session,
+        *,
+        account_id: str,
+        user_id: str,
+        for_update: bool = False,
+    ) -> Account | None:
+        """把账户存在性和归属校验合并为一次数据库查询。"""
+
+        statement = select(Account).where(
+            Account.account_id == account_id,
+            Account.user_id == user_id,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return db.scalar(statement)
+
+    @staticmethod
     def list_by_account_ids(
         db: Session,
         account_ids: Sequence[str],

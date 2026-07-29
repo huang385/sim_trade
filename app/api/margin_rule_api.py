@@ -8,6 +8,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import require_admin_user
 from app.schemas.margin_rule_schema import (
     MarginRuleCreate,
     MarginRuleDailyCreate,
@@ -23,6 +24,7 @@ from app.services.margin_rule_service import (
 router = APIRouter(
     prefix="/api/admin/margin-rules",
     tags=["保证金规则管理"],
+    dependencies=[Depends(require_admin_user)],
 )
 
 

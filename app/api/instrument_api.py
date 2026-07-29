@@ -6,6 +6,7 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import require_admin_user
 from app.schemas.instrument_schema import (
     InstrumentResponse,
     InstrumentCreate,
@@ -19,6 +20,7 @@ from app.services.instrument_service import (
 router = APIRouter(
     prefix="/api/admin/instruments",
     tags=["合约管理"],
+    dependencies=[Depends(require_admin_user)],
 )
 
 

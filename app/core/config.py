@@ -26,6 +26,21 @@ class Settings(BaseSettings):
     # 必须大于 Stream 的阻塞读取时间，避免正常空闲被误判成读取超时。
     redis_socket_timeout_seconds: float = 10.0
 
+    # 认证密钥必须由部署环境提供。空字符串只允许应用启动和执行公开健康检查；
+    # 任何签发或校验Token的操作都会明确拒绝未配置或强度不足的密钥。
+    auth_jwt_secret: str = ""
+    auth_jwt_algorithm: str = "HS256"
+    auth_access_token_expire_minutes: int = 15
+    auth_refresh_token_expire_days: int = 7
+    auth_issuer: str = "sim-trade"
+    auth_audience: str = "sim-trade-client"
+    auth_max_login_failures: int = 5
+    auth_login_lock_minutes: int = 15
+    auth_login_rate_limit_per_minute: int = 30
+    auth_refresh_cookie_name: str = "sim_trade_refresh"
+    auth_refresh_cookie_secure: bool = False
+    auth_refresh_cookie_samesite: str = "lax"
+
     # 订单事件消费配置。Consumer 名称为空时由主机名和进程号自动生成。
     order_stream_name: str = "stream:orders"
     order_consumer_group: str = "group:order-engine"

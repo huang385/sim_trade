@@ -2,11 +2,12 @@
 
 const REFRESH_INTERVAL_MS = 500;
 const SLOW_REFRESH_INTERVAL_MS = 2000;
-const DEFAULT_ACCOUNT_ID = "PNL_DEMO_793A868B";
 const ACTIVE_ORDER_STATUSES = new Set(["ACCEPTED", "PARTIALLY_FILLED"]);
 
 const state = {
-    accountId: DEFAULT_ACCOUNT_ID,
+    accountId: "",
+    accessToken: null,
+    currentUser: null,
     positions: [],
     refreshing: false,
     refreshTimer: null,
@@ -14,6 +15,15 @@ const state = {
 };
 
 const elements = {
+    loginPanel: document.querySelector("#login-panel"),
+    loginForm: document.querySelector("#login-form"),
+    loginUsername: document.querySelector("#login-username"),
+    loginPassword: document.querySelector("#login-password"),
+    loginButton: document.querySelector("#login-button"),
+    sessionPanel: document.querySelector("#session-panel"),
+    accountToolbar: document.querySelector("#account-toolbar"),
+    currentUser: document.querySelector("#current-user"),
+    logoutButton: document.querySelector("#logout-button"),
     accountId: document.querySelector("#account-id"),
     orderAccountId: document.querySelector("#order-account-id"),
     loadAccount: document.querySelector("#load-account"),
@@ -130,14 +140,27 @@ function setMetric(element, value, suffix = "") {
     }
 }
 
-async function apiFetch(path, options = {}) {
+async function apiFetch(path, options = {}, allowRefresh = true) {
     const response = await fetch(path, {
+        credentials: "same-origin",
         headers: {
             "Content-Type": "application/json; charset=utf-8",
+            ...(state.accessToken
+                ? {Authorization: `Bearer ${state.accessToken}`}
+                : {}),
             ...(options.headers || {}),
         },
         ...options,
     });
+
+    if (
+        response.status === 401
+        && allowRefresh
+        && !path.startsWith("/api/auth/")
+        && await refreshAccessToken()
+    ) {
+        return apiFetch(path, options, false);
+    }
 
     const contentType = response.headers.get("content-type") || "";
     const data = contentType.includes("application/json")
@@ -155,6 +178,95 @@ async function apiFetch(path, options = {}) {
         throw new Error(message);
     }
     return data;
+}
+
+async function refreshAccessToken() {
+    try {
+        const result = await apiFetch(
+            "/api/auth/refresh",
+            {method: "POST"},
+            false,
+        );
+        state.accessToken = result.access_token;
+        state.currentUser = result.user;
+        return true;
+    } catch (_error) {
+        showLogin();
+        return false;
+    }
+}
+
+function showLogin() {
+    state.accessToken = null;
+    state.currentUser = null;
+    state.accountId = "";
+    restartTimers();
+    elements.loginPanel.classList.remove("hidden");
+    elements.sessionPanel.classList.add("hidden");
+    elements.accountToolbar.classList.add("hidden");
+}
+
+async function loadAuthorizedAccounts() {
+    const result = await apiFetch("/api/auth/me");
+    const accounts = result.accounts || [];
+    elements.accountId.innerHTML = accounts.map((account) => (
+        `<option value="${escapeHtml(account.account_id)}">`
+        + `${escapeHtml(account.account_name)} (${escapeHtml(account.account_id)})`
+        + "</option>"
+    )).join("");
+    state.currentUser = result.user;
+    elements.currentUser.textContent = (
+        `${result.user.display_name} · ${result.user.role}`
+    );
+    elements.loginPanel.classList.add("hidden");
+    elements.sessionPanel.classList.remove("hidden");
+    elements.accountToolbar.classList.remove("hidden");
+    if (accounts.length) {
+        state.accountId = accounts[0].account_id;
+        elements.orderAccountId.value = state.accountId;
+        await Promise.all([refreshRealtime(), refreshOrdersAndTrades()]);
+        restartTimers();
+    } else {
+        setConnection(false, "当前用户没有可访问的交易账户");
+    }
+}
+
+async function login(event) {
+    event.preventDefault();
+    elements.loginButton.disabled = true;
+    try {
+        const result = await apiFetch(
+            "/api/auth/login",
+            {
+                method: "POST",
+                body: JSON.stringify({
+                    username: elements.loginUsername.value.trim(),
+                    password: elements.loginPassword.value,
+                }),
+            },
+            false,
+        );
+        state.accessToken = result.access_token;
+        elements.loginPassword.value = "";
+        await loadAuthorizedAccounts();
+        showToast("登录成功");
+    } catch (error) {
+        showToast(`登录失败：${error.message}`, "error");
+    } finally {
+        elements.loginButton.disabled = false;
+    }
+}
+
+async function logout() {
+    try {
+        await apiFetch(
+            "/api/auth/logout",
+            {method: "POST"},
+            false,
+        );
+    } finally {
+        showLogin();
+    }
 }
 
 function setConnection(isOnline, text) {
@@ -481,7 +593,6 @@ async function loadAccount() {
     }
     state.accountId = accountId;
     elements.orderAccountId.value = accountId;
-    localStorage.setItem("sim-trade-test-account", accountId);
     await Promise.all([refreshRealtime(), refreshOrdersAndTrades()]);
     restartTimers();
 }
@@ -611,11 +722,9 @@ elements.accountId.addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadAccount();
 });
 
-const storedAccount = localStorage.getItem("sim-trade-test-account");
-if (storedAccount) {
-    elements.accountId.value = storedAccount;
-    elements.orderAccountId.value = storedAccount;
-    state.accountId = storedAccount;
-}
+elements.loginForm.addEventListener("submit", login);
+elements.logoutButton.addEventListener("click", logout);
 generateClientOrderId();
-loadAccount();
+refreshAccessToken()
+    .then((restored) => restored ? loadAuthorizedAccounts() : showLogin())
+    .catch(showLogin);

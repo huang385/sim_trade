@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import (
+    AuthorizationError,
     DataAccessError,
     ResourceConflictError,
     ResourceNotFoundError,
@@ -199,6 +200,42 @@ def test_repeated_cancel_ends_transaction_without_second_business_change(status)
     db.commit.assert_called_once()
     db.refresh.assert_called_once_with(order)
     db.rollback.assert_not_called()
+
+
+def test_actual_order_account_is_authorized_before_idempotent_return():
+    """请求体伪造自有账户时，也必须按订单真实账户拒绝且不返回幂等结果。"""
+
+    order = make_order(
+        account_id="B001",
+        status="CANCELLED",
+        remaining_volume=0,
+        cancelled_volume=10,
+        frozen_margin=Decimal("0"),
+        frozen_commission=Decimal("0"),
+    )
+    service, _, account_repository, outbox = make_service(order)
+    checker = Mock(
+        side_effect=AuthorizationError(
+            "无权访问该交易账户",
+            error_code="ACCOUNT_ACCESS_DENIED",
+        )
+    )
+    db = Mock()
+
+    with pytest.raises(AuthorizationError):
+        service.cancel_order(
+            db=db,
+            order_id="O-1",
+            # 攻击者故意提交自己拥有的A001，但订单实际属于B001。
+            request=OrderCancelRequest(account_id="A001"),
+            account_access_checker=checker,
+        )
+
+    checker.assert_called_once_with("B001")
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    outbox.create_event.assert_not_called()
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once()
 
 
 @pytest.mark.parametrize(

@@ -561,7 +561,7 @@ def test_order_create_failure_rolls_back_real_account_freeze():
         setup_db.add(
             Account(
                 account_id="A001",
-                user_id=None,
+                user_id="U001",
                 account_name="test",
                 account_type="FUTURES",
                 initial_cash=Decimal("100000"),
@@ -618,7 +618,7 @@ def test_outbox_create_failure_rolls_back_order_and_account_freeze():
         setup_db.add(
             Account(
                 account_id="A001",
-                user_id=None,
+                user_id="U001",
                 account_name="test",
                 account_type="FUTURES",
                 initial_cash=Decimal("100000"),

@@ -27,6 +27,7 @@ from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade_position_allocation import TradePositionAllocation
+from app.models.app_user import AppUser
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -38,6 +39,8 @@ from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_service import OrderService
 from app.services.order_validation_service import OrderValidationService
 from app.services.rule_query_service import get_rule_query_service
+from app.main import app
+from tests.api_auth_helpers import install_admin_auth_overrides
 
 
 @dataclass(frozen=True)
@@ -45,9 +48,43 @@ class IntegrationContext:
     """每个集成测试独享的账户、合约和交易规则编号。"""
 
     account_id: str
+    user_id: str
     exchange_id: str
     symbol: str
     trading_day: date
+
+
+@pytest.fixture(autouse=True)
+def integration_api_auth(request):
+    """
+    既有集成测试关注交易链路，默认注入管理员身份。
+
+    新增的真实认证测试使用real_auth标记，必须走JWT和数据库用户查询，
+    不能被该兼容夹具绕过。
+    """
+
+    previous = dict(app.dependency_overrides)
+    if request.node.get_closest_marker("real_auth") is None:
+        _, authorization = install_admin_auth_overrides()
+
+        def load_authorized_account(db, _current_user, account_id):
+            """
+            兼容测试也返回真实完整Account。
+
+            生产授权服务的契约本来就是返回已加载账户；旧桩只有两个字段，
+            无法验证后续服务复用授权对象、避免重复SQL的真实调用方式。
+            """
+
+            return AccountRepository.get_by_account_id(db, account_id)
+
+        authorization.require_account_access.side_effect = (
+            load_authorized_account
+        )
+    try:
+        yield
+    finally:
+        app.dependency_overrides.clear()
+        app.dependency_overrides.update(previous)
 
 
 @pytest.fixture
@@ -55,6 +92,7 @@ def integration_context():
     suffix = uuid4().hex[:10].upper()
     context = IntegrationContext(
         account_id=f"ITA{suffix}",
+        user_id=f"ITU{suffix}",
         exchange_id="ITEX",
         symbol=f"IT{suffix}",
         trading_day=date.today(),
@@ -63,11 +101,23 @@ def integration_context():
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
+            db.add(
+                AppUser(
+                    user_id=context.user_id,
+                    username=f"it_{suffix.lower()}",
+                    password_hash="!integration-no-login!",
+                    display_name="集成测试用户",
+                    role="USER",
+                    status="ACTIVE",
+                )
+            )
+            # 未定义ORM relationship时显式flush，确保账户外键目标先落库。
+            db.flush()
             db.add_all(
                 [
                     Account(
                         account_id=context.account_id,
-                        user_id=None,
+                        user_id=context.user_id,
                         account_name="订单集成测试账户",
                         account_type="FUTURES",
                         initial_cash=Decimal("100000"),
@@ -196,6 +246,9 @@ def integration_context():
         )
         db.execute(
             delete(Account).where(Account.account_id == context.account_id)
+        )
+        db.execute(
+            delete(AppUser).where(AppUser.user_id == context.user_id)
         )
         db.commit()
 

@@ -25,11 +25,40 @@
     </header>
 
     <main>
-        <section class="toolbar panel">
+        <section id="login-panel" class="auth-panel panel">
+            <div>
+                <p class="eyebrow">AUTHENTICATION</p>
+                <h2>登录交易测试台</h2>
+            </div>
+            <form id="login-form" class="auth-form">
+                <label class="field">
+                    <span>用户名</span>
+                    <input id="login-username" autocomplete="username"
+                           required maxlength="64">
+                </label>
+                <label class="field">
+                    <span>密码</span>
+                    <input id="login-password" type="password"
+                           autocomplete="current-password" required
+                           maxlength="256">
+                </label>
+                <button id="login-button" class="button primary" type="submit">
+                    登录
+                </button>
+            </form>
+        </section>
+
+        <section id="session-panel" class="session-panel panel hidden">
+            <span id="current-user">尚未登录</span>
+            <button id="logout-button" class="button secondary" type="button">
+                退出登录
+            </button>
+        </section>
+
+        <section id="account-toolbar" class="toolbar panel hidden">
             <label class="field grow">
                 <span>当前账户</span>
-                <input id="account-id" value="PNL_DEMO_793A868B"
-                       maxlength="64" autocomplete="off">
+                <select id="account-id"></select>
             </label>
             <button id="load-account" class="button primary" type="button">
                 加载账户
@@ -267,7 +296,7 @@
                     <label class="field">
                         <span>账户编号</span>
                         <input id="order-account-id" name="account_id"
-                               value="PNL_DEMO_793A868B" required maxlength="64">
+                               required maxlength="64" readonly>
                     </label>
 
                     <div class="field-row">

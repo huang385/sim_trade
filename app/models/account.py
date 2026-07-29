@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, Numeric, String
+from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -46,9 +46,10 @@ class Account(Base):
     )
 
     # 用户编号，一个用户可以拥有多个交易账户
-    user_id: Mapped[str | None] = mapped_column(
+    user_id: Mapped[str] = mapped_column(
         String(64),
-        nullable=True,
+        ForeignKey("app_user.user_id", ondelete="RESTRICT"),
+        nullable=False,
         index=True,
     )
 

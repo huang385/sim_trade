@@ -15,6 +15,7 @@ from app.enums.account_enums import AccountStatus
 from app.models.account import Account
 from app.repositories.account_repository import AccountRepository
 from app.schemas.account_schema import AccountCreate
+from app.repositories.user_repository import UserRepository
 
 
 class AccountService:
@@ -25,8 +26,10 @@ class AccountService:
     def __init__(
         self,
         repository: AccountRepository,
+        user_repository: UserRepository | None = None,
     ):
         self.repository = repository
+        self.user_repository = user_repository or UserRepository()
 
     def create_account(
         self,
@@ -36,6 +39,13 @@ class AccountService:
         """
         创建模拟账户。
         """
+
+        owner = self.user_repository.get_by_user_id(db, request.user_id)
+        if owner is None:
+            raise ResourceNotFoundError(
+                "所属用户不存在",
+                error_code="ACCOUNT_OWNER_NOT_FOUND",
+            )
 
         exists = self.repository.get_by_account_id(
             db=db,
@@ -132,4 +142,5 @@ def get_account_service() -> AccountService:
 
     return AccountService(
         repository=AccountRepository(),
+        user_repository=UserRepository(),
     )

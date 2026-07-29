@@ -45,6 +45,17 @@ from app.schemas.pnl_schema import (
     PositionRealtimePnl,
     PositionRealtimePnlResponse,
 )
+from app.schemas.auth_schema import (
+    CurrentUserResponse,
+    LoginRequest,
+    TokenResponse,
+)
+from app.schemas.user_schema import (
+    UserCreateRequest,
+    UserResponse,
+    UserStatusUpdateRequest,
+    UserSummary,
+)
 
 
 __all__ = [
@@ -76,4 +87,11 @@ __all__ = [
     "AccountRealtimePnl",
     "PositionRealtimePnlResponse",
     "AccountRealtimePnlResponse",
+    "CurrentUserResponse",
+    "LoginRequest",
+    "TokenResponse",
+    "UserCreateRequest",
+    "UserResponse",
+    "UserStatusUpdateRequest",
+    "UserSummary",
 ]

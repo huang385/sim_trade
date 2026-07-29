@@ -88,7 +88,7 @@ def _account(now):
     return SimpleNamespace(
         id=1,
         account_id="A001",
-        user_id=None,
+        user_id="U001",
         account_name="批量快照测试",
         account_type="FUTURES",
         initial_cash=Decimal("100000"),
@@ -193,3 +193,33 @@ def test_account_trading_snapshot_batches_postgres_and_redis_reads():
         account_id="A001",
         position_ids=["P001", "P002"],
     )
+
+
+def test_account_queries_reuse_preloaded_authorized_account():
+    """授权层已加载账户时，实时盈亏服务不得再次查询同一账户。"""
+
+    now = datetime(2026, 7, 29, tzinfo=timezone.utc)
+    account = _account(now)
+    account_repository = Mock()
+    position_repository = Mock()
+    position_repository.list_by_account.return_value = []
+    service = RealtimePnlQueryService(
+        pnl_store=FakeStore(),
+        account_repository=account_repository,
+        position_repository=position_repository,
+    )
+
+    pnl = service.get_account(
+        SimpleNamespace(),
+        "A001",
+        account=account,
+    )
+    snapshot = service.get_account_trading_snapshot(
+        SimpleNamespace(),
+        "A001",
+        account=account,
+    )
+
+    assert pnl.account_id == "A001"
+    assert snapshot.account.account_id == "A001"
+    account_repository.get_by_account_id.assert_not_called()

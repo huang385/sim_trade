@@ -76,3 +76,31 @@ class DataAccessError(AppError):
 
     status_code = 500
     error_code = "DATA_ACCESS_ERROR"
+
+
+class AuthenticationError(AppError):
+    """身份凭证缺失、失效或登录验证失败。"""
+
+    status_code = 401
+    error_code = "AUTHENTICATION_REQUIRED"
+
+
+class AuthorizationError(AppError):
+    """当前登录用户无权访问目标资源。"""
+
+    status_code = 403
+    error_code = "ACCESS_DENIED"
+
+
+class ServiceUnavailableError(AppError):
+    """安全依赖暂时不可用时采用失败关闭策略。"""
+
+    status_code = 503
+    error_code = "SERVICE_UNAVAILABLE"
+
+
+class RateLimitError(AppError):
+    """请求频率超过安全阈值。"""
+
+    status_code = 429
+    error_code = "RATE_LIMITED"

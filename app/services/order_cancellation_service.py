@@ -91,8 +91,15 @@ class OrderCancellationService:
         db: Session,
         order_id: str,
         request: OrderCancelRequest,
+        account_access_checker: Callable[[str], object] | None = None,
     ) -> Order:
-        """锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。"""
+        """
+        锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。
+
+        外部API传入账户授权回调时，必须用数据库订单的真实account_id校验，
+        并且在任何幂等返回之前执行。这样既不信任请求体账户，也不需要为了
+        授权先额外查询一次未加锁订单。
+        """
 
         normalized_order_id = order_id.strip()
         normalized_account_id = request.account_id.strip()
@@ -107,6 +114,8 @@ class OrderCancellationService:
                     "订单不存在",
                     error_code="ORDER_NOT_FOUND",
                 )
+            if account_access_checker is not None:
+                account_access_checker(order.account_id)
             if order.account_id != normalized_account_id:
                 raise ResourceConflictError(
                     "订单不属于指定账户",

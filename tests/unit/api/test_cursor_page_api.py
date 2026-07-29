@@ -6,6 +6,7 @@ from app.api.order_api import get_order_service
 from app.api.trade_api import get_trade_query_service
 from app.core.database import get_db
 from app.main import app
+from tests.api_auth_helpers import install_admin_auth_overrides
 
 
 def test_order_page_route_returns_protocol_and_keeps_legacy_list():
@@ -18,6 +19,7 @@ def test_order_page_route_returns_protocol_and_keeps_legacy_list():
     order_service.list_orders.return_value = []
     app.dependency_overrides[get_db] = lambda: Mock()
     app.dependency_overrides[get_order_service] = lambda: order_service
+    install_admin_auth_overrides()
     try:
         client = TestClient(app)
         page = client.get(
@@ -53,6 +55,7 @@ def test_trade_page_route_and_limit_validation():
     app.dependency_overrides[
         get_trade_query_service
     ] = lambda: trade_service
+    install_admin_auth_overrides()
     try:
         client = TestClient(app)
         page = client.get(

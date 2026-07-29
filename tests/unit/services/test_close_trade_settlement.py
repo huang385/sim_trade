@@ -73,6 +73,7 @@ def seed_close(
         db.add(
             Account(
                 account_id="A001",
+                user_id="U001",
                 account_name="test",
                 initial_cash=Decimal("100000"),
                 cash_balance=Decimal("99970"),

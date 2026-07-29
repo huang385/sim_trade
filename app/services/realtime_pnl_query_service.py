@@ -140,7 +140,16 @@ class RealtimePnlQueryService:
         self,
         db: Session,
         account_id: str,
+        *,
+        account=None,
     ) -> AccountRealtimePnlResponse:
+        """
+        查询账户实时盈亏。
+
+        ``account``允许API复用账户授权阶段已经加载的对象。Redis快照缺失时，
+        直接使用该对象回退，避免认证接入后再次查询同一个账户。
+        """
+
         normalized = account_id.strip()
         try:
             values = self.pnl_store.get_account(normalized)
@@ -151,10 +160,11 @@ class RealtimePnlQueryService:
                 values=values,
                 account=None,
             )
-        account = self.account_repository.get_by_account_id(
-            db,
-            normalized,
-        )
+        if account is None:
+            account = self.account_repository.get_by_account_id(
+                db,
+                normalized,
+            )
         if account is None:
             raise ResourceNotFoundError(
                 "账户不存在",
@@ -198,6 +208,8 @@ class RealtimePnlQueryService:
         self,
         db: Session,
         account_id: str,
+        *,
+        account=None,
     ) -> AccountTradingSnapshotResponse:
         """
         批量生成账户页面快照。
@@ -207,10 +219,11 @@ class RealtimePnlQueryService:
         """
 
         normalized = account_id.strip()
-        account = self.account_repository.get_by_account_id(
-            db,
-            normalized,
-        )
+        if account is None:
+            account = self.account_repository.get_by_account_id(
+                db,
+                normalized,
+            )
         if account is None:
             raise ResourceNotFoundError(
                 "账户不存在",

@@ -25,6 +25,8 @@ from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade_position_allocation import TradePositionAllocation
+from app.models.app_user import AppUser
+from app.models.auth_refresh_session import AuthRefreshSession
 
 
 __all__ = [
@@ -42,4 +44,6 @@ __all__ = [
     "PositionDetail",
     "PositionFreezeAllocation",
     "TradePositionAllocation",
+    "AppUser",
+    "AuthRefreshSession",
 ]

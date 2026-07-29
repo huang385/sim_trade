@@ -63,6 +63,13 @@ from app.services.pnl_snapshot_persistence_service import (
 from app.services.realtime_pnl_query_service import (
     RealtimePnlQueryService,
 )
+from app.services.account_authorization_service import (
+    AccountAuthorizationService,
+)
+from app.services.admin_user_service import AdminUserService
+from app.services.auth_service import AuthService
+from app.services.password_service import PasswordService
+from app.services.token_service import TokenService
 
 
 __all__ = [
@@ -108,4 +115,9 @@ __all__ = [
     "RealtimePnlService",
     "PnlSnapshotPersistenceService",
     "RealtimePnlQueryService",
+    "AccountAuthorizationService",
+    "AdminUserService",
+    "AuthService",
+    "PasswordService",
+    "TokenService",
 ]
