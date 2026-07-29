@@ -288,7 +288,8 @@ function renderOrders(orders) {
         return;
     }
 
-    const rows = [...orders].reverse();
+    // 新分页接口已经按最新记录在前返回，不再由页面二次反转。
+    const rows = orders;
     elements.ordersBody.innerHTML = rows.map((order) => `
         <tr>
             <td title="${escapeHtml(order.order_id)}">
@@ -340,7 +341,7 @@ function renderTrades(trades) {
         return;
     }
 
-    const rows = [...trades].reverse();
+    const rows = trades;
     elements.tradesBody.innerHTML = rows.map((trade) => `
         <tr>
             <td title="${escapeHtml(trade.trade_id)}">
@@ -446,12 +447,12 @@ async function refreshOrdersAndTrades() {
     if (!state.accountId) return;
     try {
         const accountPath = encodeURIComponent(state.accountId);
-        const [orders, trades] = await Promise.all([
-            apiFetch(`/api/orders?account_id=${accountPath}&limit=100`),
-            apiFetch(`/api/trades?account_id=${accountPath}&limit=100`),
+        const [orderPage, tradePage] = await Promise.all([
+            apiFetch(`/api/orders/page?account_id=${accountPath}&limit=100`),
+            apiFetch(`/api/trades/page?account_id=${accountPath}&limit=100`),
         ]);
-        renderOrders(orders);
-        renderTrades(trades);
+        renderOrders(orderPage.items);
+        renderTrades(tradePage.items);
     } catch (error) {
         setConnection(false, error.message);
     }

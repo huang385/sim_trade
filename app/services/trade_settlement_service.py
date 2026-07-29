@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError, ResourceNotFoundError
+from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
 from app.enums.order_enums import (
     OffsetFlag,
@@ -35,6 +36,7 @@ from app.repositories.trade_repository import TradeRepository
 from app.repositories.trade_position_allocation_repository import (
     TradePositionAllocationRepository,
 )
+from app.schemas.trade_schema import TradePageResponse
 from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
 )
@@ -670,6 +672,58 @@ class TradeQueryService:
             order_id=order_id.strip() if order_id else None,
             after_id=after_id,
             limit=limit,
+        )
+
+    def list_page(
+        self,
+        db: Session,
+        *,
+        account_id: str | None = None,
+        order_id: str | None = None,
+        cursor: str | None,
+        limit: int,
+    ) -> TradePageResponse:
+        """返回成交倒序页和绑定当前过滤条件的不透明下一页游标。"""
+
+        normalized_account_id = (
+            account_id.strip() if account_id else None
+        )
+        normalized_order_id = order_id.strip() if order_id else None
+        filters = {
+            "account_id": normalized_account_id or "",
+            "order_id": normalized_order_id or "",
+        }
+        before_id = None
+        if cursor is not None:
+            before_id = decode_cursor(
+                cursor,
+                expected_kind="trades",
+                expected_filters=filters,
+            ).before_id
+        rows = list(
+            self.repository.list_page(
+                db,
+                account_id=normalized_account_id,
+                order_id=normalized_order_id,
+                before_id=before_id,
+                fetch_size=limit + 1,
+            )
+        )
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        next_cursor = (
+            encode_cursor(
+                kind="trades",
+                before_id=items[-1].id,
+                filters=filters,
+            )
+            if has_more and items
+            else None
+        )
+        return TradePageResponse(
+            items=items,
+            next_cursor=next_cursor,
+            has_more=has_more,
         )
 
     def list_position_allocations(

@@ -117,11 +117,31 @@ def test_account_fact_version_refreshes_only_accounts_once():
         extra_account_ids={"A001"},
         refresh_account_versions={"A001": "7"},
     )
+    refreshed_again = cache.get_cycle_snapshot(
+        extra_account_ids={"A001"},
+        refresh_account_versions={"A001": "8"},
+    )
 
     assert positions.calls == 1
     assert positions.contract_calls == 0
-    assert accounts.calls == 2
+    assert accounts.calls == 3
     assert refreshed.get_account("A001").frozen_margin == Decimal("5000")
+    assert refreshed_again.get_account("A001").frozen_margin == Decimal("5000")
+
+    # 模拟Worker重启：新缓存没有进程内版本记录，Redis中仍存在的版本8必须
+    # 让它重新从PostgreSQL加载账户基础字段。
+    restarted_cache = ActivePositionCache(
+        session_factory=FakeSession,
+        position_repository=positions,
+        account_repository=accounts,
+        refresh_ms=60_000,
+        version_loader=lambda: "1",
+    )
+    restarted_cache.get_cycle_snapshot(
+        extra_account_ids={"A001"},
+        refresh_account_versions={"A001": "8"},
+    )
+    assert accounts.calls == 4
 
 
 def test_contract_fact_refresh_adds_and_removes_only_target_contract():

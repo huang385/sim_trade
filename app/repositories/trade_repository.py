@@ -70,6 +70,28 @@ class TradeRepository:
         return list(reversed(rows))
 
     @staticmethod
+    def list_page(
+        db: Session,
+        *,
+        account_id: str | None,
+        order_id: str | None,
+        before_id: int | None,
+        fetch_size: int,
+    ) -> Sequence[Trade]:
+        """按过滤条件和自增主键倒序读取一页成交，不使用OFFSET。"""
+
+        statement = select(Trade)
+        if account_id is not None:
+            statement = statement.where(Trade.account_id == account_id)
+        if order_id is not None:
+            statement = statement.where(Trade.order_id == order_id)
+        if before_id is not None:
+            statement = statement.where(Trade.id < before_id)
+        return db.scalars(
+            statement.order_by(Trade.id.desc()).limit(fetch_size)
+        ).all()
+
+    @staticmethod
     def add(db: Session, trade: Trade) -> None:
         """把成交加入当前Session，是否提交由成交结算服务决定。"""
 

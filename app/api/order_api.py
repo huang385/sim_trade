@@ -5,6 +5,7 @@ from app.core.database import get_db
 from app.schemas.order_schema import (
     OrderCancelRequest,
     OrderCreateRequest,
+    OrderPageResponse,
     OrderResponse,
 )
 from app.services.order_cancellation_service import (
@@ -37,6 +38,29 @@ def create_order(
     """
 
     return service.create_order(db=db, request=request)
+
+
+@router.get("/page", response_model=OrderPageResponse)
+def list_order_page(
+    account_id: str = Query(min_length=1, max_length=64),
+    cursor: str | None = Query(default=None, min_length=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    service: OrderService = Depends(get_order_service),
+):
+    """
+    按数据库主键倒序返回订单分页。
+
+    旧的GET /api/orders列表接口继续保留；新客户端使用本接口响应中的
+    next_cursor继续翻页，不需要知道数据库内部主键。
+    """
+
+    return service.list_order_page(
+        db,
+        account_id,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 @router.post("/{order_id}/cancel", response_model=OrderResponse)

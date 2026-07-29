@@ -517,6 +517,28 @@ def test_redis_write_exception_fails_closed_without_dead_letter_or_ack():
     assert ("DCE", "JD2609") in worker._buffer
 
 
+def test_account_fact_redis_write_failure_does_not_clear_dirty():
+    store = FakePnlStore()
+    store.account_dirty = [("A001", "9")]
+
+    class RedisFailingAccountService(FakeService):
+        def process_batch(self, **_kwargs):
+            raise ConnectionError("redis unavailable")
+
+    worker, consumer, _service, _store, _clock = make_worker(
+        [],
+        service=RedisFailingAccountService(store),
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert store.completed_accounts == []
+    assert store.account_dirty == [("A001", "9")]
+    assert consumer.acked_batches == []
+    assert worker._lease_acquired is False
+
+
 def test_active_indexes_are_reconciled_again_on_periodic_full_cycle():
     worker, _consumer, _service, store, clock = make_worker([])
 

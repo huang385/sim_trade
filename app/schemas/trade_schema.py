@@ -48,6 +48,14 @@ class TradeResponse(BaseModel):
     created_at: datetime
 
 
+class TradePageResponse(BaseModel):
+    """成交不透明游标分页响应；items按数据库主键倒序稳定排列。"""
+
+    items: list[TradeResponse]
+    next_cursor: str | None
+    has_more: bool
+
+
 class TradePositionAllocationResponse(BaseModel):
     """平仓成交与被关闭逐笔持仓之间的可审计明细。"""
 

@@ -45,6 +45,17 @@ end
 return 0
 """
 
+# 账户事实版本是跨处理周期的永久单调计数器。完成当前版本时只移除Dirty
+# 集合成员，不能HDEL版本字段，否则下一次HINCRBY会从1重新开始。
+CLEAR_ACCOUNT_FACT_DIRTY_IF_UNCHANGED_SCRIPT = """
+local current = redis.call('HGET', KEYS[1], ARGV[1])
+if current == ARGV[2] then
+    redis.call('SREM', KEYS[2], ARGV[1])
+    return 1
+end
+return 0
+"""
+
 POP_DIRTY_SCAN_BUFFER_SCRIPT = """
 local items = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
 redis.call('LTRIM', KEYS[1], tonumber(ARGV[1]), -1)
@@ -298,11 +309,16 @@ class RealtimePnlStore:
         account_id: str,
         expected_version: str,
     ) -> bool:
-        """仅在账户事实版本未变化时清除Dirty，避免覆盖并发新事件。"""
+        """
+        仅在账户事实版本未变化时移除Dirty集合成员。
+
+        版本Hash字段必须永久保留，保证下次账户事实事件继续递增；处理期间若
+        产生新版本，字符串CAS不相等，本次完成不会清除新Dirty。
+        """
 
         return bool(
             self.redis_client.eval(
-                CLEAR_DIRTY_IF_UNCHANGED_SCRIPT,
+                CLEAR_ACCOUNT_FACT_DIRTY_IF_UNCHANGED_SCRIPT,
                 2,
                 PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
                 PNL_DIRTY_ACCOUNT_FACTS_KEY,

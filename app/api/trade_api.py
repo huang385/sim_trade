@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.schemas.trade_schema import (
+    TradePageResponse,
     TradePositionAllocationResponse,
     TradeResponse,
 )
@@ -14,6 +15,26 @@ router = APIRouter(prefix="/api/trades", tags=["成交查询"])
 
 def get_trade_query_service() -> TradeQueryService:
     return TradeQueryService()
+
+
+@router.get("/page", response_model=TradePageResponse)
+def list_trade_page(
+    account_id: str | None = Query(default=None, min_length=1, max_length=64),
+    order_id: str | None = Query(default=None, min_length=1, max_length=64),
+    cursor: str | None = Query(default=None, min_length=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    service: TradeQueryService = Depends(get_trade_query_service),
+):
+    """返回可实际继续翻页的成交游标协议；旧列表接口保持兼容。"""
+
+    return service.list_page(
+        db,
+        account_id=account_id,
+        order_id=order_id,
+        cursor=cursor,
+        limit=limit,
+    )
 
 
 @router.get("/{trade_id}", response_model=TradeResponse)

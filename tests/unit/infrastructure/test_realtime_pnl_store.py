@@ -191,6 +191,8 @@ def test_account_fact_dirty_uses_independent_version_and_cas_keys():
     clear_args = redis_client.eval.call_args.args
     assert "pnl:dirty_account_fact_versions" in clear_args
     assert "pnl:dirty_account_facts" in clear_args
+    # 专用CAS只SREM Dirty成员，不允许删除永久版本字段。
+    assert "HDEL" not in clear_args[0]
 
 
 def test_closed_position_prunes_empty_account_and_contract_meta_indexes():

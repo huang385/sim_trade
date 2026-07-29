@@ -147,3 +147,11 @@ class OrderResponse(BaseModel):
     accepted_at: datetime | None
     cancelled_at: datetime | None
     updated_at: datetime
+
+
+class OrderPageResponse(BaseModel):
+    """订单不透明游标分页响应；items按数据库主键倒序稳定排列。"""
+
+    items: list[OrderResponse]
+    next_cursor: str | None
+    has_more: bool

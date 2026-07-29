@@ -94,6 +94,30 @@ class OrderRepository:
         return list(reversed(rows))
 
     @staticmethod
+    def list_page_by_account(
+        db: Session,
+        account_id: str,
+        *,
+        before_id: int | None,
+        fetch_size: int,
+    ) -> Sequence[Order]:
+        """
+        按自增主键倒序读取一页订单。
+
+        before_id使用严格小于，既不重复上一页最后一条，也会自然排除翻页期间
+        新写入的更大主键订单，保证一次向历史方向遍历的顺序稳定。
+        """
+
+        statement = select(Order).where(
+            Order.account_id == account_id
+        )
+        if before_id is not None:
+            statement = statement.where(Order.id < before_id)
+        return db.scalars(
+            statement.order_by(Order.id.desc()).limit(fetch_size)
+        ).all()
+
+    @staticmethod
     def list_active_after_id(
         db: Session,
         *,

@@ -14,6 +14,7 @@ from app.common.exceptions import (
     ResourceNotFoundError,
 )
 from app.common.decimal_utils import quantize_money
+from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
 from app.enums.order_enums import (
     OffsetFlag,
@@ -33,7 +34,10 @@ from app.repositories.position_freeze_allocation_repository import (
     PositionFreezeAllocationRepository,
 )
 from app.repositories.position_repository import PositionRepository
-from app.schemas.order_schema import OrderCreateRequest
+from app.schemas.order_schema import (
+    OrderCreateRequest,
+    OrderPageResponse,
+)
 from app.services.fee_calculator import (
     FeeBucketEntry,
     FeeBucketKey,
@@ -534,6 +538,50 @@ class OrderService:
             account_id=account_id.strip(),
             after_id=after_id,
             limit=limit,
+        )
+
+    def list_order_page(
+        self,
+        db: Session,
+        account_id: str,
+        *,
+        cursor: str | None,
+        limit: int,
+    ) -> OrderPageResponse:
+        """返回可供客户端继续请求下一页的不透明游标分页结果。"""
+
+        normalized_account_id = account_id.strip()
+        filters = {"account_id": normalized_account_id}
+        before_id = None
+        if cursor is not None:
+            before_id = decode_cursor(
+                cursor,
+                expected_kind="orders",
+                expected_filters=filters,
+            ).before_id
+        rows = list(
+            self.order_repository.list_page_by_account(
+                db,
+                normalized_account_id,
+                before_id=before_id,
+                fetch_size=limit + 1,
+            )
+        )
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        next_cursor = (
+            encode_cursor(
+                kind="orders",
+                before_id=items[-1].id,
+                filters=filters,
+            )
+            if has_more and items
+            else None
+        )
+        return OrderPageResponse(
+            items=items,
+            next_cursor=next_cursor,
+            has_more=has_more,
         )
 
 

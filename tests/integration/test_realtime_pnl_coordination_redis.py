@@ -133,8 +133,10 @@ def test_account_fact_event_is_idempotent_and_preserves_newer_version():
     account_id = f"ACC-{suffix}"
     first_event = f"ORDER-{suffix}-1"
     second_event = f"ORDER-{suffix}-2"
+    third_event = f"ORDER-{suffix}-3"
     first_key = processed_pnl_fact_event_key(first_event)
     second_key = processed_pnl_fact_event_key(second_event)
+    third_key = processed_pnl_fact_event_key(third_event)
     store = RealtimePnlStore(redis_client)
     try:
         first = store.mark_account_fact_dirty_once(
@@ -165,13 +167,107 @@ def test_account_fact_event_is_idempotent_and_preserves_newer_version():
             )
             == 0
         )
+        # 完成V2后版本字段仍保留，下一完整处理周期必须得到严格更大的V3。
+        assert redis_client.hget(
+            PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+            account_id,
+        ) == second
+        third = store.mark_account_fact_dirty_once(
+            event_id=third_event,
+            account_id=account_id,
+            processed_ttl_seconds=60,
+        )
+        assert third is not None
+        assert int(third) > int(second)
+        assert store.complete_dirty_account_fact(account_id, third) is True
     finally:
         redis_client.srem(PNL_DIRTY_ACCOUNT_FACTS_KEY, account_id)
         redis_client.hdel(
             PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
             account_id,
         )
-        redis_client.delete(first_key, second_key)
+        redis_client.delete(first_key, second_key, third_key)
+
+
+def test_account_fact_version_survives_worker_restart_and_many_cycles():
+    """真实Redis验证多轮完成、处理中失败和Store重建后版本均不回绕。"""
+
+    try:
+        redis_client.ping()
+    except Exception as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
+
+    suffix = uuid4().hex[:10].upper()
+    account_id = f"ACC-LIFECYCLE-{suffix}"
+    event_keys: list[str] = []
+    store = RealtimePnlStore(redis_client)
+    try:
+        last_version = 0
+        for index in range(1, 51):
+            event_id = f"ACCOUNT-LIFECYCLE-{suffix}-{index}"
+            event_keys.append(processed_pnl_fact_event_key(event_id))
+            version = store.mark_account_fact_dirty_once(
+                event_id=event_id,
+                account_id=account_id,
+                processed_ttl_seconds=60,
+            )
+            assert version is not None
+            assert int(version) > last_version
+
+            # 第25轮模拟处理失败：不完成V25，随后新事件必须产生V26；
+            # 旧V25完成请求不能清掉新Dirty。
+            if index == 25:
+                next_event = f"ACCOUNT-LIFECYCLE-{suffix}-25-RETRY"
+                event_keys.append(
+                    processed_pnl_fact_event_key(next_event)
+                )
+                newer = store.mark_account_fact_dirty_once(
+                    event_id=next_event,
+                    account_id=account_id,
+                    processed_ttl_seconds=60,
+                )
+                assert newer is not None
+                assert int(newer) > int(version)
+                assert (
+                    store.complete_dirty_account_fact(
+                        account_id,
+                        version,
+                    )
+                    is False
+                )
+                version = newer
+
+            # 每轮重新构造Store，模拟Worker退出和重启后从Redis恢复。
+            restarted_store = RealtimePnlStore(redis_client)
+            assert dict(
+                restarted_store.list_dirty_account_facts()
+            ).get(account_id) == version
+            assert (
+                restarted_store.complete_dirty_account_fact(
+                    account_id,
+                    version,
+                )
+                is True
+            )
+            assert redis_client.hget(
+                PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+                account_id,
+            ) == version
+            last_version = int(version)
+
+        assert last_version == 51
+        assert not redis_client.sismember(
+            PNL_DIRTY_ACCOUNT_FACTS_KEY,
+            account_id,
+        )
+    finally:
+        redis_client.srem(PNL_DIRTY_ACCOUNT_FACTS_KEY, account_id)
+        redis_client.hdel(
+            PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+            account_id,
+        )
+        if event_keys:
+            redis_client.delete(*event_keys)
 
 
 def test_closing_last_position_prunes_static_meta_indexes_atomically():
