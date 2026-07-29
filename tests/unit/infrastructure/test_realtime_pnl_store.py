@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+import json
 from unittest.mock import Mock
 
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
@@ -138,3 +139,69 @@ def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
     assert pipeline.scard.call_count == 3
     # 读取路径只过滤空集合，不删除索引，避免并发新建持仓时误删新索引。
     redis_client.srem.assert_not_called()
+
+
+def test_account_fact_dirty_uses_independent_version_and_cas_keys():
+    redis_client = Mock()
+    redis_client.eval.return_value = "3"
+    store = RealtimePnlStore(redis_client)
+
+    version = store.mark_account_fact_dirty_once(
+        event_id="E-ACCOUNT-1",
+        account_id="A001",
+        processed_ttl_seconds=60,
+    )
+
+    assert version == "3"
+    args = redis_client.eval.call_args.args
+    assert "pnl:dirty_account_facts" in args
+    assert "pnl:dirty_account_fact_versions" in args
+    assert "pnl:position_cache_version" not in args
+
+    redis_client.eval.reset_mock()
+    redis_client.eval.return_value = 0
+    assert store.complete_dirty_account_fact("A001", "3") is False
+    clear_args = redis_client.eval.call_args.args
+    assert "pnl:dirty_account_fact_versions" in clear_args
+    assert "pnl:dirty_account_facts" in clear_args
+
+
+def test_closed_position_prunes_empty_account_and_contract_meta_indexes():
+    redis_client = Mock()
+    redis_client.eval.return_value = 1
+    store = RealtimePnlStore(redis_client)
+
+    accepted, positions, accounts = (
+        store.write_cycle_snapshots_if_lease_owned(
+            lease_owner="worker-1",
+            positions=[],
+            accounts=[],
+            dirty_version="cycle-1",
+            active_positions=[],
+            closed_positions=[
+                ("A001", "DCE", "JD2609", "P001")
+            ],
+        )
+    )
+
+    assert (accepted, positions, accounts) == (True, 0, 0)
+    operations = json.loads(redis_client.eval.call_args.args[-1])
+    removals = [
+        operation
+        for operation in operations
+        if operation[0] == "SREM_MEMBER_AND_PRUNE_INDEX"
+    ]
+    assert removals == [
+        [
+            "SREM_MEMBER_AND_PRUNE_INDEX",
+            "pnl:account_positions:A001",
+            "P001",
+            "pnl:index_keys:accounts",
+        ],
+        [
+            "SREM_MEMBER_AND_PRUNE_INDEX",
+            "pnl:contract_positions:DCE:JD2609",
+            "P001",
+            "pnl:index_keys:contracts",
+        ],
+    ]

@@ -61,7 +61,11 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
     stream_name = f"stream:it:pnl:{suffix}"
     group_name = f"group:it:pnl:{suffix}"
     dead_stream = f"stream:it:pnl-dead:{suffix}"
-    store = RealtimePnlStore(redis_client)
+    lease_key = f"pnl:worker:lease:it:{suffix}"
+    store = RealtimePnlStore(
+        redis_client,
+        worker_lease_key=lease_key,
+    )
     redis_keys = [
         stream_name,
         dead_stream,
@@ -76,6 +80,7 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
             integration_context.exchange_id,
             integration_context.symbol,
         ),
+        lease_key,
     ]
 
     with SessionLocal() as db:
@@ -166,12 +171,8 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
     )
 
     try:
-        # run_once绕过生产run_forever的抢租约循环，测试必须先显式取得
-        # 单写者租约，才能验证受租约屏障保护的实时快照写入。
-        assert store.acquire_worker_lease(
-            worker.lease_owner,
-            worker.lease_ttl_seconds,
-        )
+        # run_once会使用当前测试隔离键自行取得租约，完整验证与生产相同的
+        # “获取租约→Lua写屏障→ACK”流程。
         for sequence, price in enumerate(
             ("3517", "3518", "3519", "3520"),
             start=1,

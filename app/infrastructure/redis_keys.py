@@ -21,6 +21,10 @@ PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
 PNL_DIRTY_ACCOUNTS_KEY = "pnl:dirty_accounts"
 PNL_DIRTY_POSITION_VERSIONS_KEY = "pnl:dirty_position_versions"
 PNL_POSITION_CACHE_VERSION_KEY = "pnl:position_cache_version"
+PNL_DIRTY_ACCOUNT_FACTS_KEY = "pnl:dirty_account_facts"
+PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY = (
+    "pnl:dirty_account_fact_versions"
+)
 PNL_DIRTY_CONTRACTS_KEY = "pnl:dirty_contracts"
 PNL_DIRTY_CONTRACT_VERSIONS_KEY = "pnl:dirty_contract_versions"
 PNL_ACCOUNT_INDEX_KEYS_KEY = "pnl:index_keys:accounts"

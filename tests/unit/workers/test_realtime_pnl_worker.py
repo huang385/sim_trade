@@ -1,6 +1,8 @@
 import json
 from types import MappingProxyType, SimpleNamespace
 
+from redis.exceptions import ConnectionError
+
 from app.schemas.market_tick_schema import MarketTick
 from app.services.active_position_cache import ActivePositionCycleSnapshot
 from app.services.realtime_pnl_service import (
@@ -105,22 +107,43 @@ class FakeCache:
 class FakePnlStore:
     def __init__(self):
         self.dirty = []
+        self.account_dirty = []
         self.completed = []
+        self.completed_accounts = []
         self.lease_valid = True
+        self.acquire_calls = 0
         self.renew_calls = 0
+        self.release_calls = 0
+        self.rebuild_calls = 0
+
+    def acquire_worker_lease(self, _owner, _ttl_seconds):
+        self.acquire_calls += 1
+        return self.lease_valid
 
     def list_dirty_contracts(self):
         return list(self.dirty)
+
+    def list_dirty_account_facts(self):
+        return list(self.account_dirty)
 
     def complete_dirty_contract(self, **kwargs):
         self.completed.append(kwargs)
         return True
 
+    def complete_dirty_account_fact(self, account_id, expected_version):
+        self.completed_accounts.append((account_id, expected_version))
+        return True
+
     def rebuild_active_indexes(self, **_kwargs):
+        self.rebuild_calls += 1
         return True
 
     def renew_worker_lease(self, _owner, _ttl_seconds):
         self.renew_calls += 1
+        return self.lease_valid
+
+    def release_worker_lease(self, _owner):
+        self.release_calls += 1
         return self.lease_valid
 
 
@@ -388,3 +411,118 @@ def test_failed_dirty_does_not_force_full_cache_refresh_every_cycle():
         call["force_refresh"] is False
         for call in service.active_position_cache.call_kwargs
     )
+
+
+def test_lease_is_renewed_only_when_five_second_deadline_is_reached():
+    worker, _consumer, _service, store, clock = make_worker([])
+    worker._next_reconciliation_at = 999
+
+    worker.run_once(force_flush=True)
+    for value in (0.5, 1.0, 2.5, 4.99):
+        clock.value = value
+        worker.run_once(force_flush=True)
+
+    assert store.acquire_calls == 1
+    assert store.renew_calls == 0
+
+    clock.value = 5.0
+    worker.run_once(force_flush=True)
+
+    assert store.renew_calls == 1
+    assert worker.stats_snapshot().lease_renew_count == 1
+
+
+def test_account_fact_dirty_is_processed_without_contract_request():
+    store = FakePnlStore()
+    store.account_dirty = [("A001", "8")]
+
+    class AccountFactService(FakeService):
+        def process_batch(
+            self,
+            *,
+            requests,
+            account_fact_versions,
+            **_kwargs,
+        ):
+            self.calls.append(requests)
+            assert requests == []
+            assert account_fact_versions == {"A001": "8"}
+            return RealtimePnlProcessResult(
+                action="CALCULATED",
+                accounts_updated=1,
+                redis_snapshots_written=1,
+                successful_account_facts=frozenset({"A001"}),
+            )
+
+    service = AccountFactService(store)
+    worker, _consumer, _service, _store, _clock = make_worker(
+        [],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert store.completed_accounts == [("A001", "8")]
+
+
+def test_write_fence_rejection_marks_worker_lost_and_reacquires_later():
+    store = FakePnlStore()
+
+    class RejectingService(FakeService):
+        def process_batch(self, *, requests, **_kwargs):
+            self.calls.append(requests)
+            raise PnlWorkerLeaseLostError("lease rejected")
+
+    service = RejectingService(store)
+    worker, consumer, _service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert worker._lease_acquired is False
+    assert worker.stats_snapshot().lease_lost_count == 1
+    assert worker.stats_snapshot().lease_write_rejected_count == 1
+    assert consumer.acked_batches == []
+
+    store.lease_valid = False
+    worker.run_once(force_flush=True)
+    assert store.acquire_calls == 2
+    assert consumer.acked_batches == []
+
+
+def test_redis_write_exception_fails_closed_without_dead_letter_or_ack():
+    store = FakePnlStore()
+
+    class RedisFailingService(FakeService):
+        def process_batch(self, *, requests, **_kwargs):
+            self.calls.append(requests)
+            raise ConnectionError("redis unavailable")
+
+    service = RedisFailingService(store)
+    worker, consumer, _service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        service=service,
+        store=store,
+    )
+
+    worker.run_once(force_flush=True)
+
+    assert worker._lease_acquired is False
+    assert consumer.acked_batches == []
+    assert consumer.dead_letters == []
+    assert ("DCE", "JD2609") in worker._buffer
+
+
+def test_active_indexes_are_reconciled_again_on_periodic_full_cycle():
+    worker, _consumer, _service, store, clock = make_worker([])
+
+    worker.run_once()
+    assert store.rebuild_calls == 1
+
+    clock.value = 60
+    worker.run_once()
+    assert store.rebuild_calls == 2

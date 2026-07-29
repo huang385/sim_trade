@@ -512,3 +512,51 @@ def test_two_contract_deltas_update_same_account_only_once():
     assert store.accounts["A001"][
         "cumulative_unrealized_pnl"
     ] == "30.000000"
+
+
+def test_account_fact_dirty_reuses_existing_pnl_without_contract_rebuild():
+    cache = FakeCache()
+    refreshed_account = AccountPnlSnapshot(
+        account_id="A001",
+        cash_balance=Decimal("100000"),
+        used_margin=Decimal("10000"),
+        frozen_margin=Decimal("5000"),
+        frozen_cash=Decimal("0"),
+        frozen_commission=Decimal("10"),
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        daily_close_pnl=Decimal("150"),
+        daily_commission=Decimal("6"),
+    )
+    cycle = ActivePositionCycleSnapshot(
+        by_contract=MappingProxyType(
+            {("SHFE", "RB2610"): (cache.position,)}
+        ),
+        by_account=MappingProxyType({"A001": (cache.position,)}),
+        accounts=MappingProxyType({"A001": refreshed_account}),
+        cache_version="4",
+        refresh_count=2,
+    )
+    store = FakeStore()
+    store.accounts["A001"] = {
+        "cumulative_unrealized_pnl": "2400.000000",
+        "daily_position_pnl": "400.000000",
+    }
+
+    result = RealtimePnlService(
+        active_position_cache=cache,
+        pnl_store=store,
+    ).process_batch(
+        requests=[],
+        cycle_snapshot=cycle,
+        dirty_version="cycle-account",
+        account_fact_versions={"A001": "7"},
+    )
+
+    assert result.successful_account_facts == {"A001"}
+    assert result.positions_calculated == 0
+    assert store.positions == {}
+    assert store.accounts["A001"][
+        "cumulative_unrealized_pnl"
+    ] == "2400.000000"
+    assert store.accounts["A001"]["available_cash"] == "87390.000000"

@@ -12,21 +12,22 @@ class TradeCreatedPnlValidationError(ValueError):
 
 @dataclass(frozen=True)
 class TradeCreatedPnlResult:
-    """成交后跨进程Dirty标记结果。"""
+    """订单或成交事实提交后的跨进程Dirty标记结果。"""
 
     action: str
     dirty_version: str | None = None
+    dirty_kind: str | None = None
     positions_zeroed: int = 0
     snapshots_written: int = 0
 
 
 class TradeCreatedPnlService:
     """
-    把成交、下单冻结和撤单释放事件转换为可靠的Redis Dirty合约标记。
+    把成交、下单冻结和撤单释放事件转换为可靠的Redis分类Dirty标记。
 
     本服务不再写pnl:position或pnl:account。实时盈亏快照由唯一的
     RealtimePnlWorker统一计算和写入，避免成交Worker与行情Worker并发覆盖
-    同一账户Hash。
+    同一账户Hash。成交刷新合约结构，订单接受和撤单只刷新账户资金事实。
     """
 
     FACT_CHANGE_EVENT_TYPES = {
@@ -52,7 +53,7 @@ class TradeCreatedPnlService:
     def _parse(
         cls,
         fields: Mapping[str, str],
-    ) -> tuple[str, dict] | None:
+    ) -> tuple[str, str, dict] | None:
         event_type = fields.get("event_type", "").strip()
         # 独立Group会看到订单流全部事件；只处理会改变持仓或账户资金基础
         # 字段的提交后事件，其他类型直接ACK。
@@ -62,11 +63,11 @@ class TradeCreatedPnlService:
             payload = json.loads(fields.get("payload", ""))
         except (TypeError, json.JSONDecodeError) as exc:
             raise TradeCreatedPnlValidationError(
-                "TRADE_CREATED payload不是合法JSON"
+                "PnL事实事件payload不是合法JSON"
             ) from exc
         if not isinstance(payload, dict):
             raise TradeCreatedPnlValidationError(
-                "TRADE_CREATED payload必须是对象"
+                "PnL事实事件payload必须是对象"
             )
         event_id = str(
             fields.get("event_id")
@@ -89,7 +90,7 @@ class TradeCreatedPnlService:
             raise TradeCreatedPnlValidationError(
                 "账户事实事件缺少event_id"
             )
-        return event_id, payload
+        return event_type, event_id, payload
 
     def process(
         self,
@@ -101,28 +102,43 @@ class TradeCreatedPnlService:
         parsed = self._parse(fields)
         if parsed is None:
             return TradeCreatedPnlResult(action="SKIPPED")
-        event_id, payload = parsed
+        event_type, event_id, payload = parsed
 
         account_id = str(payload["account_id"]).strip()
         exchange_id = str(payload["exchange_id"]).strip().upper()
         symbol = str(payload["symbol"]).strip().upper()
-        version = self.pnl_store.mark_contract_dirty_once(
-            event_id=event_id,
-            exchange_id=exchange_id,
-            symbol=symbol,
-            account_id=account_id,
-            processed_ttl_seconds=self.processed_ttl_seconds,
-        )
+        if event_type == "TRADE_CREATED":
+            version = self.pnl_store.mark_contract_dirty_once(
+                event_id=event_id,
+                exchange_id=exchange_id,
+                symbol=symbol,
+                account_id=account_id,
+                processed_ttl_seconds=self.processed_ttl_seconds,
+            )
+            dirty_kind = "CONTRACT_STRUCTURE"
+        else:
+            # 订单接受和撤单只改变账户冻结资金等基础字段，不改变Position
+            # 结构，因此不能递增全局持仓缓存版本或触发全量持仓查询。
+            version = self.pnl_store.mark_account_fact_dirty_once(
+                event_id=event_id,
+                account_id=account_id,
+                processed_ttl_seconds=self.processed_ttl_seconds,
+            )
+            dirty_kind = "ACCOUNT_FACT"
         if version is None:
             return TradeCreatedPnlResult(action="DUPLICATE")
         # 仅让同进程测试或未来合并部署立即失效；跨进程可靠通知依赖Redis版本。
         if self.cache is not None:
-            self.cache.invalidate(
-                account_id=account_id,
-                exchange_id=exchange_id,
-                symbol=symbol,
-            )
+            if dirty_kind == "CONTRACT_STRUCTURE":
+                self.cache.invalidate(
+                    account_id=account_id,
+                    exchange_id=exchange_id,
+                    symbol=symbol,
+                )
+            else:
+                self.cache.invalidate(account_id=account_id)
         return TradeCreatedPnlResult(
             action="DIRTY_MARKED",
             dirty_version=version,
+            dirty_kind=dirty_kind,
         )

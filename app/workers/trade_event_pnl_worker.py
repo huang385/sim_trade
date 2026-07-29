@@ -53,8 +53,9 @@ class TradeEventPnlWorker:
             self.stream_consumer.clear_failure(message_id)
             if result.action == "DIRTY_MARKED":
                 logger.info(
-                    "账户事实变化后PnL合约已标记Dirty id=%s version=%s",
+                    "PnL事实已标记Dirty id=%s kind=%s version=%s",
                     message_id,
+                    result.dirty_kind,
                     result.dirty_version,
                 )
             return "acknowledged"

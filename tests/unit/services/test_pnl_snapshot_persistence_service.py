@@ -1,7 +1,7 @@
 from contextlib import nullcontext
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
@@ -124,3 +124,7 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
     position_repository.get_by_position_id_for_update.assert_not_called()
     position_repository.list_open_details_for_update.assert_not_called()
     account_db.commit.assert_called_once()
+    assert pnl_store.complete_dirty_position.call_args_list == [
+        call("P1", "v1"),
+        call("P2", "v2"),
+    ]

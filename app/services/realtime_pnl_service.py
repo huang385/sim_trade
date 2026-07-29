@@ -69,6 +69,8 @@ class RealtimePnlProcessResult:
     failed_contracts: frozenset[ContractKey] = frozenset()
     no_position_contracts: frozenset[ContractKey] = frozenset()
     reconciled_accounts: int = 0
+    successful_account_facts: frozenset[str] = frozenset()
+    failed_account_facts: frozenset[str] = frozenset()
 
 
 class RealtimePnlService:
@@ -201,12 +203,15 @@ class RealtimePnlService:
         requests: list[ContractPnlRequest],
         cycle_snapshot: ActivePositionCycleSnapshot,
         dirty_version: str,
+        account_fact_versions: Mapping[str, str] | None = None,
         force_reconciliation: bool = False,
         lease_owner: str | None = None,
     ) -> RealtimePnlProcessResult:
         """计算多个合约，并在同一批次内每个账户只生成一个最终快照。"""
 
-        if not requests:
+        account_fact_versions = dict(account_fact_versions or {})
+        account_fact_ids = set(account_fact_versions)
+        if not requests and not account_fact_ids:
             return RealtimePnlProcessResult(action="SKIPPED")
 
         updated_at = utc_now()
@@ -395,26 +400,28 @@ class RealtimePnlService:
 
         # 失败合约不会产生快照，也不会被Worker ACK或清除Dirty。
         successful -= failed
-        affected_accounts = {
+        contract_affected_accounts = {
             account_id
             for key in successful
             for account_id in accounts_by_contract.get(key, ())
         }
+        affected_accounts = contract_affected_accounts | account_fact_ids
         old_accounts = self.pnl_store.get_accounts_many(affected_accounts)
 
-        # 完整汇总需要批量读到账户全部活动持仓。普通周期仅在账户快照缺失时
-        # 进入该分支，作为冷启动恢复。
-        dirty_account_ids = {
+        # 成交结构Dirty需要重新汇总该账户的全部持仓；订单接受和撤单只刷新
+        # 账户资金事实，Redis旧浮盈存在时可直接复用，不能触发全量持仓查询。
+        structural_dirty_account_ids = {
             account_id
             for request in requests
             for account_id in request.dirty_account_ids
+            if request.key in successful
         }
         full_accounts = {
             account_id
             for account_id in affected_accounts
             if force_reconciliation
             or not old_accounts.get(account_id)
-            or account_id in dirty_account_ids
+            or account_id in structural_dirty_account_ids
         }
         full_position_ids = {
             position.position_id
@@ -466,9 +473,12 @@ class RealtimePnlService:
 
         account_models: list[AccountRealtimePnl] = []
         reconciled_accounts = 0
+        failed_account_facts: set[str] = set()
         for account_id in affected_accounts:
             account = cycle_snapshot.get_account(account_id)
             if account is None:
+                if account_id in account_fact_ids:
+                    failed_account_facts.add(account_id)
                 failed.update(
                     key
                     for key in successful
@@ -575,6 +585,14 @@ class RealtimePnlService:
             )
 
         successful -= failed
+        written_account_ids = {
+            model.account_id for model in account_models
+        }
+        successful_account_facts = (
+            account_fact_ids
+            & written_account_ids
+            - failed_account_facts
+        )
         # 如果某合约后续因账户事实缺失失败，排除它产生的快照，避免部分更新。
         allowed_position_ids = {
             position.position_id
@@ -632,7 +650,11 @@ class RealtimePnlService:
             written_positions = written_accounts = 0
 
         return RealtimePnlProcessResult(
-            action="CALCULATED" if successful else "SKIPPED",
+            action=(
+                "CALCULATED"
+                if successful or successful_account_facts
+                else "SKIPPED"
+            ),
             positions_calculated=len(models),
             redis_snapshots_written=(
                 written_positions + written_accounts
@@ -643,6 +665,12 @@ class RealtimePnlService:
             failed_contracts=frozenset(failed),
             no_position_contracts=frozenset(no_position),
             reconciled_accounts=reconciled_accounts,
+            successful_account_facts=frozenset(
+                successful_account_facts
+            ),
+            failed_account_facts=frozenset(
+                account_fact_ids - successful_account_facts
+            ),
         )
 
     def process(

@@ -5,8 +5,14 @@ import pytest
 from app.core.redis_client import redis_client
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.redis_keys import (
+    PNL_ACCOUNT_INDEX_KEYS_KEY,
+    PNL_CONTRACT_INDEX_KEYS_KEY,
+    PNL_DIRTY_ACCOUNT_FACTS_KEY,
+    PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
     PNL_DIRTY_CONTRACTS_KEY,
     PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+    pnl_account_positions_key,
+    pnl_contract_positions_key,
     pnl_dirty_contract_accounts_key,
     pnl_dirty_contract_member,
     processed_pnl_fact_event_key,
@@ -71,8 +77,8 @@ def test_trade_dirty_version_cas_preserves_newer_trade():
         redis_client.delete(accounts_key)
 
 
-def test_account_fact_event_marks_dirty_only_once():
-    """真实Redis验证Outbox重投不会重复递增缓存版本。"""
+def test_contract_fact_event_marks_dirty_only_once():
+    """真实Redis验证成交Outbox重投不会重复递增持仓版本。"""
 
     try:
         redis_client.ping()
@@ -113,3 +119,149 @@ def test_account_fact_event_marks_dirty_only_once():
         redis_client.srem(PNL_DIRTY_CONTRACTS_KEY, member)
         redis_client.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
         redis_client.delete(accounts_key, processed_key)
+
+
+def test_account_fact_event_is_idempotent_and_preserves_newer_version():
+    """真实Redis验证账户事实Dirty幂等以及版本CAS。"""
+
+    try:
+        redis_client.ping()
+    except Exception as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
+
+    suffix = uuid4().hex[:10].upper()
+    account_id = f"ACC-{suffix}"
+    first_event = f"ORDER-{suffix}-1"
+    second_event = f"ORDER-{suffix}-2"
+    first_key = processed_pnl_fact_event_key(first_event)
+    second_key = processed_pnl_fact_event_key(second_event)
+    store = RealtimePnlStore(redis_client)
+    try:
+        first = store.mark_account_fact_dirty_once(
+            event_id=first_event,
+            account_id=account_id,
+            processed_ttl_seconds=60,
+        )
+        duplicate = store.mark_account_fact_dirty_once(
+            event_id=first_event,
+            account_id=account_id,
+            processed_ttl_seconds=60,
+        )
+        second = store.mark_account_fact_dirty_once(
+            event_id=second_event,
+            account_id=account_id,
+            processed_ttl_seconds=60,
+        )
+
+        assert first is not None
+        assert duplicate is None
+        assert second != first
+        assert store.complete_dirty_account_fact(account_id, first) is False
+        assert store.complete_dirty_account_fact(account_id, second) is True
+        assert (
+            redis_client.sismember(
+                PNL_DIRTY_ACCOUNT_FACTS_KEY,
+                account_id,
+            )
+            == 0
+        )
+    finally:
+        redis_client.srem(PNL_DIRTY_ACCOUNT_FACTS_KEY, account_id)
+        redis_client.hdel(
+            PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+            account_id,
+        )
+        redis_client.delete(first_key, second_key)
+
+
+def test_closing_last_position_prunes_static_meta_indexes_atomically():
+    """真实Redis验证最后一条持仓关闭后空索引名称同步删除。"""
+
+    try:
+        redis_client.ping()
+    except Exception as exc:
+        pytest.skip(f"Redis不可连接: {exc}")
+
+    suffix = uuid4().hex[:10].upper()
+    account_id = f"ACC-{suffix}"
+    exchange_id = "ITEX"
+    symbol = f"IDX{suffix}"
+    position_id = f"P-{suffix}"
+    second_position_id = f"P2-{suffix}"
+    account_key = pnl_account_positions_key(account_id)
+    contract_key = pnl_contract_positions_key(exchange_id, symbol)
+    store = RealtimePnlStore(redis_client)
+    try:
+        redis_client.sadd(
+            account_key,
+            position_id,
+            second_position_id,
+        )
+        redis_client.sadd(
+            contract_key,
+            position_id,
+            second_position_id,
+        )
+        redis_client.sadd(PNL_ACCOUNT_INDEX_KEYS_KEY, account_key)
+        redis_client.sadd(PNL_CONTRACT_INDEX_KEYS_KEY, contract_key)
+        positions_written, accounts_written = store.write_cycle_snapshots(
+            positions=[],
+            accounts=[],
+            dirty_version="index-cleanup",
+            active_positions=[],
+            closed_positions=[
+                (
+                    account_id,
+                    exchange_id,
+                    symbol,
+                    position_id,
+                )
+            ],
+        )
+
+        assert (positions_written, accounts_written) == (0, 0)
+        assert redis_client.smembers(account_key) == {second_position_id}
+        assert redis_client.smembers(contract_key) == {second_position_id}
+        assert redis_client.sismember(
+            PNL_ACCOUNT_INDEX_KEYS_KEY,
+            account_key,
+        )
+        assert redis_client.sismember(
+            PNL_CONTRACT_INDEX_KEYS_KEY,
+            contract_key,
+        )
+
+        store.write_cycle_snapshots(
+            positions=[],
+            accounts=[],
+            dirty_version="index-cleanup-2",
+            active_positions=[],
+            closed_positions=[
+                (
+                    account_id,
+                    exchange_id,
+                    symbol,
+                    second_position_id,
+                )
+            ],
+        )
+        assert redis_client.exists(account_key) == 0
+        assert redis_client.exists(contract_key) == 0
+        assert (
+            redis_client.sismember(
+                PNL_ACCOUNT_INDEX_KEYS_KEY,
+                account_key,
+            )
+            == 0
+        )
+        assert (
+            redis_client.sismember(
+                PNL_CONTRACT_INDEX_KEYS_KEY,
+                contract_key,
+            )
+            == 0
+        )
+    finally:
+        redis_client.delete(account_key, contract_key)
+        redis_client.srem(PNL_ACCOUNT_INDEX_KEYS_KEY, account_key)
+        redis_client.srem(PNL_CONTRACT_INDEX_KEYS_KEY, contract_key)

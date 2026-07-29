@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 import json
 
+import pytest
+
 from app.services.trade_created_pnl_service import (
     TradeCreatedPnlService,
 )
@@ -16,12 +18,17 @@ class FakeCache:
 
 class FakeStore:
     def __init__(self):
-        self.dirty = []
+        self.contract_dirty = []
+        self.account_dirty = []
         self.snapshot_writes = 0
 
     def mark_contract_dirty_once(self, **kwargs):
-        self.dirty.append(kwargs)
+        self.contract_dirty.append(kwargs)
         return "7"
+
+    def mark_account_fact_dirty_once(self, **kwargs):
+        self.account_dirty.append(kwargs)
+        return "3"
 
     def write_snapshots(self, **_kwargs):
         self.snapshot_writes += 1
@@ -56,8 +63,9 @@ def test_trade_only_marks_cross_process_dirty_contract():
 
     assert result.action == "DIRTY_MARKED"
     assert result.dirty_version == "7"
+    assert result.dirty_kind == "CONTRACT_STRUCTURE"
     assert cache.invalidated is True
-    assert store.dirty == [
+    assert store.contract_dirty == [
         {
             "event_id": "E001",
             "exchange_id": "SHFE",
@@ -80,11 +88,20 @@ def test_non_fact_event_is_skipped_without_dirty_or_snapshot_write():
     )
 
     assert result.action == "SKIPPED"
-    assert store.dirty == []
+    assert store.contract_dirty == []
+    assert store.account_dirty == []
     assert store.snapshot_writes == 0
 
 
-def test_order_accepted_marks_account_facts_dirty_after_commit_event():
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "ORDER_ACCEPTED",
+        "ORDER_CANCELLED",
+        "ORDER_PARTIALLY_CANCELLED",
+    ],
+)
+def test_order_events_mark_only_account_facts_dirty(event_type):
     store = FakeStore()
     result = TradeCreatedPnlService(
         cache=FakeCache(),
@@ -93,7 +110,7 @@ def test_order_accepted_marks_account_facts_dirty_after_commit_event():
         stream_message_id="2-0",
         fields={
             "event_id": "E002",
-            "event_type": "ORDER_ACCEPTED",
+            "event_type": event_type,
             "payload": json.dumps(
                 {
                     "event_id": "E002",
@@ -106,4 +123,12 @@ def test_order_accepted_marks_account_facts_dirty_after_commit_event():
     )
 
     assert result.action == "DIRTY_MARKED"
-    assert store.dirty[0]["event_id"] == "E002"
+    assert result.dirty_kind == "ACCOUNT_FACT"
+    assert store.contract_dirty == []
+    assert store.account_dirty == [
+        {
+            "event_id": "E002",
+            "account_id": "A001",
+            "processed_ttl_seconds": 604800,
+        }
+    ]

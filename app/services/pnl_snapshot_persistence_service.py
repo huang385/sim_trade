@@ -141,10 +141,8 @@ class PnlSnapshotPersistenceService:
             )
 
         by_account: dict[str, list[str]] = {}
-        found_ids = set()
         for position_id, account_id in mappings:
             by_account.setdefault(account_id, []).append(position_id)
-            found_ids.add(position_id)
 
         persisted_ids: list[str] = []
         accounts_persisted = 0
@@ -252,7 +250,9 @@ class PnlSnapshotPersistenceService:
                             result.daily_position_pnl
                         )
                         position.updated_at = utc_now()
-                        updated_positions.append(position_id)
+                        # 只能记录当前真正完成计算并写入事务的持仓编号。禁止
+                        # 使用外层循环残留变量，否则P1、P2可能变成P2、P2。
+                        updated_positions.append(position.position_id)
 
                     if not updated_positions:
                         db.rollback()
@@ -293,11 +293,10 @@ class PnlSnapshotPersistenceService:
                 # Session上下文会回滚，Dirty版本不删除，下一轮继续重试。
                 continue
 
-        # PostgreSQL中已不存在的测试脏标记可以安全清理；正常业务不会删除
-        # Position，因此这只防止历史测试数据让集合永久膨胀。
-        persisted_ids.extend(set(versions) - found_ids)
         completed = 0
-        for position_id in persisted_ids:
+        # 同一持仓在本轮最多执行一次CAS。未找到、缺行情或事务失败的持仓
+        # 不得清理，必须保留给后续恢复或人工排查。
+        for position_id in dict.fromkeys(persisted_ids):
             completed += self.pnl_store.complete_dirty_position(
                 position_id,
                 versions[position_id],

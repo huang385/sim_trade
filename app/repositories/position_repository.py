@@ -1,6 +1,6 @@
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
@@ -172,6 +172,57 @@ class PositionRepository:
             .where(
                 Position.total_volume > 0,
                 PositionDetail.remaining_volume > 0,
+            )
+            .order_by(Position.id, PositionDetail.id)
+        )
+        return db.execute(statement).all()
+
+    @staticmethod
+    def list_active_calculation_rows_by_contracts(
+        db: Session,
+        contract_keys: Sequence[tuple[str, str]],
+    ):
+        """
+        一次批量读取指定合约的活动持仓计算行。
+
+        成交事实只会刷新受影响合约，禁止按合约循环执行SQL。交易所和合约
+        代码在进入查询前统一标准化，返回结构与全量查询保持一致。
+        """
+
+        keys = tuple(
+            sorted(
+                {
+                    (
+                        exchange_id.strip().upper(),
+                        symbol.strip().upper(),
+                    )
+                    for exchange_id, symbol in contract_keys
+                }
+            )
+        )
+        if not keys:
+            return []
+        statement = (
+            select(Position, PositionDetail, Instrument, Account)
+            .join(
+                PositionDetail,
+                PositionDetail.position_id == Position.position_id,
+            )
+            .join(
+                Instrument,
+                Instrument.order_book_id == Position.order_book_id,
+            )
+            .join(
+                Account,
+                Account.account_id == Position.account_id,
+            )
+            .where(
+                Position.total_volume > 0,
+                PositionDetail.remaining_volume > 0,
+                tuple_(
+                    Position.exchange_id,
+                    Position.symbol,
+                ).in_(keys),
             )
             .order_by(Position.id, PositionDetail.id)
         )

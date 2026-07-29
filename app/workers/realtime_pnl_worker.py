@@ -8,6 +8,8 @@ from decimal import Decimal
 from threading import Event, Lock
 from typing import Callable
 
+from redis.exceptions import RedisError
+
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
@@ -20,7 +22,10 @@ from app.infrastructure.market_tick_stream_consumer import (
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.redis_keys import pnl_event_failure_key
 from app.schemas.market_tick_schema import MarketTick
-from app.services.active_position_cache import ActivePositionCache
+from app.services.active_position_cache import (
+    ActivePositionCache,
+    ActivePositionCycleSnapshot,
+)
 from app.services.realtime_pnl_service import (
     ContractPnlRequest,
     PnlEventValidationError,
@@ -73,6 +78,11 @@ class PnlWorkerStats:
     full_reconciliation_count: int = 0
     calculation_duration_ms: int = 0
     failed_ticks: int = 0
+    lease_acquired_count: int = 0
+    lease_renew_count: int = 0
+    lease_lost_count: int = 0
+    lease_write_rejected_count: int = 0
+    lease_reacquire_count: int = 0
 
 
 class RealtimePnlWorker:
@@ -135,6 +145,9 @@ class RealtimePnlWorker:
         self.lease_ttl_seconds = lease_ttl_seconds
         self.lease_renew_seconds = lease_renew_seconds
         self._next_lease_renew_at = now
+        self._lease_acquired = False
+        self._lease_ever_acquired = False
+        self._lease_wait_logged = False
 
     def request_stop(self, *_args) -> None:
         self.stop_event.set()
@@ -217,22 +230,70 @@ class RealtimePnlWorker:
             buffered.latest_tick = tick
         return "buffered"
 
-    def _renew_current_lease(self) -> bool:
-        """
-        向Redis确认当前实例仍是唯一写入者并刷新TTL。
+    def _mark_lease_lost(self, *, write_rejected: bool = False) -> None:
+        """把本实例切换为失租状态；同一次失租只统计和记录一次。"""
 
-        Redis异常由调用方按失败关闭处理；返回False时本轮不得写快照或ACK。
-        """
+        if not self._lease_acquired:
+            return
+        self._lease_acquired = False
+        changes = {"lease_lost_count": 1}
+        if write_rejected:
+            changes["lease_write_rejected_count"] = 1
+        self._update_stats(**changes)
+        logger.warning(
+            "实时PnL单写者租约已失效，停止读取、写入和ACK"
+        )
 
-        renewed = self.pnl_store.renew_worker_lease(
+    def _try_acquire_lease(self) -> bool:
+        """尝试获取租约；失败只返回False，由外层按重试间隔等待。"""
+
+        acquired = self.pnl_store.acquire_worker_lease(
             self.lease_owner,
             self.lease_ttl_seconds,
         )
-        if renewed:
-            self._next_lease_renew_at = (
-                self.monotonic() + self.lease_renew_seconds
+        if not acquired:
+            self._lease_acquired = False
+            return False
+        reacquired = self._lease_ever_acquired
+        self._lease_acquired = True
+        self._lease_ever_acquired = True
+        self._lease_wait_logged = False
+        self._next_lease_renew_at = (
+            self.monotonic() + self.lease_renew_seconds
+        )
+        self._update_stats(
+            lease_acquired_count=1,
+            lease_reacquire_count=1 if reacquired else 0,
+        )
+        return True
+
+    def _renew_lease_if_due(self) -> bool:
+        """
+        仅在达到配置续租时间点时访问Redis。
+
+        未到时间直接返回当前本地持有状态；Redis异常由上层失败关闭，续租被
+        拒绝时立即切换为失租状态。
+        """
+
+        if not self._lease_acquired:
+            return False
+        now = self.monotonic()
+        if now < self._next_lease_renew_at:
+            return True
+        try:
+            renewed = self.pnl_store.renew_worker_lease(
+                self.lease_owner,
+                self.lease_ttl_seconds,
             )
-        return renewed
+        except Exception:
+            self._mark_lease_lost()
+            raise
+        if not renewed:
+            self._mark_lease_lost()
+            return False
+        self._next_lease_renew_at = now + self.lease_renew_seconds
+        self._update_stats(lease_renew_count=1)
+        return True
 
     def _current_ticks(
         self,
@@ -304,22 +365,72 @@ class RealtimePnlWorker:
         ):
             self._next_flush_at = now
 
+    def _reconcile_active_indexes(
+        self,
+        cycle: ActivePositionCycleSnapshot,
+    ) -> None:
+        """
+        用当前PostgreSQL缓存快照校准PnL静态索引。
+
+        冷启动执行一次，之后每次60秒完整对账继续执行；Redis侧WATCH缓存
+        版本，成交并发改变结构时会放弃旧结果而不是覆盖新索引。
+        """
+
+        self._indexes_rebuilt = self.pnl_store.rebuild_active_indexes(
+            expected_cache_version=(cycle.cache_version or "0"),
+            positions=[
+                (
+                    position.account_id,
+                    position.exchange_id,
+                    position.symbol,
+                    position.position_id,
+                )
+                for positions in cycle.by_contract.values()
+                for position in positions
+            ],
+        )
+
     def flush(self, *, force_reconciliation: bool = False) -> None:
-        if not self._renew_current_lease():
-            logger.warning("实时PnL租约已失效，本轮不写入且保留Pending")
+        if not self._renew_lease_if_due():
             return
         started = self.monotonic()
         dirty_rows = self.pnl_store.list_dirty_contracts()
         dirty = {key: (version, accounts) for key, version, accounts in dirty_rows}
+        account_fact_versions = dict(
+            self.pnl_store.list_dirty_account_facts()
+        )
         keys = set(self._buffer) | set(dirty)
 
+        structural_account_versions: dict[str, list[str]] = {}
+        for key, (version, accounts) in dirty.items():
+            member_version = f"{key[0]}:{key[1]}:{version}"
+            for account_id in accounts:
+                structural_account_versions.setdefault(
+                    account_id,
+                    [],
+                ).append(member_version)
+        account_refresh_versions = dict(account_fact_versions)
+        for account_id, versions in structural_account_versions.items():
+            account_refresh_versions[account_id] = "|".join(
+                sorted(
+                    [
+                        account_refresh_versions.get(account_id, ""),
+                        *versions,
+                    ]
+                )
+            )
         extra_accounts = {
             account_id
             for _version, accounts in dirty.values()
             for account_id in accounts
-        }
+        } | set(account_fact_versions)
         cycle = self.service.active_position_cache.get_cycle_snapshot(
             extra_account_ids=extra_accounts,
+            refresh_account_versions=account_refresh_versions,
+            refresh_contract_versions={
+                key: version
+                for key, (version, _accounts) in dirty.items()
+            },
             force_refresh=force_reconciliation,
         )
         refresh_delta = max(
@@ -332,25 +443,9 @@ class RealtimePnlWorker:
 
         if force_reconciliation:
             keys.update(cycle.by_contract.keys())
-        if not keys:
-            if not self._indexes_rebuilt:
-                self._indexes_rebuilt = (
-                    self.pnl_store.rebuild_active_indexes(
-                        expected_cache_version=(
-                            cycle.cache_version or "0"
-                        ),
-                        positions=[
-                            (
-                                position.account_id,
-                                position.exchange_id,
-                                position.symbol,
-                                position.position_id,
-                            )
-                            for positions in cycle.by_contract.values()
-                            for position in positions
-                        ],
-                    )
-                )
+        if not keys and not account_fact_versions:
+            if force_reconciliation or not self._indexes_rebuilt:
+                self._reconcile_active_indexes(cycle)
             self._schedule_next_flush(self.monotonic())
             return
 
@@ -382,10 +477,7 @@ class RealtimePnlWorker:
                 )
             )
 
-        if skipped_unchanged and not self._renew_current_lease():
-            logger.warning(
-                "实时PnL租约在确认未变化行情前失效，消息保留Pending"
-            )
+        if skipped_unchanged and not self._renew_lease_if_due():
             self._schedule_next_flush(self.monotonic())
             return
         for key in skipped_unchanged:
@@ -398,7 +490,7 @@ class RealtimePnlWorker:
                 contracts_skipped_unchanged=len(skipped_unchanged)
             )
 
-        if not requests:
+        if not requests and not account_fact_versions:
             self._schedule_next_flush(self.monotonic())
             return
 
@@ -407,16 +499,31 @@ class RealtimePnlWorker:
                 requests=requests,
                 cycle_snapshot=cycle,
                 dirty_version=f"cycle:{int(started * 1000)}",
+                account_fact_versions=account_fact_versions,
                 force_reconciliation=force_reconciliation,
                 lease_owner=self.lease_owner,
             )
         except PnlWorkerLeaseLostError:
+            self._mark_lease_lost(write_rejected=True)
             retained = sum(
                 len(item.message_ids) for item in self._buffer.values()
             )
             self._update_stats(pending_retained=retained)
-            logger.warning(
-                "实时PnL最终写入被租约屏障拒绝，消息保留Pending"
+            logger.debug("实时PnL写屏障拒绝，消息保留Pending")
+            self._schedule_next_flush(self.monotonic())
+            return
+        except RedisError:
+            # Redis状态未知时失败关闭，绝不能增加失败次数后误入死信并ACK。
+            self._mark_lease_lost()
+            retained = sum(
+                len(item.message_ids) for item in self._buffer.values()
+            )
+            self._update_stats(
+                pending_retained=retained,
+                failed_ticks=retained,
+            )
+            logger.exception(
+                "PnL Redis批量写入异常，实例失租且消息保留Pending"
             )
             self._schedule_next_flush(self.monotonic())
             return
@@ -437,19 +544,8 @@ class RealtimePnlWorker:
             self._schedule_next_flush(self.monotonic())
             return
 
-        # 最终快照已经通过Lua租约屏障写入；ACK前再次续租。若此时失去租约，
-        # 保留原消息由新Worker幂等重算，不更新任何本地成功状态。
-        if not self._renew_current_lease():
-            retained = sum(
-                len(item.message_ids) for item in self._buffer.values()
-            )
-            self._update_stats(pending_retained=retained)
-            logger.warning(
-                "实时PnL写入后租约失效，本轮不ACK并交由新Worker恢复"
-            )
-            self._schedule_next_flush(self.monotonic())
-            return
-
+        # 最终快照已经通过Lua租约屏障原子写入。此后即使租约立即转移，消息
+        # 对应结果也已可靠落入Redis，因此直接ACK，避免每500ms重复续租。
         request_by_key = {request.key: request for request in requests}
         successful = set(result.successful_contracts)
         for key in successful:
@@ -466,6 +562,11 @@ class RealtimePnlWorker:
                     symbol=key[1],
                     expected_version=request.dirty_version,
                 )
+        for account_id in result.successful_account_facts:
+            self.pnl_store.complete_dirty_account_fact(
+                account_id,
+                account_fact_versions[account_id],
+            )
 
         for key in result.failed_contracts:
             self._retain_or_dead_letter(
@@ -497,20 +598,8 @@ class RealtimePnlWorker:
             ),
             calculation_duration_ms=duration_ms,
         )
-        if not self._indexes_rebuilt:
-            self._indexes_rebuilt = self.pnl_store.rebuild_active_indexes(
-                expected_cache_version=(cycle.cache_version or "0"),
-                positions=[
-                    (
-                        position.account_id,
-                        position.exchange_id,
-                        position.symbol,
-                        position.position_id,
-                    )
-                    for positions in cycle.by_contract.values()
-                    for position in positions
-                ],
-            )
+        if force_reconciliation or not self._indexes_rebuilt:
+            self._reconcile_active_indexes(cycle)
         self._schedule_next_flush(self.monotonic())
 
     def _read_block_ms(self) -> int:
@@ -519,8 +608,9 @@ class RealtimePnlWorker:
         return min(self.block_ms, max(1, remaining_ms))
 
     def run_once(self, *, force_flush: bool = False) -> None:
-        if not self._renew_current_lease():
-            logger.warning("实时PnL租约已失效，本轮不读取或确认行情")
+        if not self._lease_acquired and not self._try_acquire_lease():
+            return
+        if not self._renew_lease_if_due():
             return
         messages = self.stream_consumer.claim_stale_messages(
             pending_idle_ms=self.pending_idle_ms,
@@ -547,37 +637,29 @@ class RealtimePnlWorker:
 
     def run_forever(self) -> None:
         group_ready = False
-        lease_acquired = False
         try:
             while not self.stop_event.is_set():
                 try:
-                    now = self.monotonic()
-                    if not lease_acquired:
-                        lease_acquired = self.pnl_store.acquire_worker_lease(
-                            self.lease_owner,
-                            self.lease_ttl_seconds,
-                        )
-                        if not lease_acquired:
-                            logger.warning(
-                                "已有实时PnL单写者，本实例等待租约"
-                            )
+                    if not self._lease_acquired:
+                        if not self._try_acquire_lease():
+                            if not self._lease_wait_logged:
+                                logger.warning(
+                                    "已有实时PnL单写者，本实例等待租约"
+                                )
+                                self._lease_wait_logged = True
+                            else:
+                                logger.debug(
+                                    "实时PnL实例仍在等待单写者租约"
+                                )
                             self.stop_event.wait(
                                 self.retry_interval_seconds
                             )
                             continue
-                        self._next_lease_renew_at = (
-                            now + self.lease_renew_seconds
+                    if not self._renew_lease_if_due():
+                        self.stop_event.wait(
+                            self.retry_interval_seconds
                         )
-                    elif now >= self._next_lease_renew_at:
-                        if not self.pnl_store.renew_worker_lease(
-                            self.lease_owner,
-                            self.lease_ttl_seconds,
-                        ):
-                            lease_acquired = False
-                            raise RuntimeError("实时PnL单写者租约已丢失")
-                        self._next_lease_renew_at = (
-                            now + self.lease_renew_seconds
-                        )
+                        continue
                     if not group_ready:
                         self.stream_consumer.ensure_group()
                         group_ready = True
@@ -590,20 +672,30 @@ class RealtimePnlWorker:
                             int(self.calculation_interval_seconds * 1000),
                         )
                     self.run_once()
+                    if not self._lease_acquired:
+                        self.stop_event.wait(
+                            self.retry_interval_seconds
+                        )
                 except Exception:
+                    # Redis或消费循环异常时采用失败关闭。租约真实状态无法确认，
+                    # 必须停止读写并等待后重新竞争，不能沿用本地旧状态。
+                    self._mark_lease_lost()
                     logger.exception("PnL行情消费循环异常")
                     self.stop_event.wait(self.retry_interval_seconds)
         finally:
             try:
-                if self._buffer and self._renew_current_lease():
+                if self._buffer and self._renew_lease_if_due():
                     self.flush()
             except Exception:
                 # Redis不可用或无法确认租约时采用失败关闭，不执行退出写入。
                 logger.exception(
                     "实时PnL退出时无法确认租约，已放弃刷新并保留Pending"
                 )
-            if lease_acquired:
-                self.pnl_store.release_worker_lease(self.lease_owner)
+            if self._lease_acquired:
+                try:
+                    self.pnl_store.release_worker_lease(self.lease_owner)
+                finally:
+                    self._lease_acquired = False
 
 
 def build_worker() -> RealtimePnlWorker:
