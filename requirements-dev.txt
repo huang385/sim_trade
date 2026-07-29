@@ -3,3 +3,5 @@
 # API测试继续使用当前已验证的Starlette TestClient兼容组合。
 pytest==9.1.1
 httpx==0.28.1
+pandas==3.0.3
+ruff==0.14.14

@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 from decimal import Decimal
 
-from app.enums.order_enums import OffsetFlag, OrderDirection, OrderType
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderDirection,
+    OrderStatus,
+    OrderType,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +28,22 @@ class MatchingOrder:
     limit_price: Decimal
     # 生成快照时数据库中的剩余未成交数量。
     remaining_volume: int
+
+
+@dataclass(frozen=True)
+class MatchingOrderCandidate:
+    """
+    订单到达撮合使用的不可变候选快照。
+
+    该快照只保存跨Session安全的标量和纯撮合输入，不持有SQLAlchemy对象。
+    它只能减少结算前的普通查询；最终结算仍会SELECT FOR UPDATE并校验最新事实。
+    """
+
+    order_id: str
+    exchange_id: str
+    symbol: str
+    status: OrderStatus
+    order: MatchingOrder
 
 
 @dataclass(frozen=True)

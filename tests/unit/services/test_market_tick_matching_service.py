@@ -6,8 +6,19 @@ from unittest.mock import MagicMock, Mock
 
 import pytest
 
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderDirection,
+    OrderStatus,
+    OrderType,
+)
 from app.matching.base import MatchingEngine
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
+from app.matching.models import (
+    MatchResult,
+    MatchingMarketData,
+    MatchingOrder,
+    MatchingOrderCandidate,
+)
 from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
     UnsupportedMarketTickEventError,
@@ -269,3 +280,34 @@ def test_order_arrival_only_queries_and_matches_the_new_candidate():
     service.order_repository.get_by_order_id.assert_called_once()
     assert len(engine.calls) == 1
     settlement.settle.assert_called_once()
+
+
+def test_order_arrival_reuses_immutable_snapshot_without_ordinary_query():
+    service, engine, settlement = make_service(orders=[])
+    event = service.parse_event(make_fields())
+    snapshot = MatchingOrderCandidate(
+        order_id="O-SNAPSHOT",
+        exchange_id="SHFE",
+        symbol="AG2609",
+        status=OrderStatus.ACCEPTED,
+        order=MatchingOrder(
+            direction=OrderDirection.BUY,
+            offset_flag=OffsetFlag.OPEN,
+            order_type=OrderType.LIMIT,
+            limit_price=Decimal("14600"),
+            remaining_volume=5,
+        ),
+    )
+
+    result = service.process_candidate_order(
+        order_id="O-SNAPSHOT",
+        event=event,
+        stream_message_id="1-0",
+        order_snapshot=snapshot,
+    )
+
+    assert result.candidate_count == 1
+    service.order_repository.get_by_order_id.assert_not_called()
+    assert len(engine.calls) == 1
+    settlement.settle.assert_called_once()
+    assert settlement.settle.call_args.args[1].order_id == "O-SNAPSHOT"

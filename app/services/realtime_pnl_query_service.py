@@ -1,16 +1,20 @@
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy.orm import Session
 from redis.exceptions import RedisError
+from sqlalchemy.orm import Session
 
 from app.common.exceptions import ResourceNotFoundError
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.position_repository import PositionRepository
+from app.schemas.account_schema import AccountResponse
 from app.schemas.pnl_schema import (
     AccountRealtimePnlResponse,
+    AccountTradingSnapshotResponse,
     PositionRealtimePnlResponse,
+    PositionTradingSnapshotResponse,
 )
+from app.schemas.position_schema import PositionResponse
 
 
 def _decimal(values: dict[str, str], name: str) -> Decimal:
@@ -26,8 +30,8 @@ class RealtimePnlQueryService:
     """
     提供实时盈亏只读查询。
 
-    Redis实时Hash存在时优先返回；快照尚未产生或已丢失时，回退到PostgreSQL最近
-    一次成功持久化的字段，并通过data_source让调用方识别数据新鲜度。
+    Redis实时Hash存在时优先返回；快照尚未产生或Redis暂时不可用时，回退到
+    PostgreSQL最近一次成功持久化的数据，并通过data_source标记数据来源。
     """
 
     def __init__(
@@ -45,18 +49,14 @@ class RealtimePnlQueryService:
             position_repository or PositionRepository()
         )
 
-    def get_account(
-        self,
-        db: Session,
-        account_id: str,
+    @staticmethod
+    def _account_pnl_response(
+        *,
+        values: dict[str, str],
+        account,
     ) -> AccountRealtimePnlResponse:
-        normalized = account_id.strip()
-        try:
-            values = self.pnl_store.get_account(normalized)
-        except RedisError:
-            # 查询接口允许在Redis短暂不可用时返回最近一次持久化结果；
-            # 不把PostgreSQL事实数据误报为实时数据。
-            values = {}
+        """把Redis快照或已读取的账户对象转换为统一响应。"""
+
         if values:
             return AccountRealtimePnlResponse(
                 account_id=values["account_id"],
@@ -77,16 +77,6 @@ class RealtimePnlQueryService:
                 updated_at=values["updated_at"],
                 data_source="REDIS_REALTIME",
             )
-
-        account = self.account_repository.get_by_account_id(
-            db,
-            normalized,
-        )
-        if account is None:
-            raise ResourceNotFoundError(
-                "账户不存在",
-                error_code="ACCOUNT_NOT_FOUND",
-            )
         return AccountRealtimePnlResponse(
             account_id=account.account_id,
             unrealized_pnl=account.unrealized_pnl,
@@ -101,16 +91,14 @@ class RealtimePnlQueryService:
             data_source="POSTGRES_SNAPSHOT",
         )
 
-    def get_position(
-        self,
-        db: Session,
-        position_id: str,
+    @staticmethod
+    def _position_pnl_response(
+        *,
+        values: dict[str, str],
+        position,
     ) -> PositionRealtimePnlResponse:
-        normalized = position_id.strip()
-        try:
-            values = self.pnl_store.get_position(normalized)
-        except RedisError:
-            values = {}
+        """把Redis快照或同批持仓对象转换为统一响应。"""
+
         if values:
             return PositionRealtimePnlResponse(
                 position_id=values["position_id"],
@@ -132,18 +120,7 @@ class RealtimePnlQueryService:
                 updated_at=values["updated_at"],
                 data_source="REDIS_REALTIME",
             )
-
-        position = self.position_repository.get_by_position_id(
-            db,
-            normalized,
-        )
-        if position is None:
-            raise ResourceNotFoundError(
-                "持仓不存在",
-                error_code="POSITION_NOT_FOUND",
-            )
-        # PostgreSQL当前不保存mark_price和行情事件编号，回退响应明确返回空值，
-        # 避免把未知行情伪装成0价格。
+        # PostgreSQL不保存行情事件和盯市价，缺失时明确返回None，避免伪造0价格。
         return PositionRealtimePnlResponse(
             position_id=position.position_id,
             account_id=position.account_id,
@@ -157,4 +134,125 @@ class RealtimePnlQueryService:
             source_event_id=None,
             updated_at=position.updated_at,
             data_source="POSTGRES_SNAPSHOT",
+        )
+
+    def get_account(
+        self,
+        db: Session,
+        account_id: str,
+    ) -> AccountRealtimePnlResponse:
+        normalized = account_id.strip()
+        try:
+            values = self.pnl_store.get_account(normalized)
+        except RedisError:
+            values = {}
+        if values:
+            return self._account_pnl_response(
+                values=values,
+                account=None,
+            )
+        account = self.account_repository.get_by_account_id(
+            db,
+            normalized,
+        )
+        if account is None:
+            raise ResourceNotFoundError(
+                "账户不存在",
+                error_code="ACCOUNT_NOT_FOUND",
+            )
+        return self._account_pnl_response(
+            values=values,
+            account=account,
+        )
+
+    def get_position(
+        self,
+        db: Session,
+        position_id: str,
+    ) -> PositionRealtimePnlResponse:
+        normalized = position_id.strip()
+        try:
+            values = self.pnl_store.get_position(normalized)
+        except RedisError:
+            values = {}
+        if values:
+            return self._position_pnl_response(
+                values=values,
+                position=None,
+            )
+        position = self.position_repository.get_by_position_id(
+            db,
+            normalized,
+        )
+        if position is None:
+            raise ResourceNotFoundError(
+                "持仓不存在",
+                error_code="POSITION_NOT_FOUND",
+            )
+        return self._position_pnl_response(
+            values=values,
+            position=position,
+        )
+
+    def get_account_trading_snapshot(
+        self,
+        db: Session,
+        account_id: str,
+    ) -> AccountTradingSnapshotResponse:
+        """
+        批量生成账户页面快照。
+
+        PostgreSQL固定执行账户和持仓两次集合查询，Redis固定执行一次Pipeline；
+        Redis部分或全部缺失时直接使用这批对象回退，不产生逐持仓SQL。
+        """
+
+        normalized = account_id.strip()
+        account = self.account_repository.get_by_account_id(
+            db,
+            normalized,
+        )
+        if account is None:
+            raise ResourceNotFoundError(
+                "账户不存在",
+                error_code="ACCOUNT_NOT_FOUND",
+            )
+        positions = list(
+            self.position_repository.list_by_account(
+                db,
+                normalized,
+            )
+        )
+        try:
+            account_values, position_values = (
+                self.pnl_store.get_account_with_positions(
+                    account_id=normalized,
+                    position_ids=[
+                        position.position_id
+                        for position in positions
+                    ],
+                )
+            )
+        except RedisError:
+            account_values = {}
+            position_values = {}
+
+        return AccountTradingSnapshotResponse(
+            account=AccountResponse.model_validate(account),
+            pnl=self._account_pnl_response(
+                values=account_values,
+                account=account,
+            ),
+            positions=[
+                PositionTradingSnapshotResponse(
+                    position=PositionResponse.model_validate(position),
+                    pnl=self._position_pnl_response(
+                        values=position_values.get(
+                            position.position_id,
+                            {},
+                        ),
+                        position=position,
+                    ),
+                )
+                for position in positions
+            ],
         )

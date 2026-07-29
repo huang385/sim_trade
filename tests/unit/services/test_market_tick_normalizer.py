@@ -10,7 +10,6 @@ from app.services.market_tick_normalizer import (
     MarketTickNormalizer,
 )
 from app.services.market_tick_validation_service import (
-    MarketTickValidationError,
     MarketTickValidationService,
 )
 

@@ -16,7 +16,6 @@ from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.market_tick_stream_consumer import (
-    MarketStreamMessage,
     MarketTickStreamConsumer,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore

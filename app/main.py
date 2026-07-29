@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 # 必须导入models，确保SQLAlchemy知道有哪些表
-from app import models
+from app import models  # noqa: F401  # 注册全部SQLAlchemy表
 from app.api.exception_handlers import app_error_handler
 from app.api.router import api_router
 from app.common.exceptions import AppError

@@ -81,6 +81,8 @@ def get_order(
 @router.get("", response_model=list[OrderResponse])
 def list_orders(
     account_id: str = Query(min_length=1, max_length=64),
+    after_id: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -91,4 +93,9 @@ def list_orders(
     时间范围、状态过滤和游标分页。
     """
 
-    return service.list_orders(db=db, account_id=account_id)
+    return service.list_orders(
+        db=db,
+        account_id=account_id,
+        after_id=after_id,
+        limit=limit,
+    )

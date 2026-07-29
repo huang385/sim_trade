@@ -72,15 +72,26 @@ class OrderRepository:
     def list_by_account(
         db: Session,
         account_id: str,
+        *,
+        after_id: int | None = None,
+        limit: int = 100,
     ) -> Sequence[Order]:
-        """按数据库写入顺序查询指定账户的全部订单。"""
+        """使用自增主键游标有界查询账户订单。"""
 
-        statement = (
-            select(Order)
-            .where(Order.account_id == account_id)
-            .order_by(Order.id)
+        statement = select(Order).where(
+            Order.account_id == account_id
         )
-        return db.scalars(statement).all()
+        if after_id is not None:
+            statement = (
+                statement.where(Order.id > after_id)
+                .order_by(Order.id)
+                .limit(limit)
+            )
+            return db.scalars(statement).all()
+        rows = db.scalars(
+            statement.order_by(Order.id.desc()).limit(limit)
+        ).all()
+        return list(reversed(rows))
 
     @staticmethod
     def list_active_after_id(

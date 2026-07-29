@@ -188,6 +188,11 @@ class OrderEventConsumerWorker:
                         order_id=result.order_id,
                         exchange_id=result.exchange_id,
                         symbol=result.symbol,
+                        order_snapshot=getattr(
+                            result,
+                            "order_snapshot",
+                            None,
+                        ),
                     )
                 )
 

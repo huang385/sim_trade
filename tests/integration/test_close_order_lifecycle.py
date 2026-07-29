@@ -13,7 +13,6 @@ from app.core.database import SessionLocal
 from app.matching.models import MatchResult
 from app.models.account import Account
 from app.models.order import Order
-from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation

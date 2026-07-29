@@ -4,8 +4,14 @@ from typing import Mapping
 
 from sqlalchemy.orm import Session
 
-from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.enums.order_enums import (
+    OffsetFlag,
+    OrderDirection,
+    OrderStatus,
+    OrderType,
+)
 from app.infrastructure.active_order_index import ActiveOrderIndex
+from app.matching.models import MatchingOrder, MatchingOrderCandidate
 from app.repositories.order_repository import OrderRepository
 
 
@@ -40,6 +46,7 @@ class AcceptedOrderProcessResult:
     exchange_id: str
     symbol: str
     action: str
+    order_snapshot: MatchingOrderCandidate | None = None
 
 
 class AcceptedOrderEventService:
@@ -216,5 +223,18 @@ class AcceptedOrderEventService:
                 else "REGISTERED"
                 if written
                 else "DUPLICATE"
+            ),
+            order_snapshot=MatchingOrderCandidate(
+                order_id=order.order_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
+                status=OrderStatus(order.status),
+                order=MatchingOrder(
+                    direction=OrderDirection(order.direction),
+                    offset_flag=OffsetFlag(order.offset_flag),
+                    order_type=OrderType(order.order_type),
+                    limit_price=order.limit_price,
+                    remaining_volume=order.remaining_volume,
+                ),
             ),
         )

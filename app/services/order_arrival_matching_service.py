@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from app.matching.models import MatchingOrderCandidate
 from app.schemas.matching_schema import MarketTickMatchResult
 from app.services.live_market_snapshot_service import (
     LiveMarketSnapshotService,
@@ -42,6 +43,7 @@ class OrderArrivalMatchingService:
         order_id: str,
         exchange_id: str,
         symbol: str,
+        order_snapshot: MatchingOrderCandidate | None = None,
     ) -> OrderArrivalMatchResult:
         event = self.live_market_snapshot_service.get_matching_event(
             exchange_id=exchange_id,
@@ -56,6 +58,7 @@ class OrderArrivalMatchingService:
             order_id=order_id,
             stream_message_id=event.stream_message_id,
             event=event.parsed_event,
+            order_snapshot=order_snapshot,
         )
         return OrderArrivalMatchResult(
             action=(

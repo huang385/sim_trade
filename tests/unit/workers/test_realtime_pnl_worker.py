@@ -1,5 +1,5 @@
 import json
-from types import MappingProxyType, SimpleNamespace
+from types import MappingProxyType
 
 from redis.exceptions import ConnectionError
 

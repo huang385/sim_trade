@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,6 +22,8 @@ def make_order(**overrides):
         "remaining_volume": 2,
         "order_type": "LIMIT",
         "offset_flag": "OPEN",
+        "direction": "BUY",
+        "limit_price": Decimal("3500"),
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -60,6 +63,9 @@ def test_accepted_order_is_registered():
     result = service.process(Mock(), make_fields())
 
     assert result.action == "REGISTERED"
+    assert result.order_snapshot is not None
+    assert result.order_snapshot.order_id == "O-1"
+    assert result.order_snapshot.order.remaining_volume == 2
     active_index.add_active_order.assert_called_once()
     active_index.remove_active_order.assert_not_called()
 

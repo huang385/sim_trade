@@ -1,6 +1,5 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 from sqlalchemy import create_engine

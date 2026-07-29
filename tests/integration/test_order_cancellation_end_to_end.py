@@ -10,7 +10,6 @@ from redis.exceptions import (
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.common.time_utils import utc_now

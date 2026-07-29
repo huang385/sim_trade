@@ -3,6 +3,8 @@ from decimal import Decimal
 import json
 from unittest.mock import Mock
 
+from redis.exceptions import WatchError
+
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.schemas.pnl_schema import PositionRealtimePnl
 
@@ -121,6 +123,31 @@ def test_contract_position_ids_many_uses_one_pipeline():
     assert pipeline.smembers.call_count == 2
 
 
+def test_account_with_positions_uses_one_pipeline():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [
+        {"account_id": "A001"},
+        {"position_id": "P001"},
+        {"position_id": "P002"},
+    ]
+    store = RealtimePnlStore(redis_client)
+
+    account, positions = store.get_account_with_positions(
+        account_id="A001",
+        position_ids=["P001", "P002"],
+    )
+
+    assert account == {"account_id": "A001"}
+    assert positions == {
+        "P001": {"position_id": "P001"},
+        "P002": {"position_id": "P002"},
+    }
+    redis_client.pipeline.assert_called_once_with(transaction=False)
+    assert pipeline.hgetall.call_count == 3
+    pipeline.execute.assert_called_once()
+
+
 def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
     redis_client = Mock()
     redis_client.smembers.return_value = {
@@ -205,3 +232,105 @@ def test_closed_position_prunes_empty_account_and_contract_meta_indexes():
             "pnl:index_keys:contracts",
         ],
     ]
+
+
+def test_dirty_position_scan_cursor_rotates_past_unprocessable_first_batch():
+    redis_client = Mock()
+    redis_client.eval.return_value = []
+    # 第一次从0读取到坏数据并推进到游标9；下一次从9继续读取正常数据。
+    redis_client.get.side_effect = ["0", "9"]
+    redis_client.sscan.side_effect = [
+        (9, ["P-BAD"]),
+        (0, ["P-GOOD"]),
+    ]
+    redis_client.hmget.side_effect = [["v-bad"], ["v-good"]]
+    store = RealtimePnlStore(redis_client)
+
+    assert store.list_dirty_positions(1) == [("P-BAD", "v-bad")]
+    assert store.list_dirty_positions(1) == [("P-GOOD", "v-good")]
+
+    assert redis_client.sscan.call_args_list[0].kwargs["cursor"] == 0
+    assert redis_client.sscan.call_args_list[1].kwargs["cursor"] == 9
+    assert redis_client.set.call_args_list[0].args[-1] == "9"
+    assert redis_client.set.call_args_list[1].args[-1] == "0"
+
+
+def test_dirty_position_scan_cursor_is_reused_after_store_restart():
+    redis_client = Mock()
+    redis_client.eval.return_value = []
+    redis_client.get.return_value = "27"
+    redis_client.sscan.return_value = (0, ["P-AFTER-RESTART"])
+    redis_client.hmget.return_value = ["v1"]
+
+    # 新实例没有任何进程内游标，仍从Redis保存的27继续读取。
+    result = RealtimePnlStore(redis_client).list_dirty_positions(10)
+
+    assert result == [("P-AFTER-RESTART", "v1")]
+    assert redis_client.sscan.call_args.kwargs["cursor"] == 27
+
+
+def test_rebuild_active_indexes_retries_watch_conflict_then_succeeds():
+    redis_client = Mock()
+    first_pipeline = Mock()
+    first_pipeline.get.return_value = "3"
+    first_pipeline.smembers.return_value = set()
+    first_pipeline.execute.side_effect = WatchError("conflict")
+    second_pipeline = Mock()
+    second_pipeline.get.return_value = "3"
+    second_pipeline.smembers.return_value = set()
+    second_pipeline.execute.return_value = []
+    redis_client.pipeline.side_effect = [
+        first_pipeline,
+        second_pipeline,
+    ]
+    store = RealtimePnlStore(redis_client)
+
+    rebuilt = store.rebuild_active_indexes(
+        expected_cache_version="3",
+        positions=[("A001", "DCE", "JD2609", "P001")],
+    )
+
+    assert rebuilt is True
+    first_pipeline.reset.assert_called_once()
+    second_pipeline.reset.assert_called_once()
+
+
+def test_rebuild_active_indexes_returns_false_after_watch_retry_limit():
+    redis_client = Mock()
+    pipelines = []
+    for _ in range(3):
+        pipeline = Mock()
+        pipeline.get.return_value = "8"
+        pipeline.smembers.return_value = set()
+        pipeline.execute.side_effect = WatchError("conflict")
+        pipelines.append(pipeline)
+    redis_client.pipeline.side_effect = pipelines
+    store = RealtimePnlStore(redis_client)
+
+    rebuilt = store.rebuild_active_indexes(
+        expected_cache_version="8",
+        positions=[],
+    )
+
+    assert rebuilt is False
+    assert all(
+        pipeline.reset.call_count == 1 for pipeline in pipelines
+    )
+
+
+def test_rebuild_active_indexes_does_not_overwrite_newer_version():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.get.return_value = "12"
+    store = RealtimePnlStore(redis_client)
+
+    rebuilt = store.rebuild_active_indexes(
+        expected_cache_version="11",
+        positions=[("A001", "DCE", "JD2609", "P001")],
+    )
+
+    assert rebuilt is False
+    pipeline.unwatch.assert_called_once()
+    pipeline.multi.assert_not_called()
+    pipeline.execute.assert_not_called()
+    pipeline.reset.assert_called_once()

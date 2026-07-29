@@ -42,6 +42,8 @@ class TradeRepository:
         *,
         account_id: str | None = None,
         order_id: str | None = None,
+        after_id: int | None = None,
+        limit: int = 100,
     ) -> Sequence[Trade]:
         """
         按账户或订单组合查询成交。
@@ -55,7 +57,17 @@ class TradeRepository:
             statement = statement.where(Trade.account_id == account_id)
         if order_id is not None:
             statement = statement.where(Trade.order_id == order_id)
-        return db.scalars(statement.order_by(Trade.id)).all()
+        if after_id is not None:
+            statement = (
+                statement.where(Trade.id > after_id)
+                .order_by(Trade.id)
+                .limit(limit)
+            )
+            return db.scalars(statement).all()
+        rows = db.scalars(
+            statement.order_by(Trade.id.desc()).limit(limit)
+        ).all()
+        return list(reversed(rows))
 
     @staticmethod
     def add(db: Session, trade: Trade) -> None:

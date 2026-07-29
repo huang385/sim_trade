@@ -17,7 +17,6 @@ from app.infrastructure.order_event_publisher import OrderEventPublisher
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.redis_keys import (
     ACTIVE_ORDERS_ALL_KEY,
-    ORDER_EVENT_STREAM,
     account_active_orders_key,
     active_order_key,
     instrument_active_orders_key,
@@ -151,7 +150,7 @@ def test_api_outbox_stream_consumer_registers_active_order(integration_context):
             active_order_key(order_id),
             mapping={"limit_price": "1.000000"},
         )
-        duplicate_message_id = redis_client.xadd(
+        redis_client.xadd(
             stream_name,
             fields={
                 "event_id": event_id,

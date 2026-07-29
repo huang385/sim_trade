@@ -661,11 +661,15 @@ class TradeQueryService:
         *,
         account_id: str | None = None,
         order_id: str | None = None,
+        after_id: int | None = None,
+        limit: int = 100,
     ) -> Sequence[Trade]:
         return self.repository.list(
             db,
             account_id=account_id.strip() if account_id else None,
             order_id=order_id.strip() if order_id else None,
+            after_id=after_id,
+            limit=limit,
         )
 
     def list_position_allocations(

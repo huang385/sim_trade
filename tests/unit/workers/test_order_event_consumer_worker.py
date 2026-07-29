@@ -83,6 +83,7 @@ def test_accepted_order_triggers_arrival_matching_before_ack():
         order_id="O-1",
         exchange_id="DCE",
         symbol="JD2609",
+        order_snapshot=None,
     )
     stream_consumer.acknowledge.assert_called_once_with("1-0")
 

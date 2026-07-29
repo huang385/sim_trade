@@ -12,7 +12,11 @@ from app.enums.order_enums import (
 )
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.matching.base import MatchingEngine
-from app.matching.models import MatchingMarketData, MatchingOrder
+from app.matching.models import (
+    MatchingMarketData,
+    MatchingOrder,
+    MatchingOrderCandidate,
+)
 from app.repositories.order_repository import OrderRepository
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.schemas.matching_schema import MarketTickMatchResult
@@ -170,6 +174,7 @@ class MarketTickMatchingService:
         order_id: str,
         event: ParsedMarketTickEvent,
         stream_message_id: str,
+        order_snapshot: MatchingOrderCandidate | None = None,
     ) -> MarketTickMatchResult:
         """
         使用当前类型化盘口只检查一笔已知新到达订单。
@@ -182,6 +187,11 @@ class MarketTickMatchingService:
             order_ids=[order_id],
             event=event,
             stream_message_id=stream_message_id,
+            order_snapshots=(
+                {order_id: order_snapshot}
+                if order_snapshot is not None
+                else None
+            ),
         )
 
     def _process_order_ids(
@@ -190,6 +200,11 @@ class MarketTickMatchingService:
         order_ids: list[str],
         event: ParsedMarketTickEvent,
         stream_message_id: str,
+        order_snapshots: Mapping[
+            str,
+            MatchingOrderCandidate,
+        ]
+        | None = None,
     ) -> MarketTickMatchResult:
         """对调用方明确给出的候选订单逐笔执行事实校验、撮合和结算。"""
 
@@ -206,22 +221,50 @@ class MarketTickMatchingService:
 
         for order_id in order_ids:
             try:
-                # 预读只用于生成引擎输入；真正写入前 SettlementService 会再次
-                # SELECT FOR UPDATE 并按数据库最新状态校验和收缩成交量。
-                with self.session_factory() as read_db:
-                    order = self.order_repository.get_by_order_id(read_db, order_id)
-                    if not self._database_order_is_candidate(order, event):
+                candidate = (
+                    order_snapshots.get(order_id)
+                    if order_snapshots is not None
+                    else None
+                )
+                if candidate is not None:
+                    # 订单事件服务刚刚从数据库读取并生成了不可变标量快照，
+                    # 到达撮合直接复用它，避免在另一个Session中重复普通查询。
+                    if not (
+                        candidate.order_id == order_id
+                        and candidate.status.value in self.ACTIVE_STATUSES
+                        and candidate.order.remaining_volume > 0
+                        and candidate.order.order_type == OrderType.LIMIT
+                        and candidate.order.offset_flag.value
+                        in self.SUPPORTED_OFFSET_FLAGS
+                        and candidate.exchange_id == event.exchange_id
+                        and candidate.symbol == event.symbol
+                    ):
                         skipped += 1
                         continue
-                    order_snapshot = MatchingOrder(
-                        direction=OrderDirection(order.direction),
-                        offset_flag=OffsetFlag(order.offset_flag),
-                        order_type=OrderType(order.order_type),
-                        limit_price=order.limit_price,
-                        remaining_volume=order.remaining_volume,
-                    )
+                    matching_order = candidate.order
+                else:
+                    # 普通Tick或未提供快照的兼容调用仍查询数据库。真正写入前
+                    # SettlementService还会SELECT FOR UPDATE并校验最新状态。
+                    with self.session_factory() as read_db:
+                        order = self.order_repository.get_by_order_id(
+                            read_db,
+                            order_id,
+                        )
+                        if not self._database_order_is_candidate(
+                            order,
+                            event,
+                        ):
+                            skipped += 1
+                            continue
+                        matching_order = MatchingOrder(
+                            direction=OrderDirection(order.direction),
+                            offset_flag=OffsetFlag(order.offset_flag),
+                            order_type=OrderType(order.order_type),
+                            limit_price=order.limit_price,
+                            remaining_volume=order.remaining_volume,
+                        )
                 match_result = self.matching_engine.match(
-                    order_snapshot,
+                    matching_order,
                     market_snapshot,
                 )
                 if not match_result.matched:
@@ -232,7 +275,7 @@ class MarketTickMatchingService:
                 # 纯撮合结果不携带订单编号或 Redis 信息；编排层在确认成交后
                 # 组合结算命令，确保幂等和 Trade 追踪字段仍完整保留。
                 command = SettlementCommand(
-                    order_id=order.order_id,
+                    order_id=order_id,
                     market_event_id=event.event_id,
                     market_stream_message_id=stream_message_id,
                     tick_event_time=event.tick.event_time,

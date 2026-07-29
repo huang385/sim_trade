@@ -523,12 +523,17 @@ class OrderService:
         self,
         db: Session,
         account_id: str,
+        *,
+        after_id: int | None = None,
+        limit: int = 100,
     ) -> Sequence[Order]:
-        """查询指定账户的订单列表。"""
+        """有界查询指定账户最近订单或游标后的增量订单。"""
 
         return self.order_repository.list_by_account(
             db=db,
             account_id=account_id.strip(),
+            after_id=after_id,
+            limit=limit,
         )
 
 

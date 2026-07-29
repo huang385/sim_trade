@@ -6,6 +6,7 @@ from app.core.redis_client import redis_client
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.schemas.pnl_schema import (
     AccountRealtimePnlResponse,
+    AccountTradingSnapshotResponse,
     PositionRealtimePnlResponse,
 )
 from app.services.realtime_pnl_query_service import RealtimePnlQueryService
@@ -36,6 +37,22 @@ def get_account_realtime_pnl(
     """查询账户盘中实时盈亏，Redis无快照时返回PostgreSQL持久化结果。"""
 
     return service.get_account(db, account_id)
+
+
+@router.get(
+    "/api/accounts/{account_id}/trading-snapshot",
+    response_model=AccountTradingSnapshotResponse,
+)
+def get_account_trading_snapshot(
+    account_id: str,
+    db: Session = Depends(get_db),
+    service: RealtimePnlQueryService = Depends(
+        get_realtime_pnl_query_service
+    ),
+):
+    """一次返回页面所需的账户、持仓和实时盈亏，消除轮询N+1请求。"""
+
+    return service.get_account_trading_snapshot(db, account_id)
 
 
 @router.get(

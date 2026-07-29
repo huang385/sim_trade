@@ -20,6 +20,13 @@ PNL_DEAD_LETTER_STREAM = settings.pnl_dead_letter_stream
 PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
 PNL_DIRTY_ACCOUNTS_KEY = "pnl:dirty_accounts"
 PNL_DIRTY_POSITION_VERSIONS_KEY = "pnl:dirty_position_versions"
+# Dirty持仓使用SSCAN分批读取时保存上次游标。
+# 游标放在Redis而不是Worker内存中，进程重启后仍会从上次位置继续轮转，
+# 避免集合头部的异常数据长期占满批次并饿死后续正常持仓。
+PNL_DIRTY_POSITION_SCAN_CURSOR_KEY = "pnl:dirty_position_scan_cursor"
+# SSCAN一次可能返回多于COUNT提示值，超出当前批次的成员暂存在该List，
+# 下一轮优先读取，避免为了限制批大小而丢掉扫描结果。
+PNL_DIRTY_POSITION_SCAN_BUFFER_KEY = "pnl:dirty_position_scan_buffer"
 PNL_POSITION_CACHE_VERSION_KEY = "pnl:position_cache_version"
 PNL_DIRTY_ACCOUNT_FACTS_KEY = "pnl:dirty_account_facts"
 PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY = (

@@ -3,6 +3,9 @@ from decimal import Decimal
 
 from pydantic import BaseModel
 
+from app.schemas.account_schema import AccountResponse
+from app.schemas.position_schema import PositionResponse
+
 
 class PositionRealtimePnl(BaseModel):
     """Redis中的单持仓盘中实时盈亏绝对快照。"""
@@ -68,3 +71,23 @@ class AccountRealtimePnlResponse(BaseModel):
     risk_ratio: Decimal
     updated_at: datetime
     data_source: str
+
+
+class PositionTradingSnapshotResponse(BaseModel):
+    """账户级快照中的单条持仓及其对应实时盈亏。"""
+
+    position: PositionResponse
+    pnl: PositionRealtimePnlResponse
+
+
+class AccountTradingSnapshotResponse(BaseModel):
+    """
+    测试交易页面一次刷新所需的完整账户快照。
+
+    账户和持仓事实来自PostgreSQL，盘中资金与盈亏优先来自Redis；Redis缺失时
+    使用同一批已查询的数据库对象回退，不会再次逐持仓查询数据库。
+    """
+
+    account: AccountResponse
+    pnl: AccountRealtimePnlResponse
+    positions: list[PositionTradingSnapshotResponse]

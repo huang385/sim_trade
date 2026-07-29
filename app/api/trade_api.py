@@ -45,9 +45,17 @@ def list_trade_position_allocations(
 def list_trades(
     account_id: str | None = Query(default=None, min_length=1, max_length=64),
     order_id: str | None = Query(default=None, min_length=1, max_length=64),
+    after_id: int | None = Query(default=None, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
     service: TradeQueryService = Depends(get_trade_query_service),
 ):
     """按账户或订单查询成交；当前数据量较小，后续可增加游标分页。"""
 
-    return service.list(db, account_id=account_id, order_id=order_id)
+    return service.list(
+        db,
+        account_id=account_id,
+        order_id=order_id,
+        after_id=after_id,
+        limit=limit,
+    )

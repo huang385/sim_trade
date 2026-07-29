@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Iterable
 
 from redis import Redis
+from redis.exceptions import WatchError
 
 from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
@@ -14,6 +15,8 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_CONTRACT_VERSIONS_KEY,
     PNL_DIRTY_ACCOUNTS_KEY,
     PNL_DIRTY_POSITIONS_KEY,
+    PNL_DIRTY_POSITION_SCAN_BUFFER_KEY,
+    PNL_DIRTY_POSITION_SCAN_CURSOR_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_CACHE_VERSION_KEY,
     PNL_WORKER_LEASE_KEY,
@@ -40,6 +43,12 @@ if current == ARGV[2] then
     return 1
 end
 return 0
+"""
+
+POP_DIRTY_SCAN_BUFFER_SCRIPT = """
+local items = redis.call('LRANGE', KEYS[1], 0, tonumber(ARGV[1]) - 1)
+redis.call('LTRIM', KEYS[1], tonumber(ARGV[1]), -1)
+return items
 """
 
 CLEAR_DIRTY_CONTRACT_IF_UNCHANGED_SCRIPT = """
@@ -614,6 +623,31 @@ class RealtimePnlStore:
             pipeline.hgetall(pnl_account_key(account_id))
         return dict(zip(ids, pipeline.execute(), strict=True))
 
+    def get_account_with_positions(
+        self,
+        *,
+        account_id: str,
+        position_ids: Iterable[str],
+    ) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+        """
+        使用一个Pipeline读取账户快照及其全部持仓快照。
+
+        该方法供账户级交易快照接口使用，避免页面先查账户、再按持仓逐个访问
+        Redis。Pipeline只减少网络往返，不改变各Hash独立存储的现有结构。
+        """
+
+        ids = list(dict.fromkeys(position_ids))
+        pipeline = self.redis_client.pipeline(transaction=False)
+        pipeline.hgetall(pnl_account_key(account_id))
+        for position_id in ids:
+            pipeline.hgetall(pnl_position_key(position_id))
+        values = pipeline.execute()
+        account_values = values[0] if values else {}
+        position_values = dict(
+            zip(ids, values[1:], strict=True)
+        )
+        return account_values, position_values
+
     def get_position(
         self,
         position_id: str,
@@ -733,19 +767,72 @@ class RealtimePnlStore:
         self,
         batch_size: int,
     ) -> list[tuple[str, str]]:
-        # SSCAN按游标有界读取，避免Dirty集合很大时SMEMBERS一次搬入全部成员。
-        position_ids: list[str] = []
-        cursor = 0
+        """
+        按持久化游标轮转读取Dirty持仓。
+
+        游标保存在Redis中，因此本批无法处理的成员仍留在Set里，但下一批会从
+        后续桶继续扫描；即使Worker重启，也不会总从cursor=0读取同一批坏数据。
+        """
+
+        if batch_size <= 0:
+            return []
+
+        # 上一轮SSCAN可能返回超过batch_size的成员，先原子取出溢出部分。
+        # 即使取出后进程崩溃，这些成员仍保留在主Dirty Set，后续扫描可恢复。
+        buffered = self.redis_client.eval(
+            POP_DIRTY_SCAN_BUFFER_SCRIPT,
+            1,
+            PNL_DIRTY_POSITION_SCAN_BUFFER_KEY,
+            batch_size,
+        ) or []
+        position_ids: list[str] = list(
+            dict.fromkeys(buffered)
+        )
+        seen = set(position_ids)
+        raw_cursor = self.redis_client.get(
+            PNL_DIRTY_POSITION_SCAN_CURSOR_KEY
+        )
+        try:
+            cursor = int(raw_cursor or 0)
+        except (TypeError, ValueError):
+            # 游标键异常时只需从头恢复；Dirty成员本身仍保留在Set中。
+            cursor = 0
+
+        start_cursor = cursor
+        first_scan = True
         while len(position_ids) < batch_size:
             cursor, members = self.redis_client.sscan(
                 PNL_DIRTY_POSITIONS_KEY,
                 cursor=cursor,
                 count=batch_size,
             )
-            position_ids.extend(members)
-            if cursor == 0:
+            overflow: list[str] = []
+            for member in members:
+                if member in seen:
+                    continue
+                seen.add(member)
+                if len(position_ids) < batch_size:
+                    position_ids.append(member)
+                else:
+                    overflow.append(member)
+            if overflow:
+                self.redis_client.rpush(
+                    PNL_DIRTY_POSITION_SCAN_BUFFER_KEY,
+                    *overflow,
+                )
+            if cursor == 0 or (
+                not first_scan and cursor == start_cursor
+            ):
                 break
-        position_ids = list(dict.fromkeys(position_ids))[:batch_size]
+            first_scan = False
+
+        # 在返回业务数据前保存下一次起点。本批成员持久化失败不会回滚游标，
+        # 因而一个坏成员无法永久阻塞后续正常成员；集合成员本身不会被误删。
+        self.redis_client.set(
+            PNL_DIRTY_POSITION_SCAN_CURSOR_KEY,
+            str(cursor),
+        )
+        position_ids = position_ids[:batch_size]
         if not position_ids:
             return []
         versions = self.redis_client.hmget(

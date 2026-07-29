@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Mapping
 
 from redis import Redis
 from redis.exceptions import ResponseError

@@ -4,7 +4,6 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex

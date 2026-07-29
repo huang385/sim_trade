@@ -424,20 +424,13 @@ async function refreshRealtime() {
 
     try {
         const accountPath = encodeURIComponent(state.accountId);
-        const [account, accountPnl, positions] = await Promise.all([
-            apiFetch(`/api/accounts/${accountPath}`),
-            apiFetch(`/api/accounts/${accountPath}/pnl/realtime`),
-            apiFetch(`/api/positions?account_id=${accountPath}`),
-        ]);
-
-        const positionPnl = await Promise.all(positions.map(async (position) => {
-            const id = encodeURIComponent(position.position_id);
-            const pnl = await apiFetch(`/api/positions/${id}/pnl/realtime`);
-            return {position, pnl};
-        }));
+        const snapshot = await apiFetch(
+            `/api/accounts/${accountPath}/trading-snapshot`,
+        );
+        const positionPnl = snapshot.positions;
 
         state.positions = positionPnl;
-        renderAccount(account, accountPnl);
+        renderAccount(snapshot.account, snapshot.pnl);
         renderPositions(positionPnl);
         setConnection(true, "后端与实时快照已连接");
         elements.lastRefresh.textContent = `刷新 ${formatTime(new Date().toISOString())}`;
@@ -454,8 +447,8 @@ async function refreshOrdersAndTrades() {
     try {
         const accountPath = encodeURIComponent(state.accountId);
         const [orders, trades] = await Promise.all([
-            apiFetch(`/api/orders?account_id=${accountPath}`),
-            apiFetch(`/api/trades?account_id=${accountPath}`),
+            apiFetch(`/api/orders?account_id=${accountPath}&limit=100`),
+            apiFetch(`/api/trades?account_id=${accountPath}&limit=100`),
         ]);
         renderOrders(orders);
         renderTrades(trades);

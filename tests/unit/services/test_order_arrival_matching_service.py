@@ -53,4 +53,5 @@ def test_ready_tick_reuses_existing_matching_service():
         order_id="O-1",
         stream_message_id="123-0",
         event=event.parsed_event,
+        order_snapshot=None,
     )
