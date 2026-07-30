@@ -2,6 +2,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import (
+    BusinessValidationError,
     DataAccessError,
     ResourceConflictError,
     ResourceNotFoundError,
@@ -65,6 +66,46 @@ class AdminUserService:
 
     def list_users(self, db: Session):
         return self.repository.list_all(db)
+
+    def change_password(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        new_password: str,
+    ) -> AppUser:
+        """
+        锁定数据库用户并真实更新密码哈希。
+
+        本阶段只提供管理员Service能力，不开放匿名或公共改密接口。事务提交
+        和回滚始终由Service负责，Repository只执行查询。
+        """
+
+        if len(new_password) < 12:
+            raise BusinessValidationError(
+                "密码至少需要12个字符",
+                error_code="PASSWORD_TOO_SHORT",
+            )
+        user = self.repository.get_by_user_id_for_update(
+            db,
+            user_id.strip(),
+        )
+        if user is None:
+            raise ResourceNotFoundError(
+                "用户不存在",
+                error_code="USER_NOT_FOUND",
+            )
+        user.password_hash = self.password_service.hash_password(
+            new_password
+        )
+        user.password_changed_at = utc_now()
+        try:
+            db.commit()
+            db.refresh(user)
+            return user
+        except SQLAlchemyError as exc:
+            db.rollback()
+            raise DataAccessError("修改用户密码失败") from exc
 
     def update_status(
         self,

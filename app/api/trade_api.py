@@ -7,7 +7,6 @@ from app.models.app_user import AppUser
 from app.enums.auth_enums import UserRole
 from app.common.exceptions import AuthorizationError
 from app.api.auth_api import get_account_authorization_service
-from app.repositories.order_repository import OrderRepository
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
@@ -42,15 +41,10 @@ def _authorize_trade_scope(
         )
         return
     if order_id:
-        order = OrderRepository.get_by_order_id(db, order_id.strip())
-        if order is None:
-            # 对普通用户统一按无权访问处理，避免用订单编号枚举数据。
-            raise AuthorizationError(
-                "无权访问该订单成交",
-                error_code="TRADE_ACCESS_DENIED",
-            )
-        authorization.require_account_access(
-            db, current_user, order.account_id
+        authorization.require_order_access(
+            db,
+            current_user,
+            order_id,
         )
         return
     if current_user.role != UserRole.ADMIN.value:
@@ -103,11 +97,11 @@ def get_trade(
 ):
     """按系统成交编号查询一条成交。"""
 
-    trade = service.get(db, trade_id)
-    authorization.require_account_access(
-        db, current_user, trade.account_id
+    return authorization.require_trade_access(
+        db,
+        current_user,
+        trade_id,
     )
-    return trade
 
 
 @router.get(
@@ -125,9 +119,10 @@ def list_trade_position_allocations(
 ):
     """查询平仓 Trade 实际关闭的逐笔持仓、保证金、手续费和盈亏。"""
 
-    trade = service.get(db, trade_id)
-    authorization.require_account_access(
-        db, current_user, trade.account_id
+    trade = authorization.require_trade_access(
+        db,
+        current_user,
+        trade_id,
     )
     return service.list_position_allocations(
         db, trade_id, trade=trade

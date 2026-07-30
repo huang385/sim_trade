@@ -39,6 +39,10 @@ from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_service import OrderService
 from app.services.order_validation_service import OrderValidationService
 from app.services.rule_query_service import get_rule_query_service
+from app.services.account_authorization_service import (
+    AccountAuthorizationService,
+)
+from app.api.auth_api import get_account_authorization_service
 from app.main import app
 from tests.api_auth_helpers import install_admin_auth_overrides
 
@@ -65,21 +69,13 @@ def integration_api_auth(request):
 
     previous = dict(app.dependency_overrides)
     if request.node.get_closest_marker("real_auth") is None:
-        _, authorization = install_admin_auth_overrides()
-
-        def load_authorized_account(db, _current_user, account_id):
-            """
-            兼容测试也返回真实完整Account。
-
-            生产授权服务的契约本来就是返回已加载账户；旧桩只有两个字段，
-            无法验证后续服务复用授权对象、避免重复SQL的真实调用方式。
-            """
-
-            return AccountRepository.get_by_account_id(db, account_id)
-
-        authorization.require_account_access.side_effect = (
-            load_authorized_account
-        )
+        install_admin_auth_overrides()
+        # 只替换身份为管理员，授权服务仍使用真实仓储。这样资源ID授权、
+        # 已锁定Account复用和防枚举逻辑都能在旧交易集成测试中实际执行。
+        authorization = AccountAuthorizationService()
+        app.dependency_overrides[
+            get_account_authorization_service
+        ] = lambda: authorization
     try:
         yield
     finally:

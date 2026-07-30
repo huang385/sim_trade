@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.trade import Trade
+from app.models.account import Account
 
 
 class TradeRepository:
@@ -19,6 +20,24 @@ class TradeRepository:
         """根据对外成交编号查询一条成交。"""
 
         return db.scalar(select(Trade).where(Trade.trade_id == trade_id))
+
+    @staticmethod
+    def get_by_trade_id_for_user(
+        db: Session,
+        *,
+        trade_id: str,
+        user_id: str,
+    ) -> Trade | None:
+        """一次查询返回普通用户有权访问的成交，避免成交编号枚举。"""
+
+        return db.scalar(
+            select(Trade)
+            .join(Account, Account.account_id == Trade.account_id)
+            .where(
+                Trade.trade_id == trade_id,
+                Account.user_id == user_id,
+            )
+        )
 
     @staticmethod
     def get_by_order_market_event(

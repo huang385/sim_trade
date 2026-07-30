@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.order import Order
+from app.models.account import Account
 from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
 
 
@@ -39,6 +40,24 @@ class OrderRepository:
 
         statement = select(Order).where(Order.order_id == order_id)
         return db.scalar(statement)
+
+    @staticmethod
+    def get_by_order_id_for_user(
+        db: Session,
+        *,
+        order_id: str,
+        user_id: str,
+    ) -> Order | None:
+        """一次查询返回普通用户有权访问的订单，隐藏其他用户资源存在性。"""
+
+        return db.scalar(
+            select(Order)
+            .join(Account, Account.account_id == Order.account_id)
+            .where(
+                Order.order_id == order_id,
+                Account.user_id == user_id,
+            )
+        )
 
     @staticmethod
     def get_by_order_id_for_update(

@@ -22,6 +22,7 @@ from app.enums.order_enums import (
     PositionFreezeAllocationStatus,
 )
 from app.models.order import Order
+from app.models.account import Account
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -91,14 +92,14 @@ class OrderCancellationService:
         db: Session,
         order_id: str,
         request: OrderCancelRequest,
-        account_access_checker: Callable[[str], object] | None = None,
+        account_access_checker: Callable[[Account], object] | None = None,
+        conceal_resource_existence: bool = False,
     ) -> Order:
         """
         锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。
 
-        外部API传入账户授权回调时，必须用数据库订单的真实account_id校验，
-        并且在任何幂等返回之前执行。这样既不信任请求体账户，也不需要为了
-        授权先额外查询一次未加锁订单。
+        外部API传入账户授权回调时，必须复用按数据库订单真实account_id
+        锁定的Account，并且在任何幂等返回之前执行。
         """
 
         normalized_order_id = order_id.strip()
@@ -110,23 +111,41 @@ class OrderCancellationService:
                 normalized_order_id,
             )
             if order is None:
+                if conceal_resource_existence:
+                    raise ResourceNotFoundError(
+                        "目标资源不存在",
+                        error_code="RESOURCE_NOT_FOUND",
+                    )
+                raise ResourceNotFoundError(
+                    "订单不存在",
+                    error_code="ORDER_NOT_FOUND",
+                )
+            # 固定锁顺序第二步：根据数据库订单真实归属锁定账户。授权、
+            # 幂等判断和后续资源释放都复用该对象，不信任请求体account_id。
+            account = self.account_repository.get_by_account_id_for_update(
+                db,
+                order.account_id,
+            )
+            if account is None:
                 raise ResourceNotFoundError(
                     "订单不存在",
                     error_code="ORDER_NOT_FOUND",
                 )
             if account_access_checker is not None:
-                account_access_checker(order.account_id)
+                account_access_checker(account)
             if order.account_id != normalized_account_id:
                 raise ResourceConflictError(
                     "订单不属于指定账户",
                     error_code="ORDER_ACCOUNT_MISMATCH",
                 )
-            # 已撤销终态直接幂等返回，不锁账户、不释放资金、不创建新事件，
+            # 已撤销终态直接幂等返回，不释放资金、不创建新事件，
             # cancelled_at 也保持第一次撤单写入的值。订单查询使用了
-            # SELECT FOR UPDATE，因此返回前必须主动提交并刷新，及时释放行锁。
+            # SELECT FOR UPDATE，因此返回前必须主动提交，及时释放行锁。
             if order.status in self.IDEMPOTENT_STATUSES:
+                # 已加载字段足以构造响应；提交前分离，避免提交后的自动过期
+                # 触发第二次订单查询。
+                db.expunge(order)
                 db.commit()
-                db.refresh(order)
                 return order
 
             if order.order_type != OrderType.LIMIT.value:
@@ -172,12 +191,8 @@ class OrderCancellationService:
                 )
 
             cancelled_at = self.time_provider()
-            # 固定锁顺序第二步：先锁账户；平仓撤单随后继续锁持仓、
+            # 账户已经按Order→Account顺序锁定；平仓撤单随后继续锁持仓、
             # 逐笔明细和本订单Allocation，开仓撤单不访问持仓。
-            account = self.account_repository.get_by_account_id_for_update(
-                db,
-                order.account_id,
-            )
             cancel_volume = order.remaining_volume
             released_margin = quantize_money(order.frozen_margin)
             released_commission = quantize_money(order.frozen_commission)
@@ -215,24 +230,21 @@ class OrderCancellationService:
                         "平仓撤单对应持仓方向不一致",
                         error_code="CANCEL_POSITION_INCONSISTENT",
                     )
+                # 必须先锁定本订单引用的持仓明细，再锁定冻结分配记录。
+                # 查询通过 Allocation 关联筛选，但 FOR UPDATE 只作用于
+                # PositionDetail，不会提前取得 Allocation 行锁。
+                details = (
+                    self.position_repository
+                    .list_details_by_order_for_update(
+                        db,
+                        position_id=position.position_id,
+                        order_id=order.order_id,
+                    )
+                )
                 allocations = (
                     self.allocation_repository.list_by_order_for_update(
                         db,
                         order.order_id,
-                    )
-                )
-                allocation_detail_ids = list(
-                    dict.fromkeys(
-                        item.position_detail_id
-                        for item in allocations
-                    )
-                )
-                details = (
-                    self.position_repository
-                    .list_details_by_ids_for_update(
-                        db,
-                        position_id=position.position_id,
-                        position_detail_ids=allocation_detail_ids,
                     )
                 )
                 detail_map = {

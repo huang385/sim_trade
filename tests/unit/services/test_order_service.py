@@ -171,6 +171,9 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     order_repository = Mock()
     order_repository.get_by_client_order_id.return_value = existing
     account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = (
+        make_account()
+    )
     rule_query_service = Mock()
     service = make_service(
         order_repository=order_repository,
@@ -181,9 +184,11 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     result = service.create_order(db=db, request=make_request())
 
     assert result is existing
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     order_repository.create.assert_not_called()
-    db.commit.assert_not_called()
+    db.expunge.assert_called_once_with(existing)
+    db.commit.assert_called_once()
+    db.refresh.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -441,7 +446,7 @@ def test_duplicate_detected_after_account_lock_does_not_freeze_twice():
     existing = SimpleNamespace(order_id="EXISTING")
     account = make_account()
     order_repository = Mock()
-    order_repository.get_by_client_order_id.side_effect = [None, existing]
+    order_repository.get_by_client_order_id.return_value = existing
     account_repository = Mock()
     account_repository.get_by_account_id_for_update.return_value = account
     rule_query_service = Mock()
@@ -457,7 +462,9 @@ def test_duplicate_detected_after_account_lock_does_not_freeze_twice():
     assert result is existing
     assert account.available_cash == Decimal("100000")
     order_repository.create.assert_not_called()
-    db.commit.assert_not_called()
+    db.expunge.assert_called_once_with(existing)
+    db.commit.assert_called_once()
+    db.refresh.assert_not_called()
 
 
 def test_missing_account_rolls_back_and_does_not_create_order():
@@ -514,11 +521,14 @@ def test_freeze_failure_does_not_create_order():
         "FEE_RULE_NOT_FOUND",
     ],
 )
-def test_reference_rule_failure_prevents_account_lock(error_code):
+def test_reference_rule_failure_rolls_back_locked_account(error_code):
     db = Mock()
     order_repository = Mock()
     order_repository.get_by_client_order_id.return_value = None
     account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = (
+        make_account()
+    )
     rule_query_service = Mock()
     rule_query_service.get_order_rules.side_effect = BusinessRuleError(
         "规则不可用",
@@ -534,7 +544,7 @@ def test_reference_rule_failure_prevents_account_lock(error_code):
         service.create_order(db=db, request=make_request())
 
     assert exc_info.value.error_code == error_code
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     order_repository.create.assert_not_called()
     db.rollback.assert_called_once_with()
 

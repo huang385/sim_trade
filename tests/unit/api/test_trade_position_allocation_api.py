@@ -59,7 +59,10 @@ def trade_allocation_api():
 
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_trade_query_service] = lambda: service
-    install_admin_auth_overrides()
+    _, authorization = install_admin_auth_overrides()
+    authorization.require_trade_access.side_effect = (
+        lambda db, _user, trade_id: service.get(db, trade_id)
+    )
     try:
         yield TestClient(app), service, database_session
     finally:

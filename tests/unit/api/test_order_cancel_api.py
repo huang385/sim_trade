@@ -87,6 +87,7 @@ def test_cancel_api_returns_cancelled_order_and_strips_account(cancel_api):
     assert call["order_id"] == "O-1"
     assert call["request"].account_id == "A001"
     assert callable(call["account_access_checker"])
+    assert call["conceal_resource_existence"] is False
 
 
 def test_cancel_api_returns_partially_cancelled_and_is_repeatable(cancel_api):

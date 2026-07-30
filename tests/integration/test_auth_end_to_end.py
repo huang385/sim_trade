@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from decimal import Decimal
 import hashlib
+import logging
 from uuid import uuid4
 
 import pytest
@@ -12,6 +14,7 @@ from sqlalchemy import delete, event, select
 
 from app.api.auth_api import get_auth_service
 from app.common.exceptions import AuthenticationError
+from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.redis_client import redis_client
@@ -23,6 +26,8 @@ from app.models.app_user import AppUser
 from app.models.auth_refresh_session import AuthRefreshSession
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
+from app.models.position import Position
+from app.models.trade import Trade
 from app.repositories.auth_refresh_session_repository import (
     AuthRefreshSessionRepository,
 )
@@ -231,6 +236,26 @@ def _count_sql():
         event.remove(engine, "before_cursor_execute", before_execute)
 
 
+def _selects_from(statements: list[str], table_name: str) -> list[str]:
+    """按SQL主FROM表分类，不用脆弱的总语句数量代替性能断言。"""
+
+    marker = f"from {table_name}".lower()
+    return [
+        statement
+        for statement in statements
+        if statement.lstrip().lower().startswith("select")
+        and marker in " ".join(statement.lower().split())
+    ]
+
+
+def _assert_single_current_user_query(statements: list[str]) -> None:
+    user_queries = _selects_from(statements, "app_user")
+    assert len(user_queries) == 1
+    assert "where app_user.user_id" in " ".join(
+        user_queries[0].lower().split()
+    )
+
+
 def test_login_account_authorization_refresh_and_logout(
     auth_context,
     integration_context,
@@ -415,12 +440,139 @@ def test_login_account_authorization_refresh_and_logout(
         },
     )
     assert admin_b_order.status_code == 200
+    b_order_id = admin_b_order.json()["order_id"]
+    b_trade_id = f"TRB{auth_context.suffix.upper()}"
+    b_position_id = f"PSB{auth_context.suffix.upper()}"
+    with SessionLocal() as db:
+        now = utc_now()
+        db.add(
+            Trade(
+                trade_id=b_trade_id,
+                order_id=b_order_id,
+                account_id=account_b,
+                market_event_id=f"AUTH-ME-{auth_context.suffix}",
+                market_stream_message_id="0-1",
+                order_book_id=integration_context.symbol,
+                exchange_id=integration_context.exchange_id,
+                symbol=integration_context.symbol,
+                trading_day=integration_context.trading_day,
+                direction="BUY",
+                offset_flag="OPEN",
+                trade_price=Decimal("3500"),
+                trade_volume=1,
+                turnover=Decimal("35000"),
+                margin=Decimal("4200"),
+                commission=Decimal("3"),
+                realized_pnl=Decimal("0"),
+                daily_close_pnl=Decimal("0"),
+                trade_time=now,
+                created_at=now,
+            )
+        )
+        db.add(
+            Position(
+                position_id=b_position_id,
+                account_id=account_b,
+                order_book_id=integration_context.symbol,
+                exchange_id=integration_context.exchange_id,
+                symbol=integration_context.symbol,
+                direction="LONG",
+                total_volume=1,
+                today_volume=1,
+                yesterday_volume=0,
+                frozen_volume=0,
+                available_volume=1,
+                average_open_price=Decimal("3500"),
+                position_cost=Decimal("35000"),
+                used_margin=Decimal("4200"),
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                daily_position_pnl=Decimal("0"),
+                daily_close_pnl=Decimal("0"),
+                trading_day=integration_context.trading_day,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.commit()
+
+    missing_order_response = user_client.get(
+        "/api/orders/O-NOT-EXIST",
+        headers=headers,
+    )
+    foreign_order_response = user_client.get(
+        f"/api/orders/{b_order_id}",
+        headers=headers,
+    )
+    assert missing_order_response.status_code == 404
+    assert foreign_order_response.status_code == 404
+    assert foreign_order_response.json() == missing_order_response.json()
+
+    missing_trade_response = user_client.get(
+        "/api/trades/T-NOT-EXIST",
+        headers=headers,
+    )
+    foreign_trade_response = user_client.get(
+        f"/api/trades/{b_trade_id}",
+        headers=headers,
+    )
+    assert missing_trade_response.status_code == 404
+    assert foreign_trade_response.status_code == 404
+    assert foreign_trade_response.json() == missing_trade_response.json()
+    foreign_allocations_response = user_client.get(
+        f"/api/trades/{b_trade_id}/position-allocations",
+        headers=headers,
+    )
+    missing_allocations_response = user_client.get(
+        "/api/trades/T-NOT-EXIST/position-allocations",
+        headers=headers,
+    )
+    assert foreign_allocations_response.status_code == 404
     assert (
-        user_client.get(
-            f"/api/orders/{admin_b_order.json()['order_id']}",
-            headers=headers,
+        foreign_allocations_response.json()
+        == missing_allocations_response.json()
+    )
+
+    foreign_position_response = user_client.get(
+        f"/api/positions/{b_position_id}/pnl/realtime",
+        headers=headers,
+    )
+    missing_position_response = user_client.get(
+        "/api/positions/P-NOT-EXIST/pnl/realtime",
+        headers=headers,
+    )
+    assert foreign_position_response.status_code == 404
+    assert missing_position_response.status_code == 404
+    assert foreign_position_response.json() == missing_position_response.json()
+
+    # 管理员可以访问真实资源，同时对真正不存在的资源仍获得正常404。
+    assert (
+        admin_client.get(
+            f"/api/orders/{b_order_id}",
+            headers=admin_headers,
         ).status_code
-        == 403
+        == 200
+    )
+    assert (
+        admin_client.get(
+            f"/api/trades/{b_trade_id}",
+            headers=admin_headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        admin_client.get(
+            f"/api/positions/{b_position_id}/pnl/realtime",
+            headers=admin_headers,
+        ).status_code
+        == 200
+    )
+    assert (
+        admin_client.get(
+            "/api/orders/O-NOT-EXIST",
+            headers=admin_headers,
+        ).status_code
+        == 404
     )
     # 即使命中B账户已存在的client_order_id，也必须先拒绝账户越权。
     duplicate_b_order = user_client.post(
@@ -441,20 +593,32 @@ def test_login_account_authorization_refresh_and_logout(
     assert duplicate_b_order.status_code == 403
     assert (
         user_client.post(
-            f"/api/orders/{admin_b_order.json()['order_id']}/cancel",
+            f"/api/orders/{b_order_id}/cancel",
             headers=headers,
             json={"account_id": account_b},
         ).status_code
-        == 403
+        == 404
     )
+    missing_cancel = user_client.post(
+        "/api/orders/O-NOT-EXIST/cancel",
+        headers=headers,
+        json={"account_id": account_a},
+    )
+    foreign_cancel = user_client.post(
+        f"/api/orders/{b_order_id}/cancel",
+        headers=headers,
+        json={"account_id": account_a},
+    )
+    assert missing_cancel.status_code == foreign_cancel.status_code == 404
+    assert missing_cancel.json() == foreign_cancel.json()
     # 即使把请求体账户伪造成A自己的账户，也必须依据订单真实归属返回403。
     assert (
         user_client.post(
-            f"/api/orders/{admin_b_order.json()['order_id']}/cancel",
+            f"/api/orders/{b_order_id}/cancel",
             headers=headers,
             json={"account_id": account_a},
         ).status_code
-        == 403
+        == 404
     )
 
     accepted = user_client.post(
@@ -678,3 +842,262 @@ def test_concurrent_refresh_allows_only_one_success(auth_context):
         results = list(executor.map(lambda _index: rotate(), range(2)))
     assert results.count("success") == 1
     assert results.count("rejected") == 1
+
+
+def test_password_change_updates_database_and_invalidates_old_login(
+    auth_context,
+    caplog,
+):
+    """真实锁定并更新数据库用户，不能用两个独立Hash代替改密流程。"""
+
+    user_id = f"UPW{auth_context.suffix.upper()}"
+    username = f"password_{auth_context.suffix}"
+    old_password = auth_context.password
+    new_password = "Changed-Integration-Password-456!"
+    admin_service = AdminUserService(
+        repository=UserRepository(),
+        password_service=auth_context.service.password_service,
+    )
+    with SessionLocal() as db:
+        created = admin_service.create_user(
+            db,
+            UserCreateRequest(
+                user_id=user_id,
+                username=username,
+                password=old_password,
+                display_name="真实修改密码测试",
+            ),
+        )
+        original_hash = created.password_hash
+
+    # 修改前原密码确实可以通过完整登录流程。
+    with SessionLocal() as db:
+        auth_context.service.login(
+            db,
+            username=username,
+            password=old_password,
+            client_ip="password-change-before",
+            user_agent="pytest",
+        )
+
+    with caplog.at_level(logging.DEBUG):
+        with SessionLocal() as db:
+            changed = admin_service.change_password(
+                db,
+                user_id=user_id,
+                new_password=new_password,
+            )
+            changed_hash = changed.password_hash
+
+        with SessionLocal() as db:
+            with pytest.raises(AuthenticationError):
+                auth_context.service.login(
+                    db,
+                    username=username,
+                    password=old_password,
+                    client_ip="password-change-old",
+                    user_agent="pytest",
+                )
+        with SessionLocal() as db:
+            auth_context.service.login(
+                db,
+                username=username,
+                password=new_password,
+                client_ip="password-change-new",
+                user_agent="pytest",
+            )
+
+    assert changed_hash != original_hash
+    assert old_password not in caplog.text
+    assert new_password not in caplog.text
+    assert original_hash not in caplog.text
+    assert changed_hash not in caplog.text
+
+
+def test_authenticated_trading_api_sql_query_shapes(
+    auth_context,
+    integration_context,
+):
+    """
+    对典型认证请求按表统计SQL。
+
+    重点捕获普通SELECT Account后又SELECT FOR UPDATE的回归，同时允许合约、
+    规则、Outbox和响应刷新等合理SQL存在。
+    """
+
+    admin_client = TestClient(app)
+    admin_login = admin_client.post(
+        "/api/auth/login",
+        json={
+            "username": auth_context.admin_username,
+            "password": auth_context.password,
+        },
+    )
+    admin_headers = _auth_header(admin_login)
+    user_id = f"UQS{auth_context.suffix.upper()}"
+    username = f"query_{auth_context.suffix}"
+    account_id = f"QSA{auth_context.suffix.upper()}"
+    _create_user(
+        admin_client,
+        admin_headers,
+        user_id=user_id,
+        username=username,
+        password=auth_context.password,
+    )
+    _create_account(
+        admin_client,
+        admin_headers,
+        account_id=account_id,
+        user_id=user_id,
+    )
+    user_client = TestClient(app)
+    login = user_client.post(
+        "/api/auth/login",
+        json={
+            "username": username,
+            "password": auth_context.password,
+        },
+    )
+    headers = _auth_header(login)
+    payload = {
+        "client_order_id": f"SQL-{auth_context.suffix}-1",
+        "account_id": account_id,
+        "exchange_id": integration_context.exchange_id,
+        "symbol": integration_context.symbol,
+        "direction": "BUY",
+        "offset_flag": "OPEN",
+        "order_type": "LIMIT",
+        "limit_price": "3500",
+        "volume": 1,
+    }
+
+    with _count_sql() as create_sql:
+        created = user_client.post(
+            "/api/orders",
+            headers=headers,
+            json=payload,
+        )
+    assert created.status_code == 200, created.text
+    _assert_single_current_user_query(create_sql)
+    create_accounts = _selects_from(create_sql, "account")
+    assert len(create_accounts) == 1
+    assert "for update" in create_accounts[0].lower()
+
+    with _count_sql() as idempotent_sql:
+        repeated = user_client.post(
+            "/api/orders",
+            headers=headers,
+            json=payload,
+        )
+    assert repeated.status_code == 200
+    _assert_single_current_user_query(idempotent_sql)
+    idempotent_accounts = _selects_from(idempotent_sql, "account")
+    assert len(idempotent_accounts) == 1
+    assert "for update" in idempotent_accounts[0].lower()
+    client_id_queries = [
+        statement
+        for statement in _selects_from(idempotent_sql, "orders")
+        if "client_order_id" in statement.lower()
+    ]
+    assert len(client_id_queries) == 1
+
+    # 额外创建两条订单，证明列表授权没有按结果逐条查询账户。
+    for index in (2, 3):
+        next_payload = dict(payload)
+        next_payload["client_order_id"] = (
+            f"SQL-{auth_context.suffix}-{index}"
+        )
+        assert (
+            user_client.post(
+                "/api/orders",
+                headers=headers,
+                json=next_payload,
+            ).status_code
+            == 200
+        )
+
+    for path in ("/api/orders", "/api/orders/page"):
+        with _count_sql() as list_sql:
+            response = user_client.get(
+                path,
+                headers=headers,
+                params={"account_id": account_id},
+            )
+        assert response.status_code == 200
+        _assert_single_current_user_query(list_sql)
+        assert len(_selects_from(list_sql, "account")) == 1
+        assert len(_selects_from(list_sql, "orders")) == 1
+
+    with _count_sql() as trade_sql:
+        trades = user_client.get(
+            "/api/trades",
+            headers=headers,
+            params={"account_id": account_id},
+        )
+    assert trades.status_code == 200
+    _assert_single_current_user_query(trade_sql)
+    assert len(_selects_from(trade_sql, "account")) == 1
+    assert len(_selects_from(trade_sql, "trade")) == 1
+
+    with _count_sql() as position_sql:
+        positions = user_client.get(
+            "/api/positions",
+            headers=headers,
+            params={"account_id": account_id},
+        )
+    assert positions.status_code == 200
+    _assert_single_current_user_query(position_sql)
+    assert len(_selects_from(position_sql, "account")) == 1
+    assert len(_selects_from(position_sql, "position")) == 1
+
+    order_id = created.json()["order_id"]
+    with _count_sql() as cancel_sql:
+        cancelled = user_client.post(
+            f"/api/orders/{order_id}/cancel",
+            headers=headers,
+            json={"account_id": account_id},
+        )
+    assert cancelled.status_code == 200
+    _assert_single_current_user_query(cancel_sql)
+    cancel_accounts = _selects_from(cancel_sql, "account")
+    cancel_orders = _selects_from(cancel_sql, "orders")
+    assert len(cancel_accounts) == 1
+    assert "for update" in cancel_accounts[0].lower()
+    assert len(
+        [item for item in cancel_orders if "for update" in item.lower()]
+    ) == 1
+
+    with _count_sql() as repeat_cancel_sql:
+        repeat_cancel = user_client.post(
+            f"/api/orders/{order_id}/cancel",
+            headers=headers,
+            json={"account_id": account_id},
+        )
+    assert repeat_cancel.status_code == 200
+    _assert_single_current_user_query(repeat_cancel_sql)
+    repeat_accounts = _selects_from(repeat_cancel_sql, "account")
+    repeat_orders = _selects_from(repeat_cancel_sql, "orders")
+    assert len(repeat_accounts) == 1
+    assert "for update" in repeat_accounts[0].lower()
+    assert len(
+        [item for item in repeat_orders if "for update" in item.lower()]
+    ) == 1
+
+    with _count_sql() as admin_users_sql:
+        users = admin_client.get(
+            "/api/admin/users",
+            headers=admin_headers,
+        )
+    assert users.status_code == 200
+    # 一次当前管理员查询、一次用户列表主查询，不按用户加载账户。
+    assert len(_selects_from(admin_users_sql, "app_user")) == 2
+    assert len(_selects_from(admin_users_sql, "account")) == 0
+
+    with _count_sql() as admin_accounts_sql:
+        accounts = admin_client.get(
+            "/api/accounts",
+            headers=admin_headers,
+        )
+    assert accounts.status_code == 200
+    _assert_single_current_user_query(admin_accounts_sql)
+    assert len(_selects_from(admin_accounts_sql, "account")) == 1

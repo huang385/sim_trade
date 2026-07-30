@@ -8,7 +8,7 @@ import jwt
 
 from app.common.exceptions import AuthenticationError, ServiceUnavailableError
 from app.common.time_utils import utc_now
-from app.core.config import settings
+from app.core.config import is_unsafe_auth_jwt_secret, settings
 from app.enums.auth_enums import TokenType
 
 
@@ -63,7 +63,7 @@ class TokenService:
         )
 
     def _ensure_configured(self) -> None:
-        if len(self.secret.encode("utf-8")) < 32:
+        if is_unsafe_auth_jwt_secret(self.secret):
             raise ServiceUnavailableError(
                 "认证服务密钥未配置或强度不足",
                 error_code="AUTH_NOT_CONFIGURED",

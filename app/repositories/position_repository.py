@@ -7,6 +7,9 @@ from app.models.account import Account
 from app.models.instrument import Instrument
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.models.position_freeze_allocation import (
+    PositionFreezeAllocation,
+)
 
 
 class PositionRepository:
@@ -87,6 +90,24 @@ class PositionRepository:
         return db.scalar(
             select(Position).where(
                 Position.position_id == position_id
+            )
+        )
+
+    @staticmethod
+    def get_by_position_id_for_user(
+        db: Session,
+        *,
+        position_id: str,
+        user_id: str,
+    ) -> Position | None:
+        """一次查询返回普通用户有权访问的持仓，避免持仓编号枚举。"""
+
+        return db.scalar(
+            select(Position)
+            .join(Account, Account.account_id == Position.account_id)
+            .where(
+                Position.position_id == position_id,
+                Account.user_id == user_id,
             )
         )
 
@@ -283,6 +304,39 @@ class PositionRepository:
             )
             .order_by(PositionDetail.id)
             .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def list_details_by_order_for_update(
+        db: Session,
+        *,
+        position_id: str,
+        order_id: str,
+    ) -> Sequence[PositionDetail]:
+        """
+        先于冻结分配记录锁定当前平仓订单引用的持仓明细。
+
+        通过 Allocation 仅筛选目标明细，并使用 ``FOR UPDATE OF
+        position_detail`` 将行锁限制在持仓明细表。这样既不会锁住同一
+        Position 下与当前订单无关的历史明细，也能让撤单事务遵循
+        Order→Account→Position→PositionDetail→Allocation 的统一锁顺序。
+        """
+
+        statement = (
+            select(PositionDetail)
+            .join(
+                PositionFreezeAllocation,
+                PositionFreezeAllocation.position_detail_id
+                == PositionDetail.position_detail_id,
+            )
+            .where(
+                PositionDetail.position_id == position_id,
+                PositionFreezeAllocation.position_id == position_id,
+                PositionFreezeAllocation.order_id == order_id,
+            )
+            .order_by(PositionDetail.id)
+            .with_for_update(of=PositionDetail)
         )
         return db.scalars(statement).all()
 

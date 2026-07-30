@@ -30,6 +30,9 @@ async def lifespan(app: FastAPI):
     alembic upgrade head
     """
 
+    # 开发环境允许只启动公开健康检查；生产环境则必须在监听请求前完成
+    # JWT Secret和Refresh Cookie安全校验，禁止带弱配置继续运行。
+    settings.validate_runtime_security()
     yield
 
 

@@ -179,6 +179,8 @@ class RealtimePnlQueryService:
         self,
         db: Session,
         position_id: str,
+        *,
+        position=None,
     ) -> PositionRealtimePnlResponse:
         normalized = position_id.strip()
         try:
@@ -190,10 +192,11 @@ class RealtimePnlQueryService:
                 values=values,
                 position=None,
             )
-        position = self.position_repository.get_by_position_id(
-            db,
-            normalized,
-        )
+        if position is None:
+            position = self.position_repository.get_by_position_id(
+                db,
+                normalized,
+            )
         if position is None:
             raise ResourceNotFoundError(
                 "持仓不存在",

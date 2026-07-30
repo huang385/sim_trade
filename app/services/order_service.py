@@ -26,6 +26,7 @@ from app.enums.order_enums import (
 )
 from app.enums.reference_data_enums import CommissionType
 from app.models.order import Order
+from app.models.account import Account
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
@@ -149,6 +150,8 @@ class OrderService:
         self,
         db: Session,
         request: OrderCreateRequest,
+        *,
+        account_access_checker: Callable[[Account], object] | None = None,
     ) -> Order:
         """
         创建并接受一笔限价开仓或平仓订单。
@@ -158,13 +161,34 @@ class OrderService:
         """
 
         try:
-            # 第一次幂等检查：常规重复请求无需查询规则或锁定账户。
+            # 下单事务先锁定目标账户，并让API传入的集中授权回调直接校验
+            # 这个ORM对象。授权、资金检查和冻结全过程不再重复查询账户。
+            account = (
+                self.account_repository.get_by_account_id_for_update(
+                    db=db,
+                    account_id=request.account_id,
+                )
+            )
+            if account is None:
+                raise ResourceNotFoundError(
+                    "账户不存在",
+                    error_code="ACCOUNT_NOT_FOUND",
+                )
+            if account_access_checker is not None:
+                account_access_checker(account)
+
+            # 授权必须早于幂等返回，防止借用其他用户的账户和
+            # client_order_id读取已有订单。账户锁也串行化并发幂等请求。
             existing = self.order_repository.get_by_client_order_id(
                 db=db,
                 account_id=request.account_id,
                 client_order_id=request.client_order_id,
             )
             if existing is not None:
+                # 先分离已完整加载的订单，再提交释放Account行锁。这样响应
+                # 序列化不会因expire_on_commit再次查询同一订单。
+                db.expunge(existing)
+                db.commit()
                 return existing
 
             # 当前阶段使用接单当天作为交易日。
@@ -224,25 +248,6 @@ class OrderService:
                 if is_open
                 else Decimal("0.000000")
             )
-
-            # SELECT FOR UPDATE 锁定账户。
-            # 从这里开始，同一账户的其他下单事务需要等待本事务结束。
-            account = (
-                self.account_repository.get_by_account_id_for_update(
-                    db=db,
-                    account_id=request.account_id,
-                )
-            )
-
-            # 同一账户的并发请求会在此处串行化。锁定后再次检查，
-            # 避免两个相同 client_order_id 的请求重复冻结资金。
-            existing = self.order_repository.get_by_client_order_id(
-                db=db,
-                account_id=request.account_id,
-                client_order_id=request.client_order_id,
-            )
-            if existing is not None:
-                return existing
 
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。

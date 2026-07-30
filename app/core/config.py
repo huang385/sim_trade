@@ -1,6 +1,34 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+# 这些字符串已经公开出现在示例配置或常见部署模板中，不能作为签名密钥。
+# 判断结果只用于拒绝配置，任何异常和日志都不得回显实际Secret。
+KNOWN_UNSAFE_AUTH_JWT_SECRETS = frozenset(
+    {
+        "replace-with-at-least-32-random-bytes",
+        "change-me-to-at-least-32-random-bytes",
+        "your-secret-key-change-me",
+        "please-change-this-secret",
+    }
+)
+
+
+def is_unsafe_auth_jwt_secret(secret: str) -> bool:
+    """
+    判断JWT Secret是否属于明确不可接受的配置。
+
+    这里只做最低安全门槛：空值、UTF-8长度不足、项目公开占位值，以及由
+    极少字符机械重复构成的明显示例值。不会尝试自行实现密码学熵估算。
+    """
+
+    normalized = secret.strip()
+    if len(normalized.encode("utf-8")) < 32:
+        return True
+    if normalized.lower() in KNOWN_UNSAFE_AUTH_JWT_SECRETS:
+        return True
+    return len(set(normalized)) <= 4
+
+
 class Settings(BaseSettings):
     """应用配置，支持从项目根目录的 .env 文件和环境变量读取。"""
 
@@ -132,5 +160,20 @@ class Settings(BaseSettings):
     @property
     def redis_url(self) -> str:
         return f"redis://{self.redis_host}:{self.redis_port}/{self.redis_db}"
+
+    def validate_runtime_security(self) -> None:
+        """
+        校验部署环境的认证安全底线。
+
+        开发环境允许暂不配置JWT，以便公开健康检查仍可启动；生产环境必须
+        在应用启动前同时提供合格Secret和Secure Refresh Cookie。
+        """
+
+        if self.app_env.strip().lower() not in {"prod", "production"}:
+            return
+        if is_unsafe_auth_jwt_secret(self.auth_jwt_secret):
+            raise ValueError("生产环境JWT认证密钥未配置或强度不足")
+        if not self.auth_refresh_cookie_secure:
+            raise ValueError("生产环境Refresh Cookie必须启用Secure")
 
 settings = Settings()

@@ -100,8 +100,13 @@ def get_position_realtime_pnl(
 ):
     """查询单个持仓盘中实时盈亏，响应会明确标记实际数据来源。"""
 
-    result = service.get_position(db, position_id)
-    authorization.require_account_access(
-        db, current_user, result.account_id
+    position = authorization.require_position_access(
+        db,
+        current_user,
+        position_id,
     )
-    return result
+    return service.get_position(
+        db,
+        position_id,
+        position=position,
+    )

@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import require_active_user
+from app.enums.auth_enums import UserRole
 from app.models.app_user import AppUser
 from app.api.auth_api import get_account_authorization_service
 from app.services.account_authorization_service import (
@@ -47,10 +48,17 @@ def create_order(
     相同账户和 client_order_id 重复提交时返回原订单。
     """
 
-    authorization.require_account_access(
-        db, current_user, request.account_id
+    def require_locked_account_access(account):
+        return authorization.require_loaded_account_access(
+            current_user,
+            account,
+        )
+
+    return service.create_order(
+        db=db,
+        request=request,
+        account_access_checker=require_locked_account_access,
     )
-    return service.create_order(db=db, request=request)
 
 
 @router.get("/page", response_model=OrderPageResponse)
@@ -103,11 +111,11 @@ def cancel_order(
 
     # Service锁定真实订单后立即执行该授权回调，不能信任请求体account_id，
     # 也不会为授权额外普通查询一次订单。
-    def require_order_account_access(account_id: str):
-        return authorization.require_account_access(
-            db,
+    def require_order_account_access(account):
+        return authorization.require_loaded_account_access(
             current_user,
-            account_id,
+            account,
+            conceal_forbidden=True,
         )
 
     return service.cancel_order(
@@ -115,6 +123,9 @@ def cancel_order(
         order_id=order_id,
         request=request,
         account_access_checker=require_order_account_access,
+        conceal_resource_existence=(
+            current_user.role != UserRole.ADMIN.value
+        ),
     )
 
 
@@ -126,7 +137,6 @@ def get_order(
         get_account_authorization_service
     ),
     db: Session = Depends(get_db),
-    service: OrderService = Depends(get_order_service),
 ):
     """
     按系统订单编号查询订单。
@@ -135,11 +145,11 @@ def get_order(
     client_order_id。
     """
 
-    order = service.get_order(db=db, order_id=order_id)
-    authorization.require_account_access(
-        db, current_user, order.account_id
+    return authorization.require_order_access(
+        db,
+        current_user,
+        order_id,
     )
-    return order
 
 
 @router.get("", response_model=list[OrderResponse])

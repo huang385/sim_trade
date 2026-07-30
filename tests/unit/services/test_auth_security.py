@@ -1,12 +1,21 @@
 from datetime import timedelta
 import logging
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from argon2 import PasswordHasher
 
-from app.common.exceptions import AuthenticationError
+from app.common.exceptions import (
+    AuthenticationError,
+    ServiceUnavailableError,
+)
 from app.common.time_utils import utc_now
+from app.core.config import Settings
 from app.enums.auth_enums import TokenType
+from app.repositories.user_repository import UserRepository
+from app.services.admin_user_service import AdminUserService
 from app.services.password_service import PasswordService
 from app.services.token_service import TokenService
 
@@ -19,7 +28,15 @@ def _password_service() -> PasswordService:
     )
 
 
-def _token_service(secret: str = "s" * 48) -> TokenService:
+VALID_TEST_SECRET = (
+    "D7v!qP2m#L9x@R4k$T8n%W3c&Y6h*B1s-F5j_Z0u+G2a"
+)
+OTHER_VALID_TEST_SECRET = (
+    "K4z@N8p!C2w#H7m$Q5r%V1x&S9b*D6t-J3f_A0y+L8e"
+)
+
+
+def _token_service(secret: str = VALID_TEST_SECRET) -> TokenService:
     return TokenService(
         secret=secret,
         issuer="test-issuer",
@@ -39,16 +56,6 @@ def test_password_uses_argon2id_and_never_stores_plaintext():
     assert password_hash.startswith("$argon2id$")
     assert service.verify_password(password_hash, password) is True
     assert service.verify_password(password_hash, "wrong-password") is False
-
-
-def test_password_change_invalidates_old_password():
-    service = _password_service()
-    old_hash = service.hash_password("Old-Password-123!")
-    new_hash = service.hash_password("New-Password-456!")
-
-    assert service.verify_password(old_hash, "Old-Password-123!")
-    assert not service.verify_password(new_hash, "Old-Password-123!")
-    assert service.verify_password(new_hash, "New-Password-456!")
 
 
 def test_access_and_refresh_tokens_have_strict_separate_types():
@@ -86,9 +93,122 @@ def test_expired_and_wrong_signature_tokens_are_rejected():
             expired.access_token, expected_type=TokenType.ACCESS
         )
     with pytest.raises(AuthenticationError):
-        _token_service("x" * 48).decode(
+        _token_service(OTHER_VALID_TEST_SECRET).decode(
             valid.access_token, expected_type=TokenType.ACCESS
         )
+
+
+@pytest.mark.parametrize(
+    "unsafe_secret",
+    [
+        "",
+        "too-short",
+        "replace-with-at-least-32-random-bytes",
+        "a" * 64,
+        "abab" * 16,
+    ],
+)
+def test_unsafe_or_public_jwt_secret_cannot_sign_tokens(unsafe_secret):
+    service = _token_service(unsafe_secret)
+
+    with pytest.raises(ServiceUnavailableError) as exc_info:
+        service.create_pair("U001")
+
+    assert exc_info.value.error_code == "AUTH_NOT_CONFIGURED"
+    if unsafe_secret:
+        assert unsafe_secret not in str(exc_info.value)
+
+
+def test_qualified_jwt_secret_can_sign_and_verify_tokens():
+    service = _token_service()
+
+    pair = service.create_pair("U001")
+    claims = service.decode(
+        pair.access_token,
+        expected_type=TokenType.ACCESS,
+    )
+
+    assert claims.user_id == "U001"
+
+
+def test_env_example_does_not_publish_an_acceptable_jwt_secret():
+    project_root = Path(__file__).resolve().parents[3]
+    lines = (project_root / ".env.example").read_text(
+        encoding="utf-8"
+    ).splitlines()
+
+    assert "AUTH_JWT_SECRET=" in lines
+    assert not any(
+        line.startswith("AUTH_JWT_SECRET=")
+        and line != "AUTH_JWT_SECRET="
+        for line in lines
+    )
+
+
+def test_production_requires_safe_secret_and_secure_refresh_cookie():
+    insecure_cookie = Settings(
+        _env_file=None,
+        app_env="prod",
+        debug=False,
+        auth_jwt_secret=VALID_TEST_SECRET,
+        auth_refresh_cookie_secure=False,
+    )
+    unsafe_secret = Settings(
+        _env_file=None,
+        app_env="prod",
+        debug=False,
+        auth_jwt_secret="replace-with-at-least-32-random-bytes",
+        auth_refresh_cookie_secure=True,
+    )
+    secure = Settings(
+        _env_file=None,
+        app_env="prod",
+        debug=False,
+        auth_jwt_secret=VALID_TEST_SECRET,
+        auth_refresh_cookie_secure=True,
+    )
+
+    with pytest.raises(ValueError, match="Refresh Cookie"):
+        insecure_cookie.validate_runtime_security()
+    with pytest.raises(ValueError, match="JWT"):
+        unsafe_secret.validate_runtime_security()
+    secure.validate_runtime_security()
+
+
+def test_admin_password_change_commits_only_in_service():
+    repository = Mock(spec=UserRepository)
+    user = SimpleNamespace(
+        user_id="U001",
+        password_hash="old-hash",
+        password_changed_at=None,
+    )
+    repository.get_by_user_id_for_update.return_value = user
+    password_service = Mock(spec=PasswordService)
+    password_service.hash_password.return_value = "new-argon2-hash"
+    service = AdminUserService(
+        repository=repository,
+        password_service=password_service,
+    )
+    db = Mock()
+
+    result = service.change_password(
+        db,
+        user_id=" U001 ",
+        new_password="New-Password-456!",
+    )
+
+    assert result is user
+    assert user.password_hash == "new-argon2-hash"
+    assert user.password_changed_at is not None
+    repository.get_by_user_id_for_update.assert_called_once_with(
+        db,
+        "U001",
+    )
+    # Repository接口没有事务方法，提交和刷新只发生在Service持有的Session。
+    assert not hasattr(repository, "commit")
+    assert not hasattr(repository, "rollback")
+    db.commit.assert_called_once()
+    db.refresh.assert_called_once_with(user)
 
 
 def test_password_and_tokens_are_not_logged(caplog):

@@ -52,6 +52,8 @@ def make_order(**overrides):
 
 def make_account(**overrides):
     values = {
+        "account_id": "A001",
+        "user_id": "U001",
         "status": "NORMAL",
         "available_cash": Decimal("79900"),
         "frozen_margin": Decimal("20000"),
@@ -194,11 +196,12 @@ def test_repeated_cancel_ends_transaction_without_second_business_change(status)
     assert order.frozen_margin == Decimal("0")
     assert order.frozen_commission == Decimal("0")
     assert order.cancelled_at == original_time
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     service.freeze_service.release_open_order_frozen_resources.assert_not_called()
     outbox.create_event.assert_not_called()
+    db.expunge.assert_called_once_with(order)
     db.commit.assert_called_once()
-    db.refresh.assert_called_once_with(order)
+    db.refresh.assert_not_called()
     db.rollback.assert_not_called()
 
 
@@ -231,8 +234,11 @@ def test_actual_order_account_is_authorized_before_idempotent_return():
             account_access_checker=checker,
         )
 
-    checker.assert_called_once_with("B001")
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    locked_account = (
+        account_repository.get_by_account_id_for_update.return_value
+    )
+    checker.assert_called_once_with(locked_account)
+    account_repository.get_by_account_id_for_update.assert_called_once()
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
     db.rollback.assert_called_once()
@@ -245,7 +251,7 @@ def test_actual_order_account_is_authorized_before_idempotent_return():
         ("offset_flag", "UNKNOWN"),
     ],
 )
-def test_non_limit_or_unsupported_offset_is_rejected_before_account_lock(
+def test_non_limit_or_unsupported_offset_is_rejected_after_account_lock(
     field,
     value,
 ):
@@ -258,7 +264,7 @@ def test_non_limit_or_unsupported_offset_is_rejected_before_account_lock(
         cancel(service, db)
 
     assert exc_info.value.error_code == "ORDER_NOT_CANCELLABLE"
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     service.freeze_service.release_open_order_frozen_resources.assert_not_called()
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
@@ -304,7 +310,7 @@ def test_open_order_with_frozen_position_is_consistency_error_without_changes():
         account.frozen_margin,
         account.frozen_commission,
     ) == original_account
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     service.freeze_service.release_open_order_frozen_resources.assert_not_called()
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
@@ -322,7 +328,7 @@ def test_non_cancellable_status_returns_conflict(status):
         cancel(service, db)
 
     assert exc_info.value.error_code == "ORDER_NOT_CANCELLABLE"
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
     outbox.create_event.assert_not_called()
     db.rollback.assert_called_once()
 
@@ -349,7 +355,7 @@ def test_active_order_with_zero_remaining_is_consistency_error():
         cancel(service, Mock())
 
     assert exc_info.value.error_code == "CANCEL_ORDER_STATE_INCONSISTENT"
-    account_repository.get_by_account_id_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_called_once()
 
 
 def test_frozen_resource_inconsistency_rolls_back_without_outbox():
@@ -410,3 +416,64 @@ def test_lock_order_is_order_then_account():
     cancel(service, Mock())
 
     assert calls == ["ORDER", "ACCOUNT"]
+
+
+def test_close_cancel_uses_complete_stable_lock_order():
+    """平仓撤单必须按统一顺序加锁，避免与成交结算形成反向等待。"""
+
+    calls: list[str] = []
+    order = make_order(
+        direction="SELL",
+        offset_flag="CLOSE_TODAY",
+        frozen_margin=Decimal("0"),
+        frozen_commission=Decimal("10"),
+        frozen_position_volume=10,
+    )
+    account = make_account(
+        frozen_margin=Decimal("0"),
+        frozen_commission=Decimal("10"),
+    )
+    position = SimpleNamespace(
+        position_id="P-1",
+        direction="LONG",
+    )
+    order_repository = Mock()
+    account_repository = Mock()
+    position_repository = Mock()
+    allocation_repository = Mock()
+    order_repository.get_by_order_id_for_update.side_effect = (
+        lambda *_args: calls.append("ORDER") or order
+    )
+    account_repository.get_by_account_id_for_update.side_effect = (
+        lambda *_args: calls.append("ACCOUNT") or account
+    )
+    position_repository.get_for_update.side_effect = (
+        lambda *_args, **_kwargs: calls.append("POSITION") or position
+    )
+    position_repository.list_details_by_order_for_update.side_effect = (
+        lambda *_args, **_kwargs: calls.append("POSITION_DETAIL") or []
+    )
+    allocation_repository.list_by_order_for_update.side_effect = (
+        lambda *_args, **_kwargs: calls.append("ALLOCATION") or []
+    )
+    service = OrderCancellationService(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        position_repository=position_repository,
+        allocation_repository=allocation_repository,
+        outbox_repository=Mock(),
+        event_id_factory=lambda: "EVT-1",
+        time_provider=lambda: FIXED_TIME,
+    )
+
+    with pytest.raises(DataAccessError) as exc_info:
+        cancel(service, Mock())
+
+    assert exc_info.value.error_code == "CANCEL_POSITION_INCONSISTENT"
+    assert calls == [
+        "ORDER",
+        "ACCOUNT",
+        "POSITION",
+        "POSITION_DETAIL",
+        "ALLOCATION",
+    ]
