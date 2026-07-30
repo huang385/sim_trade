@@ -1,19 +1,21 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 import hashlib
 import logging
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from redis.exceptions import RedisError
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, func, select
+from sqlalchemy.exc import OperationalError
 
 from app.api.auth_api import get_auth_service
-from app.common.exceptions import AuthenticationError
+from app.common.exceptions import AuthenticationError, DataAccessError
 from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.core.database import SessionLocal, engine
@@ -379,12 +381,17 @@ def test_login_account_authorization_refresh_and_logout(
     assert own_pnl.status_code == 200
     # Redis无快照回退时也复用授权对象，SQL仍保持用户和账户各一次。
     assert len(pnl_statements) == 2
-    assert (
-        user_client.get(
-            f"/api/accounts/{account_b}", headers=headers
-        ).status_code
-        == 403
+    foreign_account_response = user_client.get(
+        f"/api/accounts/{account_b}",
+        headers=headers,
     )
+    missing_account_response = user_client.get(
+        f"/api/accounts/MISSING{auth_context.suffix.upper()}",
+        headers=headers,
+    )
+    assert foreign_account_response.status_code == 404
+    assert missing_account_response.status_code == 404
+    assert foreign_account_response.json() == missing_account_response.json()
     denied_order = user_client.post(
         "/api/orders",
         headers=headers,
@@ -400,14 +407,31 @@ def test_login_account_authorization_refresh_and_logout(
             "volume": 1,
         },
     )
-    assert denied_order.status_code == 403
+    assert denied_order.status_code == 404
+    missing_account_order = user_client.post(
+        "/api/orders",
+        headers=headers,
+        json={
+            "client_order_id": f"MISSING-{auth_context.suffix}",
+            "account_id": f"MISSING{auth_context.suffix.upper()}",
+            "exchange_id": integration_context.exchange_id,
+            "symbol": integration_context.symbol,
+            "direction": "BUY",
+            "offset_flag": "OPEN",
+            "order_type": "LIMIT",
+            "limit_price": "3500",
+            "volume": 1,
+        },
+    )
+    assert missing_account_order.status_code == 404
+    assert missing_account_order.json() == denied_order.json()
     assert (
         user_client.get(
             "/api/trades",
             headers=headers,
             params={"account_id": account_b},
         ).status_code
-        == 403
+        == 404
     )
     assert (
         user_client.post(
@@ -590,7 +614,7 @@ def test_login_account_authorization_refresh_and_logout(
             "volume": 1,
         },
     )
-    assert duplicate_b_order.status_code == 403
+    assert duplicate_b_order.status_code == 404
     assert (
         user_client.post(
             f"/api/orders/{b_order_id}/cancel",
@@ -611,7 +635,7 @@ def test_login_account_authorization_refresh_and_logout(
     )
     assert missing_cancel.status_code == foreign_cancel.status_code == 404
     assert missing_cancel.json() == foreign_cancel.json()
-    # 即使把请求体账户伪造成A自己的账户，也必须依据订单真实归属返回403。
+    # 即使把请求体账户伪造成A自己的账户，也按订单真实归属返回安全404。
     assert (
         user_client.post(
             f"/api/orders/{b_order_id}/cancel",
@@ -674,14 +698,14 @@ def test_login_account_authorization_refresh_and_logout(
             headers=headers,
             params={"account_id": account_b},
         ).status_code
-        == 403
+        == 404
     )
     assert (
         user_client.get(
             f"/api/accounts/{account_b}/pnl/realtime",
             headers=headers,
         ).status_code
-        == 403
+        == 404
     )
 
     rotated = user_client.post("/api/auth/refresh")
@@ -711,6 +735,135 @@ def test_login_account_authorization_refresh_and_logout(
     assert {account_a, account_a_second, account_b}.issubset(
         returned_ids
     )
+
+
+def test_unauthorized_trade_requests_do_not_wait_on_foreign_row_locks(
+    auth_context,
+    integration_context,
+):
+    """真实行锁验证未授权请求不会等待他人的Account或Order。"""
+
+    admin_client = TestClient(app)
+    admin_login = admin_client.post(
+        "/api/auth/login",
+        json={
+            "username": auth_context.admin_username,
+            "password": auth_context.password,
+        },
+    )
+    admin_headers = _auth_header(admin_login)
+    user_a_id = f"ULA{auth_context.suffix.upper()}"
+    user_b_id = f"ULB{auth_context.suffix.upper()}"
+    account_a = f"LAA{auth_context.suffix.upper()}"
+    account_b = f"LBB{auth_context.suffix.upper()}"
+    _create_user(
+        admin_client,
+        admin_headers,
+        user_id=user_a_id,
+        username=f"lock_a_{auth_context.suffix}",
+        password=auth_context.password,
+    )
+    _create_user(
+        admin_client,
+        admin_headers,
+        user_id=user_b_id,
+        username=f"lock_b_{auth_context.suffix}",
+        password=auth_context.password,
+    )
+    _create_account(
+        admin_client,
+        admin_headers,
+        account_id=account_a,
+        user_id=user_a_id,
+    )
+    _create_account(
+        admin_client,
+        admin_headers,
+        account_id=account_b,
+        user_id=user_b_id,
+    )
+    b_order_response = admin_client.post(
+        "/api/orders",
+        headers=admin_headers,
+        json={
+            "client_order_id": f"LOCK-B-{auth_context.suffix}",
+            "account_id": account_b,
+            "exchange_id": integration_context.exchange_id,
+            "symbol": integration_context.symbol,
+            "direction": "BUY",
+            "offset_flag": "OPEN",
+            "order_type": "LIMIT",
+            "limit_price": "3500",
+            "volume": 1,
+        },
+    )
+    assert b_order_response.status_code == 200
+    b_order_id = b_order_response.json()["order_id"]
+
+    user_login = TestClient(app).post(
+        "/api/auth/login",
+        json={
+            "username": f"lock_a_{auth_context.suffix}",
+            "password": auth_context.password,
+        },
+    )
+    user_headers = _auth_header(user_login)
+
+    def assert_finishes_without_foreign_lock_wait(call, blocker):
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(call)
+            try:
+                response = future.result(timeout=2)
+            except TimeoutError:
+                blocker.rollback()
+                future.result(timeout=5)
+                pytest.fail(
+                    "未授权请求等待了其他用户的业务行锁",
+                    pytrace=False,
+                )
+        assert response.status_code == 404
+
+    with SessionLocal() as blocker:
+        blocker.scalar(
+            select(Account)
+            .where(Account.account_id == account_b)
+            .with_for_update()
+        )
+        assert_finishes_without_foreign_lock_wait(
+            lambda: TestClient(app).post(
+                "/api/orders",
+                headers=user_headers,
+                json={
+                    "client_order_id": f"LOCK-DENY-{auth_context.suffix}",
+                    "account_id": account_b,
+                    "exchange_id": integration_context.exchange_id,
+                    "symbol": integration_context.symbol,
+                    "direction": "BUY",
+                    "offset_flag": "OPEN",
+                    "order_type": "LIMIT",
+                    "limit_price": "3500",
+                    "volume": 1,
+                },
+            ),
+            blocker,
+        )
+        blocker.rollback()
+
+    with SessionLocal() as blocker:
+        blocker.scalar(
+            select(Order)
+            .where(Order.order_id == b_order_id)
+            .with_for_update()
+        )
+        assert_finishes_without_foreign_lock_wait(
+            lambda: TestClient(app).post(
+                f"/api/orders/{b_order_id}/cancel",
+                headers=user_headers,
+                json={"account_id": account_a},
+            ),
+            blocker,
+        )
+        blocker.rollback()
 
 
 def test_safe_login_errors_lockout_unlock_and_disabled_user(auth_context):
@@ -779,6 +932,56 @@ def test_safe_login_errors_lockout_unlock_and_disabled_user(auth_context):
             },
         )
     assert successful_login.status_code == 200
+    disabled_refresh_token = client.cookies.get(
+        settings.auth_refresh_cookie_name
+    )
+    assert disabled_refresh_token
+    with SessionLocal() as db:
+        admin_service.update_status(
+            db, user_id=user_id, status=UserStatus.DISABLED
+        )
+    with SessionLocal() as db:
+        active_sessions = db.scalar(
+            select(func.count(AuthRefreshSession.id)).where(
+                AuthRefreshSession.user_id == user_id,
+                AuthRefreshSession.revoked_at.is_(None),
+            )
+        )
+        assert active_sessions == 0
+    with SessionLocal() as db:
+        with pytest.raises(AuthenticationError) as disabled_refresh:
+            auth_context.service.refresh(
+                db,
+                refresh_token=disabled_refresh_token,
+                client_ip="disabled-user",
+                user_agent="pytest",
+            )
+    assert disabled_refresh.value.error_code == "REFRESH_TOKEN_INVALID"
+    with SessionLocal() as db:
+        admin_service.update_status(
+            db, user_id=user_id, status=UserStatus.ACTIVE
+        )
+    # 重新启用只允许重新登录，禁用前已经撤销的会话不会复活。
+    with SessionLocal() as db:
+        with pytest.raises(AuthenticationError) as reenabled_refresh:
+            auth_context.service.refresh(
+                db,
+                refresh_token=disabled_refresh_token,
+                client_ip="reenabled-user-old-token",
+                user_agent="pytest",
+            )
+    assert reenabled_refresh.value.error_code == "REFRESH_TOKEN_INVALID"
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={
+                "username": username,
+                "password": auth_context.password,
+            },
+        ).status_code
+        == 200
+    )
+
     with SessionLocal() as db:
         admin_service.update_status(
             db, user_id=user_id, status=UserStatus.DISABLED
@@ -872,13 +1075,14 @@ def test_password_change_updates_database_and_invalidates_old_login(
 
     # 修改前原密码确实可以通过完整登录流程。
     with SessionLocal() as db:
-        auth_context.service.login(
+        before_change = auth_context.service.login(
             db,
             username=username,
             password=old_password,
             client_ip="password-change-before",
             user_agent="pytest",
         )
+        old_refresh_token = before_change.tokens.refresh_token
 
     with caplog.at_level(logging.DEBUG):
         with SessionLocal() as db:
@@ -899,11 +1103,28 @@ def test_password_change_updates_database_and_invalidates_old_login(
                     user_agent="pytest",
                 )
         with SessionLocal() as db:
-            auth_context.service.login(
+            with pytest.raises(AuthenticationError) as old_refresh:
+                auth_context.service.refresh(
+                    db,
+                    refresh_token=old_refresh_token,
+                    client_ip="password-change-old-refresh",
+                    user_agent="pytest",
+                )
+            assert old_refresh.value.error_code == "REFRESH_TOKEN_INVALID"
+        with SessionLocal() as db:
+            new_login = auth_context.service.login(
                 db,
                 username=username,
                 password=new_password,
                 client_ip="password-change-new",
+                user_agent="pytest",
+            )
+            assert new_login.tokens.refresh_token != old_refresh_token
+        with SessionLocal() as db:
+            auth_context.service.refresh(
+                db,
+                refresh_token=new_login.tokens.refresh_token,
+                client_ip="password-change-new-refresh",
                 user_agent="pytest",
             )
 
@@ -912,6 +1133,75 @@ def test_password_change_updates_database_and_invalidates_old_login(
     assert new_password not in caplog.text
     assert original_hash not in caplog.text
     assert changed_hash not in caplog.text
+
+
+def test_password_and_refresh_revocation_roll_back_together_on_db_failure(
+    auth_context,
+):
+    """会话撤销后发生数据库异常时，密码和revoked_at必须一起回滚。"""
+
+    class FailingRefreshRepository(AuthRefreshSessionRepository):
+        @staticmethod
+        def revoke_active_by_user_id(db, *, user_id, revoked_at):
+            AuthRefreshSessionRepository.revoke_active_by_user_id(
+                db,
+                user_id=user_id,
+                revoked_at=revoked_at,
+            )
+            raise OperationalError(
+                "revoke refresh",
+                {},
+                Exception("forced failure"),
+            )
+
+    user_id = f"URB{auth_context.suffix.upper()}"
+    username = f"rollback_{auth_context.suffix}"
+    with SessionLocal() as db:
+        created = AdminUserService(
+            repository=UserRepository(),
+            password_service=auth_context.service.password_service,
+        ).create_user(
+            db,
+            UserCreateRequest(
+                user_id=user_id,
+                username=username,
+                password=auth_context.password,
+                display_name="改密回滚测试",
+            ),
+        )
+        original_hash = created.password_hash
+    with SessionLocal() as db:
+        login = auth_context.service.login(
+            db,
+            username=username,
+            password=auth_context.password,
+            client_ip="password-rollback",
+            user_agent="pytest",
+        )
+
+    failing_service = AdminUserService(
+        repository=UserRepository(),
+        password_service=auth_context.service.password_service,
+        refresh_repository=FailingRefreshRepository(),
+    )
+    with SessionLocal() as db:
+        with pytest.raises(DataAccessError):
+            failing_service.change_password(
+                db,
+                user_id=user_id,
+                new_password="Rollback-New-Password-456!",
+            )
+
+    with SessionLocal() as db:
+        persisted_user = UserRepository.get_by_user_id(db, user_id)
+        refresh_session = (
+            AuthRefreshSessionRepository.get_by_jti_for_update(
+                db,
+                login.tokens.refresh_jti,
+            )
+        )
+        assert persisted_user.password_hash == original_hash
+        assert refresh_session.revoked_at is None
 
 
 def test_authenticated_trading_api_sql_query_shapes(
@@ -971,17 +1261,27 @@ def test_authenticated_trading_api_sql_query_shapes(
         "volume": 1,
     }
 
-    with _count_sql() as create_sql:
-        created = user_client.post(
-            "/api/orders",
-            headers=headers,
-            json=payload,
-        )
+    with patch.object(
+        auth_context.token_service,
+        "decode",
+        wraps=auth_context.token_service.decode,
+    ) as decode_token:
+        with _count_sql() as create_sql:
+            created = user_client.post(
+                "/api/orders",
+                headers=headers,
+                json=payload,
+            )
     assert created.status_code == 200, created.text
+    assert decode_token.call_count == 1
     _assert_single_current_user_query(create_sql)
     create_accounts = _selects_from(create_sql, "account")
     assert len(create_accounts) == 1
-    assert "for update" in create_accounts[0].lower()
+    normalized_create_account = " ".join(
+        create_accounts[0].lower().split()
+    )
+    assert "for update" in normalized_create_account
+    assert "and account.user_id =" in normalized_create_account
 
     with _count_sql() as idempotent_sql:
         repeated = user_client.post(
@@ -992,14 +1292,44 @@ def test_authenticated_trading_api_sql_query_shapes(
     assert repeated.status_code == 200
     _assert_single_current_user_query(idempotent_sql)
     idempotent_accounts = _selects_from(idempotent_sql, "account")
-    assert len(idempotent_accounts) == 1
-    assert "for update" in idempotent_accounts[0].lower()
+    assert len(idempotent_accounts) == 0
     client_id_queries = [
         statement
         for statement in _selects_from(idempotent_sql, "orders")
         if "client_order_id" in statement.lower()
     ]
     assert len(client_id_queries) == 1
+    normalized_idempotent = " ".join(
+        client_id_queries[0].lower().split()
+    )
+    assert "join account" in normalized_idempotent
+    assert "account.user_id =" in normalized_idempotent
+    # 幂等命中在规则读取和账户锁之前返回。
+    assert len(_selects_from(idempotent_sql, "instrument")) == 0
+    assert len(_selects_from(idempotent_sql, "margin_rule")) == 0
+    assert len(_selects_from(idempotent_sql, "fee_rule")) == 0
+
+    admin_payload = dict(payload)
+    admin_payload["client_order_id"] = (
+        f"SQL-ADMIN-{auth_context.suffix}"
+    )
+    with _count_sql() as admin_create_sql:
+        admin_created = admin_client.post(
+            "/api/orders",
+            headers=admin_headers,
+            json=admin_payload,
+        )
+    assert admin_created.status_code == 200
+    admin_create_accounts = _selects_from(
+        admin_create_sql,
+        "account",
+    )
+    assert len(admin_create_accounts) == 1
+    normalized_admin_account = " ".join(
+        admin_create_accounts[0].lower().split()
+    )
+    assert "for update" in normalized_admin_account
+    assert "and account.user_id =" not in normalized_admin_account
 
     # 额外创建两条订单，证明列表授权没有按结果逐条查询账户。
     for index in (2, 3):
@@ -1062,10 +1392,23 @@ def test_authenticated_trading_api_sql_query_shapes(
     cancel_accounts = _selects_from(cancel_sql, "account")
     cancel_orders = _selects_from(cancel_sql, "orders")
     assert len(cancel_accounts) == 1
-    assert "for update" in cancel_accounts[0].lower()
+    normalized_cancel_account = " ".join(
+        cancel_accounts[0].lower().split()
+    )
+    assert "for update" in normalized_cancel_account
+    assert "and account.user_id =" in normalized_cancel_account
     assert len(
         [item for item in cancel_orders if "for update" in item.lower()]
     ) == 1
+    cancel_order_lock = next(
+        item for item in cancel_orders if "for update" in item.lower()
+    )
+    normalized_cancel_order = " ".join(
+        cancel_order_lock.lower().split()
+    )
+    assert "join account" in normalized_cancel_order
+    assert "account.user_id =" in normalized_cancel_order
+    assert "for update of orders" in normalized_cancel_order
 
     with _count_sql() as repeat_cancel_sql:
         repeat_cancel = user_client.post(
@@ -1078,7 +1421,11 @@ def test_authenticated_trading_api_sql_query_shapes(
     repeat_accounts = _selects_from(repeat_cancel_sql, "account")
     repeat_orders = _selects_from(repeat_cancel_sql, "orders")
     assert len(repeat_accounts) == 1
-    assert "for update" in repeat_accounts[0].lower()
+    normalized_repeat_account = " ".join(
+        repeat_accounts[0].lower().split()
+    )
+    assert "for update" in normalized_repeat_account
+    assert "and account.user_id =" in normalized_repeat_account
     assert len(
         [item for item in repeat_orders if "for update" in item.lower()]
     ) == 1

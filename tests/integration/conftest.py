@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+import os
 from uuid import uuid4
 
 import pytest
@@ -45,6 +46,30 @@ from app.services.account_authorization_service import (
 from app.api.auth_api import get_account_authorization_service
 from app.main import app
 from tests.api_auth_helpers import install_admin_auth_overrides
+
+
+@pytest.fixture(scope="session", autouse=True)
+def require_configured_integration_dependencies():
+    """
+    严格模式下先验证真实PostgreSQL和Redis，禁止把依赖故障显示为跳过。
+
+    默认模式继续兼容只运行单元测试的开发环境；正式验收使用
+    ``REQUIRE_INTEGRATION_DEPS=true``，任一依赖不可连接都会直接失败。
+    """
+
+    enabled = os.getenv("REQUIRE_INTEGRATION_DEPS", "").strip().lower()
+    if enabled not in {"1", "true", "yes", "on"}:
+        return
+    try:
+        with SessionLocal() as db:
+            db.execute(select(1))
+        redis_client.ping()
+    except Exception as exc:
+        pytest.fail(
+            "严格集成测试依赖检查失败："
+            f"{type(exc).__name__}",
+            pytrace=False,
+        )
 
 
 @dataclass(frozen=True)

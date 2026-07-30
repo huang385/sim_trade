@@ -86,7 +86,7 @@ def test_cancel_api_returns_cancelled_order_and_strips_account(cancel_api):
     assert call["db"] is database_session
     assert call["order_id"] == "O-1"
     assert call["request"].account_id == "A001"
-    assert callable(call["account_access_checker"])
+    assert call["account_owner_user_id"] is None
     assert call["conceal_resource_existence"] is False
 
 

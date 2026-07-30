@@ -151,6 +151,8 @@ class OrderService:
         db: Session,
         request: OrderCreateRequest,
         *,
+        account_owner_user_id: str | None = None,
+        conceal_account_existence: bool = False,
         account_access_checker: Callable[[Account], object] | None = None,
     ) -> Order:
         """
@@ -161,32 +163,25 @@ class OrderService:
         """
 
         try:
-            # 下单事务先锁定目标账户，并让API传入的集中授权回调直接校验
-            # 这个ORM对象。授权、资金检查和冻结全过程不再重复查询账户。
-            account = (
-                self.account_repository.get_by_account_id_for_update(
+            # 第一轮幂等查询不加业务行锁。普通用户通过Account归属Join限制
+            # 可见范围，因而不会读取或返回其他用户账户中的订单。
+            existing = (
+                self.order_repository.get_by_client_order_id(
                     db=db,
                     account_id=request.account_id,
+                    client_order_id=request.client_order_id,
                 )
-            )
-            if account is None:
-                raise ResourceNotFoundError(
-                    "账户不存在",
-                    error_code="ACCOUNT_NOT_FOUND",
+                if account_owner_user_id is None
+                else self.order_repository.get_by_client_order_id_for_user(
+                    db=db,
+                    account_id=request.account_id,
+                    client_order_id=request.client_order_id,
+                    user_id=account_owner_user_id,
                 )
-            if account_access_checker is not None:
-                account_access_checker(account)
-
-            # 授权必须早于幂等返回，防止借用其他用户的账户和
-            # client_order_id读取已有订单。账户锁也串行化并发幂等请求。
-            existing = self.order_repository.get_by_client_order_id(
-                db=db,
-                account_id=request.account_id,
-                client_order_id=request.client_order_id,
             )
             if existing is not None:
-                # 先分离已完整加载的订单，再提交释放Account行锁。这样响应
-                # 序列化不会因expire_on_commit再次查询同一订单。
+                # 幂等命中不查询当前规则，也不锁账户；提交只结束本次只读
+                # 事务，分离对象避免响应序列化触发额外SQL。
                 db.expunge(existing)
                 db.commit()
                 return existing
@@ -248,6 +243,48 @@ class OrderService:
                 if is_open
                 else Decimal("0.000000")
             )
+
+            # 规则读取、订单校验及开仓金额纯计算完成后才锁定账户，缩短同一
+            # 账户并发下单的行锁持有时间。普通用户把user_id直接放入锁定
+            # SQL，未授权请求不会锁住其他用户账户；管理员使用无范围锁。
+            account = (
+                self.account_repository.get_by_account_id_for_update(
+                    db=db,
+                    account_id=request.account_id,
+                )
+                if account_owner_user_id is None
+                else self.account_repository.get_owned_account_for_update(
+                    db=db,
+                    account_id=request.account_id,
+                    user_id=account_owner_user_id,
+                )
+            )
+            if account is None:
+                if conceal_account_existence:
+                    raise ResourceNotFoundError(
+                        "目标资源不存在",
+                        error_code="RESOURCE_NOT_FOUND",
+                    )
+                raise ResourceNotFoundError(
+                    "账户不存在",
+                    error_code="ACCOUNT_NOT_FOUND",
+                )
+            # 保留可选回调供内部调用方实施额外策略；HTTP普通用户的核心
+            # 所有权检查已经由上述范围锁SQL完成，不能依赖此回调才授权。
+            if account_access_checker is not None:
+                account_access_checker(account)
+
+            # 两个同client_order_id请求可能同时通过第一轮无锁查询。账户锁
+            # 串行化后必须再次检查，保证只冻结一次并只创建一笔订单。
+            existing = self.order_repository.get_by_client_order_id(
+                db=db,
+                account_id=request.account_id,
+                client_order_id=request.client_order_id,
+            )
+            if existing is not None:
+                db.expunge(existing)
+                db.commit()
+                return existing
 
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
@@ -477,14 +514,26 @@ class OrderService:
 
         except IntegrityError as exc:
             # 唯一键冲突可能来自极端并发幂等请求。
-            # 回滚失败事务后再次查询，存在原订单则直接返回。
+            # 回滚失败事务后必须按当前用户范围恢复幂等结果，不能越权返回
+            # 其他用户账户中的订单。
             db.rollback()
-            existing = self.order_repository.get_by_client_order_id(
-                db=db,
-                account_id=request.account_id,
-                client_order_id=request.client_order_id,
+            existing = (
+                self.order_repository.get_by_client_order_id(
+                    db=db,
+                    account_id=request.account_id,
+                    client_order_id=request.client_order_id,
+                )
+                if account_owner_user_id is None
+                else self.order_repository.get_by_client_order_id_for_user(
+                    db=db,
+                    account_id=request.account_id,
+                    client_order_id=request.client_order_id,
+                    user_id=account_owner_user_id,
+                )
             )
             if existing is not None:
+                db.expunge(existing)
+                db.commit()
                 return existing
             raise ResourceConflictError(
                 "订单编号冲突",

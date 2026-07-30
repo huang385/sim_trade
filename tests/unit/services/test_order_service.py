@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, func, select
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.common.exceptions import (
@@ -184,7 +184,8 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     result = service.create_order(db=db, request=make_request())
 
     assert result is existing
-    account_repository.get_by_account_id_for_update.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    rule_query_service.get_order_rules.assert_not_called()
     order_repository.create.assert_not_called()
     db.expunge.assert_called_once_with(existing)
     db.commit.assert_called_once()
@@ -467,6 +468,126 @@ def test_duplicate_detected_after_account_lock_does_not_freeze_twice():
     db.refresh.assert_not_called()
 
 
+def test_normal_user_uses_scoped_idempotency_and_account_lock_queries():
+    """普通用户的幂等读取和账户锁都必须在SQL中携带user_id。"""
+
+    db = Mock()
+    account = make_account()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id_for_user.return_value = None
+    order_repository.get_by_client_order_id.return_value = None
+    order_repository.create.return_value = SimpleNamespace(
+        order_id="O20260717000001"
+    )
+    account_repository = Mock()
+    account_repository.get_owned_account_for_update.return_value = account
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=Mock(),
+    )
+
+    service.create_order(
+        db,
+        make_request(),
+        account_owner_user_id="U001",
+        conceal_account_existence=True,
+    )
+
+    order_repository.get_by_client_order_id_for_user.assert_called_once_with(
+        db=db,
+        account_id="A001",
+        client_order_id="CLIENT-000001",
+        user_id="U001",
+    )
+    account_repository.get_owned_account_for_update.assert_called_once_with(
+        db=db,
+        account_id="A001",
+        user_id="U001",
+    )
+    account_repository.get_by_account_id_for_update.assert_not_called()
+
+
+def test_unauthorized_user_never_uses_unscoped_account_lock():
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id_for_user.return_value = None
+    account_repository = Mock()
+    account_repository.get_owned_account_for_update.return_value = None
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+    )
+
+    with pytest.raises(ResourceNotFoundError) as exc_info:
+        service.create_order(
+            db,
+            make_request(),
+            account_owner_user_id="U-OTHER",
+            conceal_account_existence=True,
+        )
+
+    assert exc_info.value.error_code == "RESOURCE_NOT_FOUND"
+    account_repository.get_owned_account_for_update.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    order_repository.get_by_client_order_id.assert_not_called()
+    order_repository.create.assert_not_called()
+
+
+def test_integrity_conflict_recovery_remains_user_scoped():
+    db = Mock()
+    existing = SimpleNamespace(order_id="EXISTING")
+    order_repository = Mock()
+    order_repository.get_by_client_order_id_for_user.side_effect = [
+        None,
+        existing,
+    ]
+    order_repository.get_by_client_order_id.return_value = None
+    # 服务只对IntegrityError执行幂等恢复，使用其真实异常构造冲突。
+    order_repository.create.side_effect = IntegrityError(
+        "insert order",
+        {},
+        Exception("unique"),
+    )
+    account_repository = Mock()
+    account_repository.get_owned_account_for_update.return_value = (
+        make_account()
+    )
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+    )
+
+    result = service.create_order(
+        db,
+        make_request(),
+        account_owner_user_id="U001",
+        conceal_account_existence=True,
+    )
+
+    assert result is existing
+    assert (
+        order_repository.get_by_client_order_id_for_user.call_count == 2
+    )
+    assert all(
+        call.kwargs["user_id"] == "U001"
+        for call in (
+            order_repository.get_by_client_order_id_for_user.call_args_list
+        )
+    )
+    db.rollback.assert_called_once()
+    db.commit.assert_called_once()
+
+
 def test_missing_account_rolls_back_and_does_not_create_order():
     db = Mock()
     order_repository = Mock()
@@ -521,7 +642,7 @@ def test_freeze_failure_does_not_create_order():
         "FEE_RULE_NOT_FOUND",
     ],
 )
-def test_reference_rule_failure_rolls_back_locked_account(error_code):
+def test_reference_rule_failure_occurs_before_account_lock(error_code):
     db = Mock()
     order_repository = Mock()
     order_repository.get_by_client_order_id.return_value = None
@@ -544,7 +665,7 @@ def test_reference_rule_failure_rolls_back_locked_account(error_code):
         service.create_order(db=db, request=make_request())
 
     assert exc_info.value.error_code == error_code
-    account_repository.get_by_account_id_for_update.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
     order_repository.create.assert_not_called()
     db.rollback.assert_called_once_with()
 
@@ -680,3 +801,19 @@ def test_account_repository_uses_select_for_update():
 
     statement = db.scalar.call_args.args[0]
     assert statement._for_update_arg is not None
+
+
+def test_owned_account_repository_puts_user_scope_in_for_update_sql():
+    db = Mock()
+
+    AccountRepository.get_owned_account_for_update(
+        db,
+        account_id="A001",
+        user_id="U001",
+    )
+
+    statement = db.scalar.call_args.args[0]
+    sql = str(statement).lower()
+    assert statement._for_update_arg is not None
+    assert "account.account_id" in sql
+    assert "account.user_id" in sql

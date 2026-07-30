@@ -55,6 +55,31 @@ class AccountRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def get_owned_account_for_update(
+        db: Session,
+        *,
+        account_id: str,
+        user_id: str,
+    ) -> Account | None:
+        """
+        按账户编号和用户归属同时查询并锁定账户。
+
+        普通用户交易请求必须使用该方法，把授权边界下推到SQL，而不是
+        先锁定任意账户后再在Python中判断归属。不存在和属于其他用户
+        都返回None，因此未授权请求不会等待或占用他人账户行锁。
+        """
+
+        statement = (
+            select(Account)
+            .where(
+                Account.account_id == account_id,
+                Account.user_id == user_id,
+            )
+            .with_for_update()
+        )
+        return db.scalar(statement)
+
+    @staticmethod
     def list_all(
         db: Session,
     ) -> Sequence[Account]:

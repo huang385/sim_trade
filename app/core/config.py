@@ -175,5 +175,7 @@ class Settings(BaseSettings):
             raise ValueError("生产环境JWT认证密钥未配置或强度不足")
         if not self.auth_refresh_cookie_secure:
             raise ValueError("生产环境Refresh Cookie必须启用Secure")
+        if self.debug:
+            raise ValueError("生产环境必须关闭Debug模式")
 
 settings = Settings()

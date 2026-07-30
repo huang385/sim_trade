@@ -10,6 +10,9 @@ from app.common.exceptions import (
 from app.common.time_utils import utc_now
 from app.enums.auth_enums import UserStatus
 from app.models.app_user import AppUser
+from app.repositories.auth_refresh_session_repository import (
+    AuthRefreshSessionRepository,
+)
 from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import UserCreateRequest
 from app.services.password_service import PasswordService
@@ -23,9 +26,13 @@ class AdminUserService:
         *,
         repository: UserRepository,
         password_service: PasswordService,
+        refresh_repository: AuthRefreshSessionRepository | None = None,
     ):
         self.repository = repository
         self.password_service = password_service
+        self.refresh_repository = (
+            refresh_repository or AuthRefreshSessionRepository()
+        )
 
     def create_user(
         self, db: Session, request: UserCreateRequest
@@ -95,11 +102,18 @@ class AdminUserService:
                 "用户不存在",
                 error_code="USER_NOT_FOUND",
             )
-        user.password_hash = self.password_service.hash_password(
-            new_password
-        )
-        user.password_changed_at = utc_now()
+        changed_at = utc_now()
+        user.password_hash = self.password_service.hash_password(new_password)
+        user.password_changed_at = changed_at
         try:
+            # 密码更新和Refresh会话撤销属于同一数据库事务，任何一步失败
+            # 都会全部回滚。既有Access Token不加入黑名单，仍最多存活到
+            # 原15分钟有效期结束。
+            self.refresh_repository.revoke_active_by_user_id(
+                db,
+                user_id=user.user_id,
+                revoked_at=changed_at,
+            )
             db.commit()
             db.refresh(user)
             return user
@@ -121,13 +135,20 @@ class AdminUserService:
             raise ResourceNotFoundError(
                 "用户不存在", error_code="USER_NOT_FOUND"
             )
-        user.status = status.value
-        if status == UserStatus.ACTIVE:
-            user.failed_login_count = 0
-            user.locked_until = None
-        elif status == UserStatus.DISABLED:
-            user.locked_until = None
         try:
+            user.status = status.value
+            if status == UserStatus.ACTIVE:
+                user.failed_login_count = 0
+                user.locked_until = None
+            elif status == UserStatus.DISABLED:
+                user.locked_until = None
+                # 禁用和Refresh会话撤销必须原子提交。之后即使重新启用用户，
+                # 已写入revoked_at的旧会话也不会恢复。
+                self.refresh_repository.revoke_active_by_user_id(
+                    db,
+                    user_id=user.user_id,
+                    revoked_at=utc_now(),
+                )
             db.commit()
             db.refresh(user)
             return user

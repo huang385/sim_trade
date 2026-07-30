@@ -6,14 +6,19 @@ from unittest.mock import Mock
 
 import pytest
 from argon2 import PasswordHasher
+from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import (
     AuthenticationError,
+    DataAccessError,
     ServiceUnavailableError,
 )
 from app.common.time_utils import utc_now
 from app.core.config import Settings
-from app.enums.auth_enums import TokenType
+from app.enums.auth_enums import TokenType, UserStatus
+from app.repositories.auth_refresh_session_repository import (
+    AuthRefreshSessionRepository,
+)
 from app.repositories.user_repository import UserRepository
 from app.services.admin_user_service import AdminUserService
 from app.services.password_service import PasswordService
@@ -175,8 +180,31 @@ def test_production_requires_safe_secret_and_secure_refresh_cookie():
     secure.validate_runtime_security()
 
 
+def test_production_requires_debug_disabled_without_exposing_secret():
+    production_debug = Settings(
+        _env_file=None,
+        app_env="production",
+        debug=True,
+        auth_jwt_secret=VALID_TEST_SECRET,
+        auth_refresh_cookie_secure=True,
+    )
+    development_debug = Settings(
+        _env_file=None,
+        app_env="dev",
+        debug=True,
+        auth_jwt_secret="",
+        auth_refresh_cookie_secure=False,
+    )
+
+    with pytest.raises(ValueError, match="Debug") as exc_info:
+        production_debug.validate_runtime_security()
+    assert VALID_TEST_SECRET not in str(exc_info.value)
+    development_debug.validate_runtime_security()
+
+
 def test_admin_password_change_commits_only_in_service():
     repository = Mock(spec=UserRepository)
+    refresh_repository = Mock(spec=AuthRefreshSessionRepository)
     user = SimpleNamespace(
         user_id="U001",
         password_hash="old-hash",
@@ -188,6 +216,7 @@ def test_admin_password_change_commits_only_in_service():
     service = AdminUserService(
         repository=repository,
         password_service=password_service,
+        refresh_repository=refresh_repository,
     )
     db = Mock()
 
@@ -200,6 +229,11 @@ def test_admin_password_change_commits_only_in_service():
     assert result is user
     assert user.password_hash == "new-argon2-hash"
     assert user.password_changed_at is not None
+    refresh_repository.revoke_active_by_user_id.assert_called_once_with(
+        db,
+        user_id="U001",
+        revoked_at=user.password_changed_at,
+    )
     repository.get_by_user_id_for_update.assert_called_once_with(
         db,
         "U001",
@@ -209,6 +243,74 @@ def test_admin_password_change_commits_only_in_service():
     assert not hasattr(repository, "rollback")
     db.commit.assert_called_once()
     db.refresh.assert_called_once_with(user)
+
+
+def test_password_change_rolls_back_when_refresh_revocation_fails():
+    repository = Mock(spec=UserRepository)
+    user = SimpleNamespace(
+        user_id="U001",
+        password_hash="old-hash",
+        password_changed_at=None,
+    )
+    repository.get_by_user_id_for_update.return_value = user
+    password_service = Mock(spec=PasswordService)
+    password_service.hash_password.return_value = "new-argon2-hash"
+    refresh_repository = Mock(spec=AuthRefreshSessionRepository)
+    refresh_repository.revoke_active_by_user_id.side_effect = (
+        OperationalError("revoke", {}, Exception("failed"))
+    )
+    service = AdminUserService(
+        repository=repository,
+        password_service=password_service,
+        refresh_repository=refresh_repository,
+    )
+    db = Mock()
+
+    with pytest.raises(DataAccessError):
+        service.change_password(
+            db,
+            user_id="U001",
+            new_password="New-Password-456!",
+        )
+
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once()
+
+
+def test_disabling_user_revokes_sessions_but_reenabling_does_not_restore_them():
+    repository = Mock(spec=UserRepository)
+    user = SimpleNamespace(
+        user_id="U001",
+        status=UserStatus.ACTIVE.value,
+        failed_login_count=0,
+        locked_until=None,
+    )
+    repository.get_by_user_id_for_update.return_value = user
+    refresh_repository = Mock(spec=AuthRefreshSessionRepository)
+    service = AdminUserService(
+        repository=repository,
+        password_service=Mock(spec=PasswordService),
+        refresh_repository=refresh_repository,
+    )
+    db = Mock()
+
+    service.update_status(
+        db,
+        user_id="U001",
+        status=UserStatus.DISABLED,
+    )
+    revoke_call = refresh_repository.revoke_active_by_user_id.call_args
+    assert revoke_call.kwargs["user_id"] == "U001"
+    assert revoke_call.kwargs["revoked_at"] is not None
+
+    refresh_repository.reset_mock()
+    service.update_status(
+        db,
+        user_id="U001",
+        status=UserStatus.ACTIVE,
+    )
+    refresh_repository.revoke_active_by_user_id.assert_not_called()
+    assert user.status == UserStatus.ACTIVE.value
 
 
 def test_password_and_tokens_are_not_logged(caplog):

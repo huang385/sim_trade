@@ -36,7 +36,15 @@ def test_concurrent_orders_cannot_reuse_same_available_cash(integration_context)
         )
         try:
             with SessionLocal() as db:
-                return ("accepted", service.create_order(db, request).order_id)
+                return (
+                    "accepted",
+                    service.create_order(
+                        db,
+                        request,
+                        account_owner_user_id=integration_context.user_id,
+                        conceal_account_existence=True,
+                    ).order_id,
+                )
         except BusinessRuleError as exc:
             return ("rejected", exc.error_code)
 
@@ -59,5 +67,46 @@ def test_concurrent_orders_cannot_reuse_same_available_cash(integration_context)
         )
         assert order_count == 1
         assert account.available_cash == Decimal("1594.000000")
+        assert account.frozen_margin == Decimal("8400.000000")
+        assert account.frozen_commission == Decimal("6.000000")
+
+
+def test_concurrent_same_client_order_id_freezes_only_once(
+    integration_context,
+):
+    """两个同幂等键请求可以都成功，但必须返回同一订单且只冻结一次。"""
+
+    def submit(_index):
+        service = make_order_service(integration_context)
+        request = make_request(
+            integration_context,
+            client_order_id="CONCURRENT-SAME-ID",
+        )
+        with SessionLocal() as db:
+            return service.create_order(
+                db,
+                request,
+                account_owner_user_id=integration_context.user_id,
+                conceal_account_existence=True,
+            ).order_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        order_ids = list(executor.map(submit, range(2)))
+
+    assert len(set(order_ids)) == 1
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        order_count = db.scalar(
+            select(func.count(Order.id)).where(
+                Order.account_id == integration_context.account_id,
+                Order.client_order_id == "CONCURRENT-SAME-ID",
+            )
+        )
+        assert order_count == 1
+        assert account.available_cash == Decimal("91594.000000")
         assert account.frozen_margin == Decimal("8400.000000")
         assert account.frozen_commission == Decimal("6.000000")

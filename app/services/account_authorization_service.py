@@ -58,9 +58,10 @@ class AccountAuthorizationService:
             for_update=for_update,
         )
         if account is None:
-            raise AuthorizationError(
-                "无权访问该交易账户",
-                error_code="ACCOUNT_ACCESS_DENIED",
+            # 普通用户不能通过403/404差异判断其他账户是否存在。
+            raise ResourceNotFoundError(
+                "目标资源不存在",
+                error_code="RESOURCE_NOT_FOUND",
             )
         return account
 

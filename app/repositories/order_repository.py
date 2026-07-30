@@ -74,6 +74,31 @@ class OrderRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def get_by_order_id_for_user_for_update(
+        db: Session,
+        *,
+        order_id: str,
+        user_id: str,
+    ) -> Order | None:
+        """
+        按普通用户可见范围查询并只锁定订单行。
+
+        Account连接只用于所有权过滤；``FOR UPDATE OF orders``不会提前
+        锁定账户，后续事务仍严格遵循Order→Account的固定锁顺序。
+        """
+
+        statement = (
+            select(Order)
+            .join(Account, Account.account_id == Order.account_id)
+            .where(
+                Order.order_id == order_id,
+                Account.user_id == user_id,
+            )
+            .with_for_update(of=Order)
+        )
+        return db.scalar(statement)
+
+    @staticmethod
     def get_by_client_order_id(
         db: Session,
         account_id: str,
@@ -84,6 +109,27 @@ class OrderRepository:
         statement = select(Order).where(
             Order.account_id == account_id,
             Order.client_order_id == client_order_id,
+        )
+        return db.scalar(statement)
+
+    @staticmethod
+    def get_by_client_order_id_for_user(
+        db: Session,
+        *,
+        account_id: str,
+        client_order_id: str,
+        user_id: str,
+    ) -> Order | None:
+        """在账户归属范围内查询幂等订单，不暴露其他用户订单。"""
+
+        statement = (
+            select(Order)
+            .join(Account, Account.account_id == Order.account_id)
+            .where(
+                Order.account_id == account_id,
+                Order.client_order_id == client_order_id,
+                Account.user_id == user_id,
+            )
         )
         return db.scalar(statement)
 

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import (
@@ -13,6 +14,7 @@ from app.common.exceptions import (
     ResourceNotFoundError,
 )
 from app.schemas.order_schema import OrderCancelRequest
+from app.repositories.order_repository import OrderRepository
 from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_freeze_service import OrderFreezeService
 
@@ -242,6 +244,87 @@ def test_actual_order_account_is_authorized_before_idempotent_return():
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
     db.rollback.assert_called_once()
+
+
+def test_normal_user_scopes_order_and_account_locks_in_sql():
+    order = make_order(
+        status="CANCELLED",
+        remaining_volume=0,
+        cancelled_volume=10,
+        frozen_margin=Decimal("0"),
+        frozen_commission=Decimal("0"),
+    )
+    account = make_account()
+    order_repository = Mock()
+    account_repository = Mock()
+    order_repository.get_by_order_id_for_user_for_update.return_value = order
+    account_repository.get_owned_account_for_update.return_value = account
+    service = OrderCancellationService(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        outbox_repository=Mock(),
+    )
+    db = Mock()
+
+    service.cancel_order(
+        db=db,
+        order_id="O-1",
+        request=OrderCancelRequest(account_id="A001"),
+        account_owner_user_id="U001",
+        conceal_resource_existence=True,
+    )
+
+    order_repository.get_by_order_id_for_user_for_update.assert_called_once_with(
+        db,
+        order_id="O-1",
+        user_id="U001",
+    )
+    order_repository.get_by_order_id_for_update.assert_not_called()
+    account_repository.get_owned_account_for_update.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+
+
+def test_unauthorized_cancel_does_not_lock_foreign_order_or_account():
+    order_repository = Mock()
+    account_repository = Mock()
+    order_repository.get_by_order_id_for_user_for_update.return_value = None
+    service = OrderCancellationService(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        outbox_repository=Mock(),
+    )
+
+    with pytest.raises(ResourceNotFoundError) as exc_info:
+        service.cancel_order(
+            db=Mock(),
+            order_id="O-FOREIGN",
+            request=OrderCancelRequest(account_id="A-FOREIGN"),
+            account_owner_user_id="U001",
+            conceal_resource_existence=True,
+        )
+
+    assert exc_info.value.error_code == "RESOURCE_NOT_FOUND"
+    order_repository.get_by_order_id_for_update.assert_not_called()
+    account_repository.get_owned_account_for_update.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+
+
+def test_user_scoped_order_lock_only_locks_orders_table():
+    db = Mock()
+
+    OrderRepository.get_by_order_id_for_user_for_update(
+        db,
+        order_id="O-1",
+        user_id="U001",
+    )
+
+    statement = db.scalar.call_args.args[0]
+    sql = str(
+        statement.compile(dialect=postgresql.dialect())
+    ).lower()
+    assert "join account" in sql
+    assert "account.user_id" in sql
+    assert "for update of orders" in sql
 
 
 @pytest.mark.parametrize(

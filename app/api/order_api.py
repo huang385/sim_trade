@@ -33,9 +33,6 @@ router = APIRouter(
 def create_order(
     request: OrderCreateRequest,
     current_user: AppUser = Depends(require_active_user),
-    authorization: AccountAuthorizationService = Depends(
-        get_account_authorization_service
-    ),
     db: Session = Depends(get_db),
     service: OrderService = Depends(get_order_service),
 ):
@@ -48,16 +45,17 @@ def create_order(
     相同账户和 client_order_id 重复提交时返回原订单。
     """
 
-    def require_locked_account_access(account):
-        return authorization.require_loaded_account_access(
-            current_user,
-            account,
-        )
-
     return service.create_order(
         db=db,
         request=request,
-        account_access_checker=require_locked_account_access,
+        account_owner_user_id=(
+            None
+            if current_user.role == UserRole.ADMIN.value
+            else current_user.user_id
+        ),
+        conceal_account_existence=(
+            current_user.role != UserRole.ADMIN.value
+        ),
     )
 
 
@@ -94,9 +92,6 @@ def cancel_order(
     order_id: str,
     request: OrderCancelRequest,
     current_user: AppUser = Depends(require_active_user),
-    authorization: AccountAuthorizationService = Depends(
-        get_account_authorization_service
-    ),
     db: Session = Depends(get_db),
     service: OrderCancellationService = Depends(
         get_order_cancellation_service
@@ -109,20 +104,15 @@ def cancel_order(
     PostgreSQL 事务全部由 OrderCancellationService 负责。
     """
 
-    # Service锁定真实订单后立即执行该授权回调，不能信任请求体account_id，
-    # 也不会为授权额外普通查询一次订单。
-    def require_order_account_access(account):
-        return authorization.require_loaded_account_access(
-            current_user,
-            account,
-            conceal_forbidden=True,
-        )
-
     return service.cancel_order(
         db=db,
         order_id=order_id,
         request=request,
-        account_access_checker=require_order_account_access,
+        account_owner_user_id=(
+            None
+            if current_user.role == UserRole.ADMIN.value
+            else current_user.user_id
+        ),
         conceal_resource_existence=(
             current_user.role != UserRole.ADMIN.value
         ),

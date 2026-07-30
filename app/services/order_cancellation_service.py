@@ -92,6 +92,7 @@ class OrderCancellationService:
         db: Session,
         order_id: str,
         request: OrderCancelRequest,
+        account_owner_user_id: str | None = None,
         account_access_checker: Callable[[Account], object] | None = None,
         conceal_resource_existence: bool = False,
     ) -> Order:
@@ -105,10 +106,23 @@ class OrderCancellationService:
         normalized_order_id = order_id.strip()
         normalized_account_id = request.account_id.strip()
         try:
-            # 固定锁顺序第一步：先锁订单，与成交结算保持一致。
-            order = self.order_repository.get_by_order_id_for_update(
-                db,
-                normalized_order_id,
+            # 固定锁顺序第一步：先锁订单。普通用户在同一条SQL中通过
+            # Account.user_id限制所有权，并使用FOR UPDATE OF orders只锁
+            # 订单行；管理员才使用不带用户范围的订单锁。
+            order = (
+                self.order_repository.get_by_order_id_for_update(
+                    db,
+                    normalized_order_id,
+                )
+                if account_owner_user_id is None
+                else (
+                    self.order_repository
+                    .get_by_order_id_for_user_for_update(
+                        db,
+                        order_id=normalized_order_id,
+                        user_id=account_owner_user_id,
+                    )
+                )
             )
             if order is None:
                 if conceal_resource_existence:
@@ -120,13 +134,26 @@ class OrderCancellationService:
                     "订单不存在",
                     error_code="ORDER_NOT_FOUND",
                 )
-            # 固定锁顺序第二步：根据数据库订单真实归属锁定账户。授权、
-            # 幂等判断和后续资源释放都复用该对象，不信任请求体account_id。
-            account = self.account_repository.get_by_account_id_for_update(
-                db,
-                order.account_id,
+            # 固定锁顺序第二步：根据数据库订单真实归属锁定账户。普通用户
+            # 再次在锁定SQL中校验归属，防止订单查询后账户所有权并发变化。
+            account = (
+                self.account_repository.get_by_account_id_for_update(
+                    db,
+                    order.account_id,
+                )
+                if account_owner_user_id is None
+                else self.account_repository.get_owned_account_for_update(
+                    db,
+                    account_id=order.account_id,
+                    user_id=account_owner_user_id,
+                )
             )
             if account is None:
+                if conceal_resource_existence:
+                    raise ResourceNotFoundError(
+                        "目标资源不存在",
+                        error_code="RESOURCE_NOT_FOUND",
+                    )
                 raise ResourceNotFoundError(
                     "订单不存在",
                     error_code="ORDER_NOT_FOUND",
