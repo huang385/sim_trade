@@ -24,6 +24,7 @@ from app.repositories.trade_position_allocation_repository import (
 )
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.order_cancellation_service import OrderCancellationService
+from app.services.account_access_scope import AccountAccessScope
 from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
 )
@@ -513,7 +514,9 @@ def test_partial_close_then_cancel_releases_only_remaining_allocation():
             command("TICK-1", "3522", 3),
         )
     with session_factory() as db:
-        result = OrderCancellationService().cancel_order(
+        result = OrderCancellationService(
+            default_access_scope=AccountAccessScope.admin()
+        ).cancel_order(
             db=db,
             order_id="O-CLOSE",
             request=OrderCancelRequest(account_id="A001"),
@@ -755,7 +758,9 @@ def test_close_by_amount_uses_fill_price_and_reconciles_frozen_difference():
         assert account.available_cash == Decimal("71215.934000")
 
     with session_factory() as db:
-        OrderCancellationService().cancel_order(
+        OrderCancellationService(
+            default_access_scope=AccountAccessScope.admin()
+        ).cancel_order(
             db=db,
             order_id="O-CLOSE",
             request=OrderCancelRequest(account_id="A001"),
@@ -948,7 +953,9 @@ def test_plain_close_partial_fill_then_cancel_releases_each_remaining_fee():
             command("TICK-CROSS-CANCEL", "3520", 3),
         )
     with session_factory() as db:
-        OrderCancellationService().cancel_order(
+        OrderCancellationService(
+            default_access_scope=AccountAccessScope.admin()
+        ).cancel_order(
             db=db,
             order_id="O-CLOSE",
             request=OrderCancelRequest(account_id="A001"),

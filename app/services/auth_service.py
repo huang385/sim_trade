@@ -165,12 +165,28 @@ class AuthService:
         client_ip: str,
         user_agent: str | None,
     ) -> AuthResult:
-        """锁定旧会话并原子完成撤销、替换和新Token签发。"""
+        """按AppUser→RefreshSession顺序锁定并原子轮换Refresh Token。"""
 
         claims = self.token_service.decode(
             refresh_token,
             expected_type=TokenType.REFRESH,
         )
+        # 认证事务统一先锁用户，再锁Refresh会话。改密和禁用也采用该顺序，
+        # 避免两个事务分别持有一端行锁并相互等待形成PostgreSQL死锁。
+        user = self.user_repository.get_by_user_id_for_update(
+            db, claims.user_id
+        )
+        if (
+            user is None
+            or user.status != UserStatus.ACTIVE.value
+            or user.user_id != claims.user_id
+        ):
+            db.rollback()
+            raise AuthenticationError(
+                "Refresh Token已失效",
+                error_code="REFRESH_TOKEN_INVALID",
+            )
+
         refresh_session = (
             self.refresh_repository.get_by_jti_for_update(db, claims.jti)
         )
@@ -183,25 +199,13 @@ class AuthService:
             or not hmac.compare_digest(
                 refresh_session.token_hash, expected_hash
             )
+            or claims.user_id != refresh_session.user_id
+            or user.user_id != refresh_session.user_id
         ):
             db.rollback()
             raise AuthenticationError(
                 "Refresh Token已失效",
                 error_code="REFRESH_TOKEN_INVALID",
-            )
-
-        user = self.user_repository.get_by_user_id_for_update(
-            db, claims.user_id
-        )
-        if (
-            user is None
-            or user.status != UserStatus.ACTIVE.value
-            or user.user_id != refresh_session.user_id
-        ):
-            db.rollback()
-            raise AuthenticationError(
-                "用户当前不可刷新登录会话",
-                error_code="REFRESH_USER_INACTIVE",
             )
 
         tokens = self.token_service.create_pair(user.user_id, now=now)

@@ -3,12 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import require_active_user
-from app.enums.auth_enums import UserRole
 from app.models.app_user import AppUser
 from app.api.auth_api import get_account_authorization_service
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
+from app.services.account_access_scope import AccountAccessScope
 from app.schemas.order_schema import (
     OrderCancelRequest,
     OrderCreateRequest,
@@ -48,14 +48,7 @@ def create_order(
     return service.create_order(
         db=db,
         request=request,
-        account_owner_user_id=(
-            None
-            if current_user.role == UserRole.ADMIN.value
-            else current_user.user_id
-        ),
-        conceal_account_existence=(
-            current_user.role != UserRole.ADMIN.value
-        ),
+        access_scope=AccountAccessScope.from_current_user(current_user),
     )
 
 
@@ -108,14 +101,7 @@ def cancel_order(
         db=db,
         order_id=order_id,
         request=request,
-        account_owner_user_id=(
-            None
-            if current_user.role == UserRole.ADMIN.value
-            else current_user.user_id
-        ),
-        conceal_resource_existence=(
-            current_user.role != UserRole.ADMIN.value
-        ),
+        access_scope=AccountAccessScope.from_current_user(current_user),
     )
 
 

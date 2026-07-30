@@ -6,6 +6,7 @@ import pytest
 from app.common.exceptions import (
     BusinessRuleError,
     BusinessValidationError,
+    ResourceConflictError,
 )
 from app.enums.order_enums import OffsetFlag, OrderDirection, OrderType
 from app.schemas.order_schema import OrderCreateRequest
@@ -34,6 +35,21 @@ def make_instrument(**overrides):
         "min_volume": 1,
         "max_volume": 100,
         "price_tick": Decimal("1"),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_existing_order(**overrides):
+    values = {
+        "account_id": "A001",
+        "exchange_id": "SHFE",
+        "symbol": "RB2610",
+        "direction": "BUY",
+        "offset_flag": "OPEN",
+        "order_type": "LIMIT",
+        "limit_price": Decimal("3500.000000"),
+        "total_volume": 2,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -146,3 +162,39 @@ def test_rejects_invalid_price_tick():
         )
 
     assert exc_info.value.error_code == "INVALID_PRICE_TICK"
+
+
+def test_identical_idempotent_order_request_is_accepted():
+    OrderValidationService.validate_idempotent_order_request(
+        existing_order=make_existing_order(
+            exchange_id="shfe",
+            symbol="rb2610",
+        ),
+        request=make_request(limit_price=Decimal("3500.0000004")),
+    )
+
+
+@pytest.mark.parametrize(
+    ("request_override", "existing_override"),
+    [
+        ({"account_id": "A002"}, {}),
+        ({"exchange_id": "DCE"}, {}),
+        ({"symbol": "JD2609"}, {}),
+        ({"direction": OrderDirection.SELL}, {}),
+        ({"offset_flag": OffsetFlag.CLOSE}, {}),
+        ({"order_type": "MARKET"}, {}),
+        ({"limit_price": Decimal("3501")}, {}),
+        ({"volume": 3}, {}),
+    ],
+)
+def test_reused_idempotency_key_rejects_changed_business_fields(
+    request_override,
+    existing_override,
+):
+    with pytest.raises(ResourceConflictError) as exc_info:
+        OrderValidationService.validate_idempotent_order_request(
+            existing_order=make_existing_order(**existing_override),
+            request=make_request(**request_override),
+        )
+
+    assert exc_info.value.error_code == "IDEMPOTENCY_KEY_REUSED"

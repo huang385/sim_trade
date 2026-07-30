@@ -22,7 +22,6 @@ from app.enums.order_enums import (
     PositionFreezeAllocationStatus,
 )
 from app.models.order import Order
-from app.models.account import Account
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -31,6 +30,7 @@ from app.repositories.position_freeze_allocation_repository import (
 )
 from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
+from app.services.account_access_scope import AccountAccessScope
 from app.services.order_freeze_service import OrderFreezeService
 
 
@@ -74,6 +74,7 @@ class OrderCancellationService:
         allocation_repository: PositionFreezeAllocationRepository | None = None,
         event_id_factory: Callable[[], str] = generate_cancel_event_id,
         time_provider: Callable[[], datetime] = utc_now,
+        default_access_scope: AccountAccessScope | None = None,
     ):
         self.order_repository = order_repository or OrderRepository()
         self.account_repository = account_repository or AccountRepository()
@@ -85,6 +86,7 @@ class OrderCancellationService:
         )
         self.event_id_factory = event_id_factory
         self.time_provider = time_provider
+        self.default_access_scope = default_access_scope
 
     def cancel_order(
         self,
@@ -92,16 +94,18 @@ class OrderCancellationService:
         db: Session,
         order_id: str,
         request: OrderCancelRequest,
-        account_owner_user_id: str | None = None,
-        account_access_checker: Callable[[Account], object] | None = None,
-        conceal_resource_existence: bool = False,
+        access_scope: AccountAccessScope | None = None,
     ) -> Order:
         """
         锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。
 
-        外部API传入账户授权回调时，必须复用按数据库订单真实account_id
-        锁定的Account，并且在任何幂等返回之前执行。
+        访问范围必须由已认证用户显式构造；普通用户的user_id直接进入
+        Order和Account锁定SQL，并且在任何幂等返回之前完成授权。
         """
+
+        scope = access_scope or self.default_access_scope
+        if scope is None:
+            raise ValueError("撤销订单必须显式提供账户授权范围")
 
         normalized_order_id = order_id.strip()
         normalized_account_id = request.account_id.strip()
@@ -114,18 +118,18 @@ class OrderCancellationService:
                     db,
                     normalized_order_id,
                 )
-                if account_owner_user_id is None
+                if scope.is_admin
                 else (
                     self.order_repository
                     .get_by_order_id_for_user_for_update(
                         db,
                         order_id=normalized_order_id,
-                        user_id=account_owner_user_id,
+                        user_id=scope.user_id,
                     )
                 )
             )
             if order is None:
-                if conceal_resource_existence:
+                if scope.conceal_resource_existence:
                     raise ResourceNotFoundError(
                         "目标资源不存在",
                         error_code="RESOURCE_NOT_FOUND",
@@ -141,15 +145,15 @@ class OrderCancellationService:
                     db,
                     order.account_id,
                 )
-                if account_owner_user_id is None
+                if scope.is_admin
                 else self.account_repository.get_owned_account_for_update(
                     db,
                     account_id=order.account_id,
-                    user_id=account_owner_user_id,
+                    user_id=scope.user_id,
                 )
             )
             if account is None:
-                if conceal_resource_existence:
+                if scope.conceal_resource_existence:
                     raise ResourceNotFoundError(
                         "目标资源不存在",
                         error_code="RESOURCE_NOT_FOUND",
@@ -158,8 +162,6 @@ class OrderCancellationService:
                     "订单不存在",
                     error_code="ORDER_NOT_FOUND",
                 )
-            if account_access_checker is not None:
-                account_access_checker(account)
             if order.account_id != normalized_account_id:
                 raise ResourceConflictError(
                     "订单不属于指定账户",

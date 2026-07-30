@@ -26,7 +26,6 @@ from app.enums.order_enums import (
 )
 from app.enums.reference_data_enums import CommissionType
 from app.models.order import Order
-from app.models.account import Account
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
@@ -44,6 +43,7 @@ from app.services.fee_calculator import (
     FeeBucketKey,
     FeeCalculator,
 )
+from app.services.account_access_scope import AccountAccessScope
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_validation_service import OrderValidationService
@@ -125,6 +125,7 @@ class OrderService:
         order_id_factory: Callable[[], str] = generate_order_id,
         event_id_factory: Callable[[], str] = generate_event_id,
         allocation_id_factory: Callable[[], str] = generate_allocation_id,
+        default_access_scope: AccountAccessScope | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -145,15 +146,16 @@ class OrderService:
         self.order_id_factory = order_id_factory
         self.event_id_factory = event_id_factory
         self.allocation_id_factory = allocation_id_factory
+        # 仅测试或受信任内部调用可在构造时显式提供管理员范围。生产HTTP
+        # Service不设置默认值，每次请求必须传入由current_user构造的范围。
+        self.default_access_scope = default_access_scope
 
     def create_order(
         self,
         db: Session,
         request: OrderCreateRequest,
         *,
-        account_owner_user_id: str | None = None,
-        conceal_account_existence: bool = False,
-        account_access_checker: Callable[[Account], object] | None = None,
+        access_scope: AccountAccessScope | None = None,
     ) -> Order:
         """
         创建并接受一笔限价开仓或平仓订单。
@@ -162,24 +164,58 @@ class OrderService:
         使用相同 client_order_id 安全重试。
         """
 
+        scope = access_scope or self.default_access_scope
+        if scope is None:
+            raise ValueError("创建订单必须显式提供账户授权范围")
+
         try:
+            # 安全边界优先于规则错误：先以无锁查询确认账户存在和归属，
+            # 未授权请求不会读取合约、保证金或手续费规则，更不会锁他人账户。
+            authorized_account = (
+                self.account_repository.get_by_account_id(
+                    db,
+                    request.account_id,
+                )
+                if scope.is_admin
+                else self.account_repository.get_owned_account(
+                    db,
+                    account_id=request.account_id,
+                    user_id=scope.user_id,
+                    for_update=False,
+                )
+            )
+            if authorized_account is None:
+                if scope.conceal_resource_existence:
+                    raise ResourceNotFoundError(
+                        "目标资源不存在",
+                        error_code="RESOURCE_NOT_FOUND",
+                    )
+                raise ResourceNotFoundError(
+                    "账户不存在",
+                    error_code="ACCOUNT_NOT_FOUND",
+                )
+
             # 第一轮幂等查询不加业务行锁。普通用户通过Account归属Join限制
-            # 可见范围，因而不会读取或返回其他用户账户中的订单。
+            # 可见范围；命中后仍必须验证本次业务字段与原请求完全一致。
             existing = (
                 self.order_repository.get_by_client_order_id(
                     db=db,
                     account_id=request.account_id,
                     client_order_id=request.client_order_id,
                 )
-                if account_owner_user_id is None
+                if scope.is_admin
                 else self.order_repository.get_by_client_order_id_for_user(
                     db=db,
                     account_id=request.account_id,
                     client_order_id=request.client_order_id,
-                    user_id=account_owner_user_id,
+                    user_id=scope.user_id,
                 )
             )
             if existing is not None:
+                self.validation_service.validate_idempotent_order_request(
+                    existing_order=existing,
+                    request=request,
+                )
                 # 幂等命中不查询当前规则，也不锁账户；提交只结束本次只读
                 # 事务，分离对象避免响应序列化触发额外SQL。
                 db.expunge(existing)
@@ -252,15 +288,15 @@ class OrderService:
                     db=db,
                     account_id=request.account_id,
                 )
-                if account_owner_user_id is None
+                if scope.is_admin
                 else self.account_repository.get_owned_account_for_update(
                     db=db,
                     account_id=request.account_id,
-                    user_id=account_owner_user_id,
+                    user_id=scope.user_id,
                 )
             )
             if account is None:
-                if conceal_account_existence:
+                if scope.conceal_resource_existence:
                     raise ResourceNotFoundError(
                         "目标资源不存在",
                         error_code="RESOURCE_NOT_FOUND",
@@ -269,11 +305,6 @@ class OrderService:
                     "账户不存在",
                     error_code="ACCOUNT_NOT_FOUND",
                 )
-            # 保留可选回调供内部调用方实施额外策略；HTTP普通用户的核心
-            # 所有权检查已经由上述范围锁SQL完成，不能依赖此回调才授权。
-            if account_access_checker is not None:
-                account_access_checker(account)
-
             # 两个同client_order_id请求可能同时通过第一轮无锁查询。账户锁
             # 串行化后必须再次检查，保证只冻结一次并只创建一笔订单。
             existing = self.order_repository.get_by_client_order_id(
@@ -282,6 +313,10 @@ class OrderService:
                 client_order_id=request.client_order_id,
             )
             if existing is not None:
+                self.validation_service.validate_idempotent_order_request(
+                    existing_order=existing,
+                    request=request,
+                )
                 db.expunge(existing)
                 db.commit()
                 return existing
@@ -523,15 +558,19 @@ class OrderService:
                     account_id=request.account_id,
                     client_order_id=request.client_order_id,
                 )
-                if account_owner_user_id is None
+                if scope.is_admin
                 else self.order_repository.get_by_client_order_id_for_user(
                     db=db,
                     account_id=request.account_id,
                     client_order_id=request.client_order_id,
-                    user_id=account_owner_user_id,
+                    user_id=scope.user_id,
                 )
             )
             if existing is not None:
+                self.validation_service.validate_idempotent_order_request(
+                    existing_order=existing,
+                    request=request,
+                )
                 db.expunge(existing)
                 db.commit()
                 return existing

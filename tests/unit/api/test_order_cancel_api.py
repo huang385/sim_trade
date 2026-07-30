@@ -12,6 +12,7 @@ from app.main import app
 from app.services.order_cancellation_service import (
     get_order_cancellation_service,
 )
+from app.services.account_access_scope import AccountAccessScope
 from tests.api_auth_helpers import install_admin_auth_overrides
 
 
@@ -86,8 +87,7 @@ def test_cancel_api_returns_cancelled_order_and_strips_account(cancel_api):
     assert call["db"] is database_session
     assert call["order_id"] == "O-1"
     assert call["request"].account_id == "A001"
-    assert call["account_owner_user_id"] is None
-    assert call["conceal_resource_existence"] is False
+    assert call["access_scope"] == AccountAccessScope.admin()
 
 
 def test_cancel_api_returns_partially_cancelled_and_is_repeatable(cancel_api):

@@ -1,11 +1,14 @@
 from decimal import Decimal
 
+from app.common.decimal_utils import quantize_money
 from app.common.exceptions import (
     BusinessRuleError,
     BusinessValidationError,
+    ResourceConflictError,
 )
 from app.enums.order_enums import OffsetFlag, OrderType
 from app.models.instrument import Instrument
+from app.models.order import Order
 from app.schemas.order_schema import OrderCreateRequest
 
 
@@ -110,6 +113,45 @@ class OrderValidationService:
             raise BusinessValidationError(
                 "当前方法只校验开仓订单",
                 error_code="UNSUPPORTED_OFFSET_FLAG",
+            )
+
+    @staticmethod
+    def validate_idempotent_order_request(
+        *,
+        existing_order: Order,
+        request: OrderCreateRequest,
+    ) -> None:
+        """
+        校验同一client_order_id是否仍代表同一笔业务请求。
+
+        只比较不会随撮合和撤单变化的原始下单字段；价格统一按订单表六位
+        Decimal精度比较，禁止经过float。任一字段变化都拒绝复用幂等键。
+        """
+
+        existing_fields = (
+            existing_order.account_id.strip().upper(),
+            existing_order.exchange_id.strip().upper(),
+            existing_order.symbol.strip().upper(),
+            existing_order.direction,
+            existing_order.offset_flag,
+            existing_order.order_type,
+            quantize_money(Decimal(existing_order.limit_price)),
+            existing_order.total_volume,
+        )
+        request_fields = (
+            request.account_id.strip().upper(),
+            request.exchange_id.strip().upper(),
+            request.symbol.strip().upper(),
+            getattr(request.direction, "value", request.direction),
+            getattr(request.offset_flag, "value", request.offset_flag),
+            getattr(request.order_type, "value", request.order_type),
+            quantize_money(request.limit_price),
+            request.volume,
+        )
+        if existing_fields != request_fields:
+            raise ResourceConflictError(
+                "client_order_id已被其他订单请求使用",
+                error_code="IDEMPOTENCY_KEY_REUSED",
             )
 
     @staticmethod

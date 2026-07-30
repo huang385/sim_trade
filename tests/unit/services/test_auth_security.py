@@ -21,6 +21,8 @@ from app.repositories.auth_refresh_session_repository import (
 )
 from app.repositories.user_repository import UserRepository
 from app.services.admin_user_service import AdminUserService
+from app.services.auth_service import AuthService
+from app.services.login_rate_limit_service import LoginRateLimitService
 from app.services.password_service import PasswordService
 from app.services.token_service import TokenService
 
@@ -311,6 +313,51 @@ def test_disabling_user_revokes_sessions_but_reenabling_does_not_restore_them():
     )
     refresh_repository.revoke_active_by_user_id.assert_not_called()
     assert user.status == UserStatus.ACTIVE.value
+
+
+def test_refresh_locks_user_before_refresh_session():
+    calls: list[str] = []
+    token_service = _token_service()
+    pair = token_service.create_pair("U001")
+    user = SimpleNamespace(
+        user_id="U001",
+        status=UserStatus.ACTIVE.value,
+    )
+    refresh_session = SimpleNamespace(
+        user_id="U001",
+        token_hash=token_service.hash_refresh_token(pair.refresh_token),
+        expires_at=pair.refresh_expires_at,
+        revoked_at=None,
+        last_used_at=None,
+        replaced_by_jti=None,
+    )
+    user_repository = Mock(spec=UserRepository)
+    refresh_repository = Mock(spec=AuthRefreshSessionRepository)
+    user_repository.get_by_user_id_for_update.side_effect = (
+        lambda *_args: calls.append("USER") or user
+    )
+    refresh_repository.get_by_jti_for_update.side_effect = (
+        lambda *_args: calls.append("REFRESH_SESSION")
+        or refresh_session
+    )
+    service = AuthService(
+        user_repository=user_repository,
+        refresh_repository=refresh_repository,
+        password_service=Mock(spec=PasswordService),
+        token_service=token_service,
+        rate_limit_service=Mock(spec=LoginRateLimitService),
+    )
+    db = Mock()
+
+    service.refresh(
+        db,
+        refresh_token=pair.refresh_token,
+        client_ip="127.0.0.1",
+        user_agent="pytest",
+    )
+
+    assert calls == ["USER", "REFRESH_SESSION"]
+    db.commit.assert_called_once()
 
 
 def test_password_and_tokens_are_not_logged(caplog):

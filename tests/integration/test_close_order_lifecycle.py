@@ -21,6 +21,7 @@ from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.order_cancellation_service import OrderCancellationService
+from app.services.account_access_scope import AccountAccessScope
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
@@ -213,7 +214,9 @@ def test_close_today_partial_fill_then_cancel_complete_chain(
     ).action == "SETTLED"
 
     with SessionLocal() as db:
-        OrderCancellationService().cancel_order(
+        OrderCancellationService(
+            default_access_scope=AccountAccessScope.admin()
+        ).cancel_order(
             db=db,
             order_id=close_order.order_id,
             request=OrderCancelRequest(
@@ -506,7 +509,9 @@ def test_close_cancellation_only_locks_allocation_details(
         )
         with SessionLocal() as db:
             db.execute(text("SET LOCAL lock_timeout = '500ms'"))
-            result = OrderCancellationService().cancel_order(
+            result = OrderCancellationService(
+                default_access_scope=AccountAccessScope.admin()
+            ).cancel_order(
                 db=db,
                 order_id=close_order.order_id,
                 request=OrderCancelRequest(
@@ -576,7 +581,9 @@ def test_close_fill_and_cancel_concurrency_has_one_legal_result(
     def run_cancel():
         barrier.wait()
         with SessionLocal() as db:
-            return OrderCancellationService().cancel_order(
+            return OrderCancellationService(
+                default_access_scope=AccountAccessScope.admin()
+            ).cancel_order(
                 db=db,
                 order_id=close_order.order_id,
                 request=OrderCancelRequest(
@@ -650,7 +657,9 @@ def test_cancel_one_close_order_does_not_release_another_order(
         volume=3,
     )
     with SessionLocal() as db:
-        OrderCancellationService().cancel_order(
+        OrderCancellationService(
+            default_access_scope=AccountAccessScope.admin()
+        ).cancel_order(
             db=db,
             order_id=first.order_id,
             request=OrderCancelRequest(

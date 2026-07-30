@@ -8,13 +8,13 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import (
-    AuthorizationError,
     DataAccessError,
     ResourceConflictError,
     ResourceNotFoundError,
 )
 from app.schemas.order_schema import OrderCancelRequest
 from app.repositories.order_repository import OrderRepository
+from app.services.account_access_scope import AccountAccessScope
 from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_freeze_service import OrderFreezeService
 
@@ -86,6 +86,7 @@ def make_service(order, account=None):
         outbox_repository=outbox_repository,
         event_id_factory=lambda: "EVT-CANCEL-1",
         time_provider=lambda: FIXED_TIME,
+        default_access_scope=AccountAccessScope.admin(),
     )
     return service, order_repository, account_repository, outbox_repository
 
@@ -207,8 +208,16 @@ def test_repeated_cancel_ends_transaction_without_second_business_change(status)
     db.rollback.assert_not_called()
 
 
-def test_actual_order_account_is_authorized_before_idempotent_return():
-    """请求体伪造自有账户时，也必须按订单真实账户拒绝且不返回幂等结果。"""
+def test_missing_cancel_access_scope_never_falls_back_to_admin():
+    service, _, _, _ = make_service(make_order())
+    service.default_access_scope = None
+
+    with pytest.raises(ValueError, match="授权范围"):
+        cancel(service, Mock())
+
+
+def test_request_account_cannot_replace_database_order_account():
+    """请求体账户不一致时，仍以用户范围内的数据库订单归属为准。"""
 
     order = make_order(
         account_id="B001",
@@ -218,29 +227,29 @@ def test_actual_order_account_is_authorized_before_idempotent_return():
         frozen_margin=Decimal("0"),
         frozen_commission=Decimal("0"),
     )
-    service, _, account_repository, outbox = make_service(order)
-    checker = Mock(
-        side_effect=AuthorizationError(
-            "无权访问该交易账户",
-            error_code="ACCOUNT_ACCESS_DENIED",
-        )
+    service, order_repository, account_repository, outbox = make_service(order)
+    order_repository.get_by_order_id_for_user_for_update.return_value = order
+    account_repository.get_owned_account_for_update.return_value = (
+        make_account(account_id="B001")
     )
     db = Mock()
 
-    with pytest.raises(AuthorizationError):
+    with pytest.raises(ResourceConflictError) as exc_info:
         service.cancel_order(
             db=db,
             order_id="O-1",
             # 攻击者故意提交自己拥有的A001，但订单实际属于B001。
             request=OrderCancelRequest(account_id="A001"),
-            account_access_checker=checker,
+            access_scope=AccountAccessScope.for_user("U001"),
         )
 
-    locked_account = (
-        account_repository.get_by_account_id_for_update.return_value
+    assert exc_info.value.error_code == "ORDER_ACCOUNT_MISMATCH"
+    account_repository.get_owned_account_for_update.assert_called_once_with(
+        db,
+        account_id="B001",
+        user_id="U001",
     )
-    checker.assert_called_once_with(locked_account)
-    account_repository.get_by_account_id_for_update.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
     outbox.create_event.assert_not_called()
     db.commit.assert_not_called()
     db.rollback.assert_called_once()
@@ -263,6 +272,7 @@ def test_normal_user_scopes_order_and_account_locks_in_sql():
         order_repository=order_repository,
         account_repository=account_repository,
         outbox_repository=Mock(),
+        default_access_scope=AccountAccessScope.admin(),
     )
     db = Mock()
 
@@ -270,8 +280,7 @@ def test_normal_user_scopes_order_and_account_locks_in_sql():
         db=db,
         order_id="O-1",
         request=OrderCancelRequest(account_id="A001"),
-        account_owner_user_id="U001",
-        conceal_resource_existence=True,
+        access_scope=AccountAccessScope.for_user("U001"),
     )
 
     order_repository.get_by_order_id_for_user_for_update.assert_called_once_with(
@@ -292,6 +301,7 @@ def test_unauthorized_cancel_does_not_lock_foreign_order_or_account():
         order_repository=order_repository,
         account_repository=account_repository,
         outbox_repository=Mock(),
+        default_access_scope=AccountAccessScope.admin(),
     )
 
     with pytest.raises(ResourceNotFoundError) as exc_info:
@@ -299,8 +309,7 @@ def test_unauthorized_cancel_does_not_lock_foreign_order_or_account():
             db=Mock(),
             order_id="O-FOREIGN",
             request=OrderCancelRequest(account_id="A-FOREIGN"),
-            account_owner_user_id="U001",
-            conceal_resource_existence=True,
+            access_scope=AccountAccessScope.for_user("U001"),
         )
 
     assert exc_info.value.error_code == "RESOURCE_NOT_FOUND"
@@ -494,6 +503,7 @@ def test_lock_order_is_order_then_account():
         outbox_repository=Mock(),
         event_id_factory=lambda: "EVT-1",
         time_provider=lambda: FIXED_TIME,
+        default_access_scope=AccountAccessScope.admin(),
     )
 
     cancel(service, Mock())
@@ -547,6 +557,7 @@ def test_close_cancel_uses_complete_stable_lock_order():
         outbox_repository=Mock(),
         event_id_factory=lambda: "EVT-1",
         time_provider=lambda: FIXED_TIME,
+        default_access_scope=AccountAccessScope.admin(),
     )
 
     with pytest.raises(DataAccessError) as exc_info:

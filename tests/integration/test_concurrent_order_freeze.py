@@ -4,10 +4,11 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
-from app.common.exceptions import BusinessRuleError
+from app.common.exceptions import BusinessRuleError, ResourceConflictError
 from app.core.database import SessionLocal
 from app.models.account import Account
 from app.models.order import Order
+from app.services.account_access_scope import AccountAccessScope
 from tests.integration.conftest import make_order_service, make_request
 
 
@@ -41,8 +42,9 @@ def test_concurrent_orders_cannot_reuse_same_available_cash(integration_context)
                     service.create_order(
                         db,
                         request,
-                        account_owner_user_id=integration_context.user_id,
-                        conceal_account_existence=True,
+                        access_scope=AccountAccessScope.for_user(
+                            integration_context.user_id
+                        ),
                     ).order_id,
                 )
         except BusinessRuleError as exc:
@@ -86,8 +88,9 @@ def test_concurrent_same_client_order_id_freezes_only_once(
             return service.create_order(
                 db,
                 request,
-                account_owner_user_id=integration_context.user_id,
-                conceal_account_existence=True,
+                access_scope=AccountAccessScope.for_user(
+                    integration_context.user_id
+                ),
             ).order_id
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -110,3 +113,66 @@ def test_concurrent_same_client_order_id_freezes_only_once(
         assert account.available_cash == Decimal("91594.000000")
         assert account.frozen_margin == Decimal("8400.000000")
         assert account.frozen_commission == Decimal("6.000000")
+
+
+def test_concurrent_same_client_id_with_different_content_conflicts(
+    integration_context,
+):
+    """相同幂等键的不同业务内容只能有一个成功，另一请求必须返回冲突。"""
+
+    def submit(direction):
+        request = make_request(
+            integration_context,
+            client_order_id="CONCURRENT-DIFFERENT-CONTENT",
+            direction=direction,
+        )
+        try:
+            with SessionLocal() as db:
+                order = make_order_service(
+                    integration_context
+                ).create_order(
+                    db,
+                    request,
+                    access_scope=AccountAccessScope.for_user(
+                        integration_context.user_id
+                    ),
+                )
+                return ("accepted", order.order_id)
+        except ResourceConflictError as exc:
+            return ("conflict", exc.error_code)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(submit, ["BUY", "SELL"]))
+
+    assert sorted(item[0] for item in results) == ["accepted", "conflict"]
+    assert next(
+        item[1] for item in results if item[0] == "conflict"
+    ) == "IDEMPOTENCY_KEY_REUSED"
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        orders = list(
+            db.scalars(
+                select(Order).where(
+                    Order.account_id == integration_context.account_id,
+                    Order.client_order_id
+                    == "CONCURRENT-DIFFERENT-CONTENT",
+                )
+            )
+        )
+        assert len(orders) == 1
+        expected_margin = (
+            Decimal("8400.000000")
+            if orders[0].direction == "BUY"
+            else Decimal("9100.000000")
+        )
+        assert account.frozen_margin == expected_margin
+        assert account.frozen_commission == Decimal("6.000000")
+        assert account.available_cash == (
+            Decimal("100000.000000")
+            - expected_margin
+            - Decimal("6.000000")
+        )

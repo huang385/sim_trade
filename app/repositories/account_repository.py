@@ -50,6 +50,9 @@ class AccountRepository:
             select(Account)
             .where(Account.account_id == account_id)
             .with_for_update()
+            # 同一Session可能已为授权执行过无锁查询。取得行锁后必须用
+            # 数据库最新值覆盖Identity Map，不能复用加锁前的资金快照。
+            .execution_options(populate_existing=True)
         )
 
         return db.scalar(statement)
@@ -76,6 +79,7 @@ class AccountRepository:
                 Account.user_id == user_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
         return db.scalar(statement)
 
@@ -117,7 +121,9 @@ class AccountRepository:
             Account.user_id == user_id,
         )
         if for_update:
-            statement = statement.with_for_update()
+            statement = statement.with_for_update().execution_options(
+                populate_existing=True
+            )
         return db.scalar(statement)
 
     @staticmethod

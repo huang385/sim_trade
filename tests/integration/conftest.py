@@ -43,6 +43,7 @@ from app.services.rule_query_service import get_rule_query_service
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
+from app.services.account_access_scope import AccountAccessScope
 from app.api.auth_api import get_account_authorization_service
 from app.main import app
 from tests.api_auth_helpers import install_admin_auth_overrides
@@ -299,6 +300,8 @@ def make_request(
     context: IntegrationContext,
     *,
     client_order_id: str,
+    exchange_id: str | None = None,
+    symbol: str | None = None,
     direction: str = "BUY",
     offset_flag: str = "OPEN",
     limit_price: Decimal = Decimal("3500"),
@@ -309,8 +312,8 @@ def make_request(
     return OrderCreateRequest(
         client_order_id=client_order_id,
         account_id=context.account_id,
-        exchange_id=context.exchange_id,
-        symbol=context.symbol,
+        exchange_id=exchange_id or context.exchange_id,
+        symbol=symbol or context.symbol,
         direction=direction,
         offset_flag=offset_flag,
         order_type="LIMIT",
@@ -340,6 +343,7 @@ def make_order_service(
         fee_calculator=FeeCalculator(),
         outbox_repository=outbox_repository or OutboxRepository(),
         trading_day_provider=lambda: context.trading_day,
+        default_access_scope=AccountAccessScope.admin(),
         **kwargs,
     )
 
@@ -359,5 +363,6 @@ def make_cancellation_service(
         account_repository=AccountRepository(),
         freeze_service=OrderFreezeService(),
         outbox_repository=outbox_repository or OutboxRepository(),
+        default_access_scope=AccountAccessScope.admin(),
         **kwargs,
     )

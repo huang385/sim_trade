@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.common.exceptions import (
     BusinessRuleError,
     DataAccessError,
+    ResourceConflictError,
     ResourceNotFoundError,
 )
 from app.enums.order_enums import OrderDirection
@@ -21,6 +22,7 @@ from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order_schema import OrderCreateRequest
 from app.services.fee_calculator import FeeCalculator
+from app.services.account_access_scope import AccountAccessScope
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_service import OrderService
@@ -87,6 +89,22 @@ def make_account(**overrides):
     return SimpleNamespace(**values)
 
 
+def make_existing_order(**overrides):
+    values = {
+        "order_id": "EXISTING",
+        "account_id": "A001",
+        "exchange_id": "SHFE",
+        "symbol": "RB2610",
+        "direction": "BUY",
+        "offset_flag": "OPEN",
+        "order_type": "LIMIT",
+        "limit_price": Decimal("3500.000000"),
+        "total_volume": 2,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
 def make_service(
     *,
     order_repository=None,
@@ -116,6 +134,7 @@ def make_service(
         trading_day_provider=lambda: TRADING_DAY,
         order_id_factory=lambda: "O20260717000001",
         event_id_factory=lambda: "EVT-000001",
+        default_access_scope=AccountAccessScope.admin(),
     )
 
 
@@ -167,7 +186,7 @@ def test_create_open_order_success(direction, expected_margin):
 
 def test_duplicate_client_order_id_returns_existing_without_freeze():
     db = Mock()
-    existing = SimpleNamespace(order_id="EXISTING")
+    existing = make_existing_order()
     order_repository = Mock()
     order_repository.get_by_client_order_id.return_value = existing
     account_repository = Mock()
@@ -190,6 +209,14 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     db.expunge.assert_called_once_with(existing)
     db.commit.assert_called_once()
     db.refresh.assert_not_called()
+
+
+def test_missing_access_scope_never_falls_back_to_admin():
+    service = make_service()
+    service.default_access_scope = None
+
+    with pytest.raises(ValueError, match="授权范围"):
+        service.create_order(Mock(), make_request())
 
 
 @pytest.mark.parametrize(
@@ -444,10 +471,10 @@ def test_close_order_freeze_uses_bucket_total_across_multiple_details():
 
 def test_duplicate_detected_after_account_lock_does_not_freeze_twice():
     db = Mock()
-    existing = SimpleNamespace(order_id="EXISTING")
+    existing = make_existing_order()
     account = make_account()
     order_repository = Mock()
-    order_repository.get_by_client_order_id.return_value = existing
+    order_repository.get_by_client_order_id.side_effect = [None, existing]
     account_repository = Mock()
     account_repository.get_by_account_id_for_update.return_value = account
     rule_query_service = Mock()
@@ -480,6 +507,7 @@ def test_normal_user_uses_scoped_idempotency_and_account_lock_queries():
         order_id="O20260717000001"
     )
     account_repository = Mock()
+    account_repository.get_owned_account.return_value = account
     account_repository.get_owned_account_for_update.return_value = account
     rule_query_service = Mock()
     rule_query_service.get_order_rules.return_value = make_rules()
@@ -493,8 +521,7 @@ def test_normal_user_uses_scoped_idempotency_and_account_lock_queries():
     service.create_order(
         db,
         make_request(),
-        account_owner_user_id="U001",
-        conceal_account_existence=True,
+        access_scope=AccountAccessScope.for_user("U001"),
     )
 
     order_repository.get_by_client_order_id_for_user.assert_called_once_with(
@@ -516,7 +543,7 @@ def test_unauthorized_user_never_uses_unscoped_account_lock():
     order_repository = Mock()
     order_repository.get_by_client_order_id_for_user.return_value = None
     account_repository = Mock()
-    account_repository.get_owned_account_for_update.return_value = None
+    account_repository.get_owned_account.return_value = None
     rule_query_service = Mock()
     rule_query_service.get_order_rules.return_value = make_rules()
     service = make_service(
@@ -529,20 +556,21 @@ def test_unauthorized_user_never_uses_unscoped_account_lock():
         service.create_order(
             db,
             make_request(),
-            account_owner_user_id="U-OTHER",
-            conceal_account_existence=True,
+            access_scope=AccountAccessScope.for_user("U-OTHER"),
         )
 
     assert exc_info.value.error_code == "RESOURCE_NOT_FOUND"
-    account_repository.get_owned_account_for_update.assert_called_once()
+    account_repository.get_owned_account.assert_called_once()
+    account_repository.get_owned_account_for_update.assert_not_called()
     account_repository.get_by_account_id_for_update.assert_not_called()
+    rule_query_service.get_order_rules.assert_not_called()
     order_repository.get_by_client_order_id.assert_not_called()
     order_repository.create.assert_not_called()
 
 
 def test_integrity_conflict_recovery_remains_user_scoped():
     db = Mock()
-    existing = SimpleNamespace(order_id="EXISTING")
+    existing = make_existing_order()
     order_repository = Mock()
     order_repository.get_by_client_order_id_for_user.side_effect = [
         None,
@@ -570,8 +598,7 @@ def test_integrity_conflict_recovery_remains_user_scoped():
     result = service.create_order(
         db,
         make_request(),
-        account_owner_user_id="U001",
-        conceal_account_existence=True,
+        access_scope=AccountAccessScope.for_user("U001"),
     )
 
     assert result is existing
@@ -586,6 +613,104 @@ def test_integrity_conflict_recovery_remains_user_scoped():
     )
     db.rollback.assert_called_once()
     db.commit.assert_called_once()
+
+
+def test_first_idempotency_hit_rejects_changed_request_before_rules_or_lock():
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.return_value = (
+        make_existing_order(direction="SELL")
+    )
+    account_repository = Mock()
+    rule_query_service = Mock()
+    outbox_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+    )
+
+    with pytest.raises(ResourceConflictError) as exc_info:
+        service.create_order(db, make_request())
+
+    assert exc_info.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+    rule_query_service.get_order_rules.assert_not_called()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    order_repository.create.assert_not_called()
+    outbox_repository.create_event.assert_not_called()
+    db.rollback.assert_called_once()
+
+
+def test_second_idempotency_hit_rejects_changed_request_before_freeze():
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.side_effect = [
+        None,
+        make_existing_order(limit_price=Decimal("3501")),
+    ]
+    account = make_account()
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = account
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    outbox_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+    )
+
+    with pytest.raises(ResourceConflictError) as exc_info:
+        service.create_order(db, make_request())
+
+    assert exc_info.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+    assert account.available_cash == Decimal("100000")
+    order_repository.create.assert_not_called()
+    outbox_repository.create_event.assert_not_called()
+    db.rollback.assert_called_once()
+
+
+def test_integrity_recovery_hit_rejects_changed_request():
+    db = Mock()
+    order_repository = Mock()
+    order_repository.get_by_client_order_id_for_user.side_effect = [
+        None,
+        make_existing_order(total_volume=3),
+    ]
+    order_repository.get_by_client_order_id.return_value = None
+    order_repository.create.side_effect = IntegrityError(
+        "insert order",
+        {},
+        Exception("unique"),
+    )
+    account_repository = Mock()
+    account_repository.get_owned_account.return_value = make_account()
+    account_repository.get_owned_account_for_update.return_value = (
+        make_account()
+    )
+    rule_query_service = Mock()
+    rule_query_service.get_order_rules.return_value = make_rules()
+    outbox_repository = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+    )
+
+    with pytest.raises(ResourceConflictError) as exc_info:
+        service.create_order(
+            db,
+            make_request(),
+            access_scope=AccountAccessScope.for_user("U001"),
+        )
+
+    assert exc_info.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+    db.rollback.assert_called_once()
+    db.commit.assert_not_called()
+    outbox_repository.create_event.assert_not_called()
 
 
 def test_missing_account_rolls_back_and_does_not_create_order():
@@ -801,6 +926,7 @@ def test_account_repository_uses_select_for_update():
 
     statement = db.scalar.call_args.args[0]
     assert statement._for_update_arg is not None
+    assert statement.get_execution_options()["populate_existing"] is True
 
 
 def test_owned_account_repository_puts_user_scope_in_for_update_sql():
@@ -815,5 +941,6 @@ def test_owned_account_repository_puts_user_scope_in_for_update_sql():
     statement = db.scalar.call_args.args[0]
     sql = str(statement).lower()
     assert statement._for_update_arg is not None
+    assert statement.get_execution_options()["populate_existing"] is True
     assert "account.account_id" in sql
     assert "account.user_id" in sql

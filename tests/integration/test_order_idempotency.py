@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import func, select
 
+from app.common.exceptions import ResourceConflictError
 from app.core.database import SessionLocal
 from app.models.account import Account
 from app.models.order import Order
@@ -48,3 +49,56 @@ def test_duplicate_client_order_id_freezes_and_emits_once(integration_context):
         assert account.available_cash == Decimal("91594.000000")
         assert account.frozen_margin == Decimal("8400.000000")
         assert account.frozen_commission == Decimal("6.000000")
+
+
+@pytest.mark.parametrize(
+    "changed_fields",
+    [
+        {"symbol": "OTHER2609"},
+        {"direction": "SELL"},
+        {"offset_flag": "CLOSE"},
+        {"limit_price": Decimal("3501")},
+        {"volume": 3},
+    ],
+)
+def test_reused_client_order_id_rejects_changed_request(
+    integration_context,
+    changed_fields,
+):
+    service = make_order_service(integration_context)
+    original = make_request(
+        integration_context,
+        client_order_id="IDEMPOTENT-MISMATCH",
+    )
+    with SessionLocal() as db:
+        first = service.create_order(db, original)
+
+    changed_values = {
+        "client_order_id": "IDEMPOTENT-MISMATCH",
+        **changed_fields,
+    }
+    changed = make_request(integration_context, **changed_values)
+    with SessionLocal() as db:
+        with pytest.raises(ResourceConflictError) as exc_info:
+            service.create_order(db, changed)
+    assert exc_info.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        order_count = db.scalar(
+            select(func.count(Order.id)).where(
+                Order.account_id == integration_context.account_id
+            )
+        )
+        event_count = db.scalar(
+            select(func.count(OutboxEvent.id)).where(
+                OutboxEvent.aggregate_id == first.order_id
+            )
+        )
+        assert order_count == 1
+        assert event_count == 1
+        assert account.available_cash == Decimal("91594.000000")

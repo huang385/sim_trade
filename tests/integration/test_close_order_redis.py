@@ -22,6 +22,7 @@ from app.repositories.order_repository import OrderRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.accepted_order_event_service import AcceptedOrderEventService
 from app.services.order_cancellation_service import OrderCancellationService
+from app.services.account_access_scope import AccountAccessScope
 from tests.integration.test_close_order_lifecycle import (
     create_close_order,
     create_open_position,
@@ -99,7 +100,9 @@ def test_close_order_rebuild_partial_update_and_cancel_remove(
         ] == "1"
 
         with SessionLocal() as db:
-            OrderCancellationService().cancel_order(
+            OrderCancellationService(
+                default_access_scope=AccountAccessScope.admin()
+            ).cancel_order(
                 db=db,
                 order_id=order.order_id,
                 request=OrderCancelRequest(
