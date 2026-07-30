@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 import hmac
 
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import (
@@ -171,61 +171,69 @@ class AuthService:
             refresh_token,
             expected_type=TokenType.REFRESH,
         )
-        # 认证事务统一先锁用户，再锁Refresh会话。改密和禁用也采用该顺序，
-        # 避免两个事务分别持有一端行锁并相互等待形成PostgreSQL死锁。
-        user = self.user_repository.get_by_user_id_for_update(
-            db, claims.user_id
-        )
-        if (
-            user is None
-            or user.status != UserStatus.ACTIVE.value
-            or user.user_id != claims.user_id
-        ):
-            db.rollback()
-            raise AuthenticationError(
-                "Refresh Token已失效",
-                error_code="REFRESH_TOKEN_INVALID",
-            )
-
-        refresh_session = (
-            self.refresh_repository.get_by_jti_for_update(db, claims.jti)
-        )
-        now = utc_now()
-        expected_hash = self.token_service.hash_refresh_token(refresh_token)
-        if (
-            refresh_session is None
-            or refresh_session.revoked_at is not None
-            or refresh_session.expires_at <= now
-            or not hmac.compare_digest(
-                refresh_session.token_hash, expected_hash
-            )
-            or claims.user_id != refresh_session.user_id
-            or user.user_id != refresh_session.user_id
-        ):
-            db.rollback()
-            raise AuthenticationError(
-                "Refresh Token已失效",
-                error_code="REFRESH_TOKEN_INVALID",
-            )
-
-        tokens = self.token_service.create_pair(user.user_id, now=now)
-        refresh_session.revoked_at = now
-        refresh_session.last_used_at = now
-        refresh_session.replaced_by_jti = tokens.refresh_jti
-        self.refresh_repository.add(
-            db,
-            self._new_refresh_session(
-                result=tokens,
-                user_id=user.user_id,
-                user_agent=user_agent,
-                client_ip=client_ip,
-            ),
-        )
         try:
+            # 认证事务统一先锁用户，再锁Refresh会话。改密和禁用也采用该
+            # 顺序，避免两个事务分别持有一端行锁并相互等待形成数据库死锁。
+            user = self.user_repository.get_by_user_id_for_update(
+                db, claims.user_id
+            )
+            if (
+                user is None
+                or user.status != UserStatus.ACTIVE.value
+                or user.user_id != claims.user_id
+            ):
+                db.rollback()
+                raise AuthenticationError(
+                    "Refresh Token已失效",
+                    error_code="REFRESH_TOKEN_INVALID",
+                )
+
+            refresh_session = (
+                self.refresh_repository.get_by_jti_for_update(
+                    db,
+                    claims.jti,
+                )
+            )
+            now = utc_now()
+            expected_hash = self.token_service.hash_refresh_token(
+                refresh_token
+            )
+            if (
+                refresh_session is None
+                or refresh_session.revoked_at is not None
+                or refresh_session.expires_at <= now
+                or not hmac.compare_digest(
+                    refresh_session.token_hash,
+                    expected_hash,
+                )
+                or claims.user_id != refresh_session.user_id
+                or user.user_id != refresh_session.user_id
+            ):
+                db.rollback()
+                raise AuthenticationError(
+                    "Refresh Token已失效",
+                    error_code="REFRESH_TOKEN_INVALID",
+                )
+
+            tokens = self.token_service.create_pair(user.user_id, now=now)
+            refresh_session.revoked_at = now
+            refresh_session.last_used_at = now
+            refresh_session.replaced_by_jti = tokens.refresh_jti
+            self.refresh_repository.add(
+                db,
+                self._new_refresh_session(
+                    result=tokens,
+                    user_id=user.user_id,
+                    user_agent=user_agent,
+                    client_ip=client_ip,
+                ),
+            )
             db.commit()
             db.refresh(user)
             return AuthResult(user=user, tokens=tokens)
-        except (IntegrityError, SQLAlchemyError) as exc:
+        except AuthenticationError:
+            raise
+        except SQLAlchemyError as exc:
             db.rollback()
             raise DataAccessError("轮换Refresh Token失败") from exc
 

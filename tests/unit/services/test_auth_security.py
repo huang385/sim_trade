@@ -103,6 +103,15 @@ def test_expired_and_wrong_signature_tokens_are_rejected():
         _token_service(OTHER_VALID_TEST_SECRET).decode(
             valid.access_token, expected_type=TokenType.ACCESS
         )
+    expired_refresh = service.create_pair(
+        "U001",
+        now=utc_now() - timedelta(days=8),
+    )
+    with pytest.raises(AuthenticationError):
+        service.decode(
+            expired_refresh.refresh_token,
+            expected_type=TokenType.REFRESH,
+        )
 
 
 @pytest.mark.parametrize(
@@ -358,6 +367,151 @@ def test_refresh_locks_user_before_refresh_session():
 
     assert calls == ["USER", "REFRESH_SESSION"]
     db.commit.assert_called_once()
+
+
+def _refresh_test_objects():
+    token_service = _token_service()
+    pair = token_service.create_pair("U001")
+    user = SimpleNamespace(
+        user_id="U001",
+        status=UserStatus.ACTIVE.value,
+    )
+    refresh_session = SimpleNamespace(
+        user_id="U001",
+        token_hash=token_service.hash_refresh_token(pair.refresh_token),
+        expires_at=pair.refresh_expires_at,
+        revoked_at=None,
+        last_used_at=None,
+        replaced_by_jti=None,
+    )
+    user_repository = Mock(spec=UserRepository)
+    user_repository.get_by_user_id_for_update.return_value = user
+    refresh_repository = Mock(spec=AuthRefreshSessionRepository)
+    refresh_repository.get_by_jti_for_update.return_value = refresh_session
+    service = AuthService(
+        user_repository=user_repository,
+        refresh_repository=refresh_repository,
+        password_service=Mock(spec=PasswordService),
+        token_service=token_service,
+        rate_limit_service=Mock(spec=LoginRateLimitService),
+    )
+    return SimpleNamespace(
+        pair=pair,
+        user=user,
+        session=refresh_session,
+        user_repository=user_repository,
+        refresh_repository=refresh_repository,
+        service=service,
+        db=Mock(),
+    )
+
+
+@pytest.mark.parametrize("invalid_user", [None, "DISABLED", "LOCKED"])
+def test_refresh_rejects_missing_or_inactive_user_before_session_lock(
+    invalid_user,
+):
+    context = _refresh_test_objects()
+    context.user_repository.get_by_user_id_for_update.return_value = (
+        None
+        if invalid_user is None
+        else SimpleNamespace(user_id="U001", status=invalid_user)
+    )
+
+    with pytest.raises(AuthenticationError) as exc_info:
+        context.service.refresh(
+            context.db,
+            refresh_token=context.pair.refresh_token,
+            client_ip="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    assert exc_info.value.error_code == "REFRESH_TOKEN_INVALID"
+    context.refresh_repository.get_by_jti_for_update.assert_not_called()
+    context.db.rollback.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "invalid_session",
+    [
+        None,
+        {"user_id": "U-OTHER"},
+        {"token_hash": "wrong-token-hash"},
+        {"revoked_at": utc_now()},
+        {"expires_at": utc_now() - timedelta(seconds=1)},
+    ],
+)
+def test_refresh_rejects_missing_mismatched_revoked_or_expired_session(
+    invalid_session,
+):
+    context = _refresh_test_objects()
+    if invalid_session is None:
+        session = None
+    else:
+        for field, value in invalid_session.items():
+            setattr(context.session, field, value)
+        session = context.session
+    context.refresh_repository.get_by_jti_for_update.return_value = session
+
+    with pytest.raises(AuthenticationError) as exc_info:
+        context.service.refresh(
+            context.db,
+            refresh_token=context.pair.refresh_token,
+            client_ip="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    assert exc_info.value.error_code == "REFRESH_TOKEN_INVALID"
+    context.refresh_repository.add.assert_not_called()
+    context.db.commit.assert_not_called()
+    context.db.rollback.assert_called_once()
+
+
+def test_same_refresh_token_can_only_be_rotated_once():
+    context = _refresh_test_objects()
+
+    first = context.service.refresh(
+        context.db,
+        refresh_token=context.pair.refresh_token,
+        client_ip="127.0.0.1",
+        user_agent="pytest",
+    )
+    with pytest.raises(AuthenticationError):
+        context.service.refresh(
+            context.db,
+            refresh_token=context.pair.refresh_token,
+            client_ip="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    assert first.tokens.refresh_token != context.pair.refresh_token
+    context.refresh_repository.add.assert_called_once()
+    context.db.commit.assert_called_once()
+    context.db.rollback.assert_called_once()
+
+
+def test_refresh_database_failure_rolls_back_rotation():
+    context = _refresh_test_objects()
+    context.refresh_repository.add.side_effect = OperationalError(
+        "insert refresh",
+        {},
+        Exception("failed"),
+    )
+
+    with pytest.raises(DataAccessError):
+        context.service.refresh(
+            context.db,
+            refresh_token=context.pair.refresh_token,
+            client_ip="127.0.0.1",
+            user_agent="pytest",
+        )
+
+    context.db.commit.assert_not_called()
+    context.db.rollback.assert_called_once()
+
+
+def test_refresh_repository_has_no_transaction_control_methods():
+    assert not hasattr(AuthRefreshSessionRepository, "commit")
+    assert not hasattr(AuthRefreshSessionRepository, "rollback")
 
 
 def test_password_and_tokens_are_not_logged(caplog):
