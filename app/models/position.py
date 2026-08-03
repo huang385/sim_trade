@@ -62,6 +62,14 @@ class Position(Base):
             "realtime_required_margin >= 0",
             name="ck_position_realtime_margin_nonnegative",
         ),
+        CheckConstraint(
+            "option_market_value >= 0",
+            name="ck_position_option_market_value_nonnegative",
+        ),
+        CheckConstraint(
+            "multiplier_snapshot > 0",
+            name="ck_position_multiplier_positive",
+        ),
         Index("ix_position_account_id", "account_id"),
         Index("ix_position_exchange_symbol", "exchange_id", "symbol"),
     )
@@ -134,6 +142,11 @@ class Position(Base):
     realtime_required_margin: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
+    # PostgreSQL中保存的最近一次可靠期权标记市值。平仓事务按原持仓快照
+    # 比例扣减，而不能用本次成交额替代标记市值。
+    option_market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
     margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     margin_rule_version: Mapped[str | None] = mapped_column(
         String(64), nullable=True
@@ -155,8 +168,8 @@ class Position(Base):
     margin_calculated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    multiplier_snapshot: Mapped[Decimal | None] = mapped_column(
-        Numeric(24, 6), nullable=True
+    multiplier_snapshot: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("1")
     )
 
     # 基于原始开仓价累计确认的已实现盈亏

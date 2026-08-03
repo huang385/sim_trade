@@ -53,6 +53,7 @@ class _CloseConsumption:
     detail: object
     volume: int
     released_margin: Decimal
+    released_realtime_margin: Decimal
     released_frozen_commission: Decimal
     actual_commission: Decimal
     realized_pnl: Decimal
@@ -425,6 +426,17 @@ class CloseTradeSettlementHandler:
                 close_volume=consumed,
                 remaining_volume_before_close=detail.remaining_volume,
             )
+            released_realtime_margin = (
+                self.margin_calculator.calculate(
+                    remaining_margin=Decimal(
+                        detail.realtime_required_margin
+                    ),
+                    close_volume=consumed,
+                    remaining_volume_before_close=detail.remaining_volume,
+                )
+                if is_option
+                else Decimal("0.000000")
+            )
             realized_pnl = self.pnl_calculator.calculate(
                 close_direction=order.direction,
                 open_price=detail.open_price,
@@ -457,6 +469,9 @@ class CloseTradeSettlementHandler:
                     detail=detail,
                     volume=consumed,
                     released_margin=released_margin,
+                    released_realtime_margin=(
+                        released_realtime_margin
+                    ),
                     released_frozen_commission=(
                         released_frozen_commission
                     ),
@@ -516,6 +531,24 @@ class CloseTradeSettlementHandler:
                 Decimal("0"),
             )
         )
+        released_realtime_margin = quantize_money(
+            sum(
+                (
+                    item.released_realtime_margin
+                    for item in consumptions
+                ),
+                Decimal("0"),
+            )
+        )
+        released_option_market_value = (
+            self._allocate_frozen_commission(
+                Decimal(getattr(position, "option_market_value", Decimal("0"))),
+                fill_volume=fill_volume,
+                remaining_volume=position.total_volume,
+            )
+            if is_option
+            else Decimal("0.000000")
+        )
         released_frozen_commission = quantize_money(
             sum(
                 (
@@ -551,6 +584,25 @@ class CloseTradeSettlementHandler:
             or Decimal(getattr(account, "frozen_cash", Decimal("0")))
             < released_frozen_cash
             or position.used_margin < released_margin
+            or (
+                is_option
+                and position.realtime_required_margin
+                < released_realtime_margin
+            )
+            or (
+                is_option
+                and account.option_realtime_required_margin
+                < released_realtime_margin
+            )
+            or (
+                is_option
+                and Decimal(
+                    account.long_option_market_value
+                    if position_direction == PositionDirection.LONG.value
+                    else account.short_option_market_value
+                )
+                < released_option_market_value
+            )
             or position.frozen_volume < fill_volume
         ):
             raise DataAccessError(
@@ -572,7 +624,7 @@ class CloseTradeSettlementHandler:
                 detail.realtime_required_margin = max(
                     quantize_money(
                         detail.realtime_required_margin
-                        - item.released_margin
+                        - item.released_realtime_margin
                     ),
                     Decimal("0"),
                 )
@@ -766,22 +818,22 @@ class CloseTradeSettlementHandler:
             account.option_used_margin = quantize_money(
                 account.option_used_margin - released_margin
             )
+            account.option_realtime_required_margin = quantize_money(
+                account.option_realtime_required_margin
+                - released_realtime_margin
+            )
             account.cash_balance = quantize_money(
                 account.cash_balance + premium_cash_flow - actual_commission
             )
             if position_direction == PositionDirection.LONG.value:
-                account.long_option_market_value = max(
-                    quantize_money(
-                        account.long_option_market_value - turnover
-                    ),
-                    Decimal("0"),
+                account.long_option_market_value = quantize_money(
+                    account.long_option_market_value
+                    - released_option_market_value
                 )
             else:
-                account.short_option_market_value = max(
-                    quantize_money(
-                        account.short_option_market_value - turnover
-                    ),
-                    Decimal("0"),
+                account.short_option_market_value = quantize_money(
+                    account.short_option_market_value
+                    - released_option_market_value
                 )
             valuation = AccountValuationCalculator.calculate(
                 cash_balance=Decimal(account.cash_balance),
@@ -808,8 +860,15 @@ class CloseTradeSettlementHandler:
             account.net_option_market_value = (
                 valuation.net_option_market_value
             )
-            if account.risk_available_cash >= Decimal("0"):
-                account.risk_state = AccountRiskState.NORMAL.value
+            if (
+                account.risk_state
+                != AccountRiskState.VALUATION_UNAVAILABLE.value
+            ):
+                account.risk_state = (
+                    AccountRiskState.MARGIN_DEFICIT.value
+                    if account.risk_available_cash < Decimal("0")
+                    else AccountRiskState.NORMAL.value
+                )
         else:
             account.cash_balance = quantize_money(
                 account.cash_balance + realized_pnl - actual_commission
@@ -839,11 +898,13 @@ class CloseTradeSettlementHandler:
             position.used_margin - released_margin
         )
         if is_option:
-            position.realtime_required_margin = max(
-                quantize_money(
-                    position.realtime_required_margin - released_margin
-                ),
-                Decimal("0"),
+            position.realtime_required_margin = quantize_money(
+                position.realtime_required_margin
+                - released_realtime_margin
+            )
+            position.option_market_value = quantize_money(
+                position.option_market_value
+                - released_option_market_value
             )
         position.realized_pnl = quantize_money(
             position.realized_pnl + realized_pnl
@@ -887,6 +948,7 @@ class CloseTradeSettlementHandler:
             position.position_cost = Decimal("0.000000")
             position.used_margin = Decimal("0.000000")
             position.realtime_required_margin = Decimal("0.000000")
+            position.option_market_value = Decimal("0.000000")
             position.unrealized_pnl = Decimal("0.000000")
         else:
             remaining_cost = sum(

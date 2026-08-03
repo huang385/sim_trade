@@ -19,6 +19,9 @@ from app.services.account_valuation_calculator import (
 from app.services.commodity_option_margin_calculator import (
     CommodityFuturesOptionMarginCalculator,
 )
+from app.services.cffex_index_option_margin_calculator import (
+    CffexIndexOptionMarginCalculator,
+)
 from app.services.option_margin_calculator import (
     OptionMarginInput,
     OptionMarginRuleSnapshot,
@@ -147,6 +150,41 @@ def test_commodity_option_margin_exact_decimal_result(
     assert result.total_margin == total
 
 
+@pytest.mark.parametrize(
+    ("option_type", "expected_otm", "expected_risk", "expected_total"),
+    [
+        (
+            OptionType.CALL,
+            Decimal("3000.000000"),
+            Decimal("11040.000000"),
+            Decimal("25080.000000"),
+        ),
+        (
+            OptionType.PUT,
+            Decimal("0.000000"),
+            Decimal("14040.000000"),
+            Decimal("31080.000000"),
+        ),
+    ],
+)
+def test_cffex_index_option_margin_exact_decimal_result(
+    option_type,
+    expected_otm,
+    expected_risk,
+    expected_total,
+):
+    """股指期权CALL、PUT逐项核对，确保计算全程没有浮点近似。"""
+
+    result = CffexIndexOptionMarginCalculator().calculate(
+        make_margin_input(option_type)
+    )
+
+    assert result.premium_component == Decimal("1500.000000")
+    assert result.out_of_money_amount == expected_otm
+    assert result.risk_component == expected_risk
+    assert result.total_margin == expected_total
+
+
 def test_long_and_short_option_equity_matches_cash_plus_market_value():
     """权利金现金流与期权市值必须相互抵消，只留下真实盯市盈亏。"""
 
@@ -250,6 +288,36 @@ def test_margin_deficit_blocks_open_but_allows_close():
         account=account,
         instrument=instrument,
         direction=OrderDirection.BUY,
+        offset_flag=OffsetFlag.CLOSE,
+    )
+
+
+@pytest.mark.parametrize(
+    "risk_state",
+    ["MARGIN_DEFICIT", "VALUATION_UNAVAILABLE"],
+)
+@pytest.mark.parametrize("direction", [OrderDirection.BUY, OrderDirection.SELL])
+def test_unified_risk_state_blocks_futures_open(risk_state, direction):
+    """统一账户风险异常时，期货不能通过产品类型提前返回绕过限制。"""
+
+    service = OptionTradingPermissionService(make_permission_config())
+    instrument = SimpleNamespace(
+        instrument_type=InstrumentType.FUTURES.value
+    )
+    with pytest.raises(BusinessRuleError) as exc_info:
+        service.validate(
+            account=make_account(risk_state=risk_state),
+            instrument=instrument,
+            direction=direction,
+            offset_flag=OffsetFlag.OPEN,
+        )
+    assert exc_info.value.error_code == "ACCOUNT_RISK_INCREASE_BLOCKED"
+
+    # 平仓明确降低风险，不受统一OPEN限制。
+    service.validate(
+        account=make_account(risk_state=risk_state),
+        instrument=instrument,
+        direction=direction,
         offset_flag=OffsetFlag.CLOSE,
     )
 

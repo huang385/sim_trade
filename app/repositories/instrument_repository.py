@@ -61,6 +61,20 @@ class InstrumentRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_by_ids(
+        db: Session,
+        instrument_ids: set[int] | list[int],
+    ) -> Sequence[Instrument]:
+        """一次SQL读取一组Instrument主键，供期权标的批量估值。"""
+
+        ids = sorted(set(instrument_ids))
+        if not ids:
+            return []
+        return db.scalars(
+            select(Instrument).where(Instrument.id.in_(ids))
+        ).all()
+
+    @staticmethod
     def list_all(
         db: Session,
         *,

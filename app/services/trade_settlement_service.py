@@ -12,6 +12,8 @@ from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError, ResourceNotFoundError
 from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
+from app.core.config import settings
+from app.core.redis_client import redis_client
 from app.enums.order_enums import (
     OffsetFlag,
     OrderDirection,
@@ -37,6 +39,7 @@ from app.repositories.trade_repository import TradeRepository
 from app.repositories.trade_position_allocation_repository import (
     TradePositionAllocationRepository,
 )
+from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.schemas.trade_schema import TradePageResponse
 from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
@@ -44,6 +47,9 @@ from app.services.close_trade_settlement_handler import (
 from app.services.fee_calculator import FeeCalculator
 from app.services.option_trade_settlement_strategy import (
     OptionTradeSettlementStrategy,
+)
+from app.services.option_order_margin_adjustment_service import (
+    OptionOrderMarginAdjustmentService,
 )
 
 
@@ -123,6 +129,9 @@ class TradeSettlementService:
         allocation_repository: PositionFreezeAllocationRepository | None = None,
         close_handler: CloseTradeSettlementHandler | None = None,
         option_strategy: OptionTradeSettlementStrategy | None = None,
+        option_order_margin_service: (
+            OptionOrderMarginAdjustmentService | None
+        ) = None,
         fee_calculator: FeeCalculator | None = None,
         outbox_repository: OutboxRepository | None = None,
         trade_id_factory: Callable[[], str] | None = None,
@@ -146,6 +155,15 @@ class TradeSettlementService:
             trade_repository=self.trade_repository,
         )
         self.option_strategy = option_strategy or OptionTradeSettlementStrategy()
+        self.option_order_margin_service = (
+            option_order_margin_service
+            or OptionOrderMarginAdjustmentService(
+                market_tick_store=MarketTickStore(
+                    redis_client,
+                    stream_name=settings.market_tick_stream_name,
+                )
+            )
+        )
         self.fee_calculator = fee_calculator or FeeCalculator()
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.trade_id_factory = trade_id_factory or (lambda: _generate_id("T"))
@@ -395,6 +413,29 @@ class TradeSettlementService:
                     "SETTLED",
                 )
 
+            # 商品期权卖出开仓必须在Order→Account行锁内按最新期权及标的
+            # 行情执行最终保证金校验。500ms提前重估只能降低补冻概率，不能
+            # 替代成交事务的最后一道保护。
+            margin_check = self.option_order_margin_service.ensure_locked(
+                db,
+                order=order,
+                account=account,
+                instrument=instrument,
+            )
+            if margin_check.action in {
+                "RISK_BLOCKED",
+                "MARGIN_DEFICIT",
+                "VALUATION_UNAVAILABLE",
+            }:
+                # 风险状态变更需要可靠提交，但本轮不得创建Trade、修改订单
+                # 成交数量或转移冻结资源。后续用户仍可撤销订单或执行平仓。
+                db.commit()
+                return SettlementResult(
+                    None,
+                    order.order_id,
+                    margin_check.action,
+                )
+
             position_direction = (
                 PositionDirection.LONG.value
                 if order.direction == OrderDirection.BUY.value
@@ -595,6 +636,12 @@ class TradeSettlementService:
                     average_open_price=Decimal("0.000000"),
                     position_cost=Decimal("0.000000"),
                     used_margin=Decimal("0.000000"),
+                    initial_occupied_margin=Decimal("0.000000"),
+                    realtime_required_margin=Decimal("0.000000"),
+                    option_market_value=Decimal("0.000000"),
+                    multiplier_snapshot=Decimal(
+                        instrument.contract_multiplier
+                    ),
                     realized_pnl=Decimal("0.000000"),
                     unrealized_pnl=Decimal("0.000000"),
                     daily_position_pnl=Decimal("0.000000"),
@@ -626,6 +673,12 @@ class TradeSettlementService:
             position.used_margin = quantize_money(
                 position.used_margin + allocated_margin
             )
+            position.initial_occupied_margin = quantize_money(
+                position.initial_occupied_margin + allocated_margin
+            )
+            position.multiplier_snapshot = Decimal(
+                instrument.contract_multiplier
+            )
             position.trading_day = order.trading_day
             position.updated_at = now
 
@@ -647,6 +700,11 @@ class TradeSettlementService:
                 frozen_volume=0,
                 open_margin=allocated_margin,
                 remaining_margin=allocated_margin,
+                initial_occupied_margin=allocated_margin,
+                realtime_required_margin=Decimal("0.000000"),
+                multiplier_snapshot=Decimal(
+                    instrument.contract_multiplier
+                ),
                 open_commission=actual_commission,
                 status=PositionDetailStatus.OPEN.value,
                 created_at=now,

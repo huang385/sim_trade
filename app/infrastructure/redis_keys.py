@@ -19,6 +19,9 @@ PNL_CONSUMER_GROUP = settings.pnl_consumer_group
 PNL_DEAD_LETTER_STREAM = settings.pnl_dead_letter_stream
 PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
 PNL_DIRTY_ACCOUNTS_KEY = "pnl:dirty_accounts"
+PNL_DIRTY_ACCOUNT_VERSIONS_KEY = "pnl:dirty_account_versions"
+PNL_DIRTY_ACCOUNT_SCAN_CURSOR_KEY = "pnl:dirty_account_scan_cursor"
+PNL_DIRTY_ACCOUNT_SCAN_BUFFER_KEY = "pnl:dirty_account_scan_buffer"
 PNL_DIRTY_POSITION_VERSIONS_KEY = "pnl:dirty_position_versions"
 # Dirty持仓使用SSCAN分批读取时保存上次游标。
 # 游标放在Redis而不是Worker内存中，进程重启后仍会从上次位置继续轮转，
@@ -50,6 +53,12 @@ def instrument_active_orders_key(exchange_id: str, symbol: str) -> str:
     """返回指定交易所、合约的活动订单 Set 键名。"""
 
     return f"active_orders:{exchange_id}:{symbol}"
+
+
+def underlying_sell_open_orders_key(exchange_id: str, symbol: str) -> str:
+    """返回标的行情关联的活动商品期权卖出开仓订单集合。"""
+
+    return f"valuation:underlying_sell_open_orders:{exchange_id}:{symbol}"
 
 
 def account_active_orders_key(account_id: str) -> str:

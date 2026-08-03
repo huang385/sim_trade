@@ -7,6 +7,9 @@ from unittest.mock import Mock
 
 from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import MarketDataProcessAction
+from app.services.market_data_code_mapping_service import (
+    MarketDataCodeMappingSnapshot,
+)
 from app.services.market_subscription_service import MarketSubscriptionService
 from app.services.market_tick_validation_service import MarketTickValidationError
 from app.workers.market_data_subscriber_worker import (
@@ -69,12 +72,17 @@ def make_worker(
     feed_client.get_latest_ticks.return_value = {}
     feed_client.start_tick_callbacks.side_effect = lambda *args, **kwargs: FakeSubscription()
     market_data_service = Mock()
+    code_mapping_service = Mock()
+    code_mapping_service.build_snapshot.side_effect = (
+        lambda _db, codes: MarketDataCodeMappingSnapshot.identity(codes)
+    )
     tick_store = Mock()
     clock = clock or MutableClock()
     worker = MarketDataSubscriberWorker(
         session_factory=lambda: nullcontext(Mock()),
         feed_client=feed_client,
         market_data_service=market_data_service,
+        code_mapping_service=code_mapping_service,
         subscription_service=subscription_service,
         tick_store=tick_store,
         queue_size=queue_size,
@@ -191,6 +199,70 @@ def test_new_active_contract_starts_websocket_after_debounce_without_rest():
     feed_client.get_latest_ticks.assert_not_called()
     feed_client.start_tick_callbacks.assert_called_once()
     assert subscriptions.current_codes == frozenset({"AG2609"})
+
+
+def test_option_subscription_uses_source_code_and_callback_restores_internal_code():
+    details = {"O1": {"order_book_id": "JD2609-C-4000"}}
+    worker, feed_client, _service, subscriptions, clock = make_worker(
+        details=details
+    )
+    mapping = MarketDataCodeMappingSnapshot(
+        internal_to_source={"JD2609-C-4000": "JD2609C4000"},
+        source_to_internal={"JD2609C4000": "JD2609-C-4000"},
+    )
+    worker.code_mapping_service.build_snapshot.return_value = mapping
+    worker.code_mapping_service.build_snapshot.side_effect = None
+
+    worker.run_once()
+    clock.value = 3
+    worker.run_once()
+
+    call = feed_client.start_tick_callbacks.call_args
+    assert call.args[0] == frozenset({"JD2609C4000"})
+    call.kwargs["on_subscribe"](
+        {
+            "contracts": {
+                "JD2609C4000": {
+                    "exists": True,
+                    "is_live": True,
+                    "subscribed": True,
+                }
+            }
+        }
+    )
+    assert subscriptions.state_snapshot().subscribed_codes == frozenset(
+        {"JD2609-C-4000"}
+    )
+
+    option_data = make_data(code="JD2609C4000")
+    call.kwargs["on_quote"](option_data, make_raw())
+    queued = worker.tick_queue.get_nowait()
+    assert queued.data["code"] == "JD2609-C-4000"
+
+
+def test_code_mapping_is_built_once_per_subscription_not_per_tick():
+    details = {"O1": {"order_book_id": "JD2609-C-4000"}}
+    worker, feed_client, _service, _subscriptions, clock = make_worker(
+        details=details
+    )
+    mapping = MarketDataCodeMappingSnapshot(
+        internal_to_source={"JD2609-C-4000": "JD2609C4000"},
+        source_to_internal={"JD2609C4000": "JD2609-C-4000"},
+    )
+    worker.code_mapping_service.build_snapshot.return_value = mapping
+    worker.code_mapping_service.build_snapshot.side_effect = None
+
+    worker.run_once()
+    clock.value = 3
+    worker.run_once()
+    quote_callback = feed_client.start_tick_callbacks.call_args.kwargs["on_quote"]
+    for sequence_id in range(100):
+        quote_callback(
+            make_data(code="JD2609C4000", sequence_id=sequence_id),
+            make_raw(),
+        )
+
+    worker.code_mapping_service.build_snapshot.assert_called_once()
 
 
 def test_added_and_removed_contract_rebuilds_subscription():

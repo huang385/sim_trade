@@ -15,6 +15,7 @@ from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
+from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_tick_stream_consumer import (
     MarketTickStreamConsumer,
 )
@@ -33,6 +34,9 @@ from app.services.realtime_pnl_service import (
 )
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
+)
+from app.services.option_order_margin_adjustment_service import (
+    OptionOrderMarginAdjustmentService,
 )
 
 
@@ -116,6 +120,10 @@ class RealtimePnlWorker:
         option_margin_adjustment_service: (
             OptionMarginAdjustmentService | None
         ) = None,
+        option_order_margin_adjustment_service: (
+            OptionOrderMarginAdjustmentService | None
+        ) = None,
+        active_order_index: ActiveOrderIndex | None = None,
         session_factory=SessionLocal,
     ):
         self.stream_consumer = stream_consumer
@@ -157,6 +165,10 @@ class RealtimePnlWorker:
         self.option_margin_adjustment_service = (
             option_margin_adjustment_service
         )
+        self.option_order_margin_adjustment_service = (
+            option_order_margin_adjustment_service
+        )
+        self.active_order_index = active_order_index
         self.session_factory = session_factory
 
     def request_stop(self, *_args) -> None:
@@ -602,15 +614,79 @@ class RealtimePnlWorker:
                             settings.order_event_processed_ttl_seconds
                         ),
                     )
+                    # 同步失效本进程中的账户和目标合约快照。否则60秒缓存期
+                    # 内仍会拿旧used_margin重复发起同一笔双向调整。
+                    self.service.active_position_cache.invalidate(
+                        account_id=account_id,
+                        exchange_id=key[0],
+                        symbol=key[1],
+                    )
                 except Exception:
                     adjustment_failed.add(key)
                     logger.exception(
-                        "商品期权保证金事务追加失败 contract=%s:%s "
+                        "商品期权保证金事务调整失败 contract=%s:%s "
                         "position_id=%s",
                         key[0],
                         key[1],
                         position_id,
                     )
+        successful -= adjustment_failed
+        # 同一批行情还要驱动活动商品期权卖出开仓订单重估。直接期权行情
+        # 使用现有合约活动订单集合，标的行情使用独立依赖集合；实际资金
+        # 修改仍由PostgreSQL的Order→Account行锁事务完成。
+        if (
+            self.option_order_margin_adjustment_service is not None
+            and self.active_order_index is not None
+        ):
+            processed_order_ids: set[str] = set()
+            for key in tuple(successful):
+                order_ids = set(
+                    self.active_order_index.list_instrument_order_ids(*key)
+                ) | set(
+                    self.active_order_index
+                    .list_underlying_sell_open_order_ids(*key)
+                )
+                for order_id in sorted(order_ids - processed_order_ids):
+                    try:
+                        with self.session_factory() as db:
+                            order_adjustment = (
+                                self.option_order_margin_adjustment_service.adjust(
+                                    db,
+                                    order_id=order_id,
+                                )
+                            )
+                        if (
+                            order_adjustment.account_id
+                            and order_adjustment.action
+                            in {
+                                "ADDED",
+                                "MARGIN_DEFICIT",
+                            }
+                        ):
+                            self.pnl_store.mark_account_fact_dirty_once(
+                                event_id=(
+                                    "OPTION_ORDER_MARGIN:"
+                                    f"{order_adjustment.order_id}:"
+                                    f"{order_adjustment.action}:"
+                                    f"{order_adjustment.required_margin}"
+                                ),
+                                account_id=order_adjustment.account_id,
+                                processed_ttl_seconds=(
+                                    settings.order_event_processed_ttl_seconds
+                                ),
+                            )
+                        processed_order_ids.add(order_id)
+                    except Exception:
+                        # 单笔坏订单只让当前合约消息保留Pending，不得中断同一
+                        # 合约后续订单的补冻；重放时按目标冻结额覆盖，天然幂等。
+                        adjustment_failed.add(key)
+                        logger.exception(
+                            "活动期权卖出开仓订单保证金重估失败 "
+                            "contract=%s:%s order_id=%s",
+                            key[0],
+                            key[1],
+                            order_id,
+                        )
         successful -= adjustment_failed
         for key in successful:
             request = request_by_key[key]
@@ -792,6 +868,10 @@ def build_worker() -> RealtimePnlWorker:
     margin_adjustment_service = OptionMarginAdjustmentService(
         market_tick_store=market_tick_store
     )
+    order_margin_adjustment_service = OptionOrderMarginAdjustmentService(
+        market_tick_store=market_tick_store
+    )
+    active_order_index = ActiveOrderIndex(redis_client)
     return RealtimePnlWorker(
         stream_consumer=consumer,
         service=service,
@@ -811,6 +891,10 @@ def build_worker() -> RealtimePnlWorker:
         lease_ttl_seconds=settings.pnl_worker_lease_ttl_seconds,
         lease_renew_seconds=settings.pnl_worker_lease_renew_seconds,
         option_margin_adjustment_service=margin_adjustment_service,
+        option_order_margin_adjustment_service=(
+            order_margin_adjustment_service
+        ),
+        active_order_index=active_order_index,
         session_factory=SessionLocal,
     )
 

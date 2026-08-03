@@ -141,6 +141,17 @@ class Order(Base):
         default="FUTURES",
         index=True,
     )
+    # 期权活动订单保存标的合约定位字段，使行情Worker无需每500ms回查
+    # Instrument关系即可找到需要重估保证金的卖出开仓订单。
+    underlying_order_book_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    underlying_exchange_id: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    underlying_symbol: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     # 买卖方向：BUY 或 SELL
     direction: Mapped[str] = mapped_column(

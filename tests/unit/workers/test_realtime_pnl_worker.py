@@ -1,5 +1,5 @@
 import json
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 from redis.exceptions import ConnectionError
 
@@ -91,6 +91,7 @@ class FakeCache:
     def __init__(self):
         self.calls = 0
         self.call_kwargs = []
+        self.invalidations = []
 
     def get_cycle_snapshot(self, **kwargs):
         self.calls += 1
@@ -102,6 +103,9 @@ class FakeCache:
             cache_version="1",
             refresh_count=1,
         )
+
+    def invalidate(self, **kwargs):
+        self.invalidations.append(kwargs)
 
 
 class FakePnlStore:
@@ -600,7 +604,76 @@ def test_option_margin_adjustment_marks_account_fact_dirty_before_ack():
             604800,
         )
     ]
+    assert service.active_position_cache.invalidations == [
+        {
+            "account_id": "A001",
+            "exchange_id": "DCE",
+            "symbol": "JD2609",
+        }
+    ]
     assert consumer.acked_batches == [["1-0"]]
+
+
+def test_underlying_tick_revalues_all_orders_even_if_one_order_fails():
+    """单笔坏订单保留Pending，但不能饿死同一标的的后续正常订单。"""
+
+    store = FakePnlStore()
+
+    class OrderAdjustmentService:
+        def __init__(self):
+            self.calls = []
+
+        def adjust(self, db, *, order_id):
+            self.calls.append((db, order_id))
+            if order_id == "A-BAD":
+                raise RuntimeError("corrupt order")
+            return SimpleNamespace(
+                account_id="A001",
+                order_id=order_id,
+                action="ADDED",
+                required_margin="1200.000000",
+            )
+
+    class ActiveOrderIndex:
+        @staticmethod
+        def list_instrument_order_ids(*_key):
+            return {"A-BAD"}
+
+        @staticmethod
+        def list_underlying_sell_open_order_ids(*_key):
+            return {"B-GOOD"}
+
+    class SessionContext:
+        def __enter__(self):
+            return "DB"
+
+        def __exit__(self, *_args):
+            return False
+
+    adjustment = OrderAdjustmentService()
+    worker, consumer, _service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        store=store,
+    )
+    worker.option_order_margin_adjustment_service = adjustment
+    worker.active_order_index = ActiveOrderIndex()
+    worker.session_factory = SessionContext
+
+    worker.run_once(force_flush=True)
+
+    assert adjustment.calls == [
+        ("DB", "A-BAD"),
+        ("DB", "B-GOOD"),
+    ]
+    assert store.account_fact_marks == [
+        (
+            "OPTION_ORDER_MARGIN:B-GOOD:ADDED:1200.000000",
+            "A001",
+            604800,
+        )
+    ]
+    assert consumer.acked_batches == []
+    assert ("DCE", "JD2609") in worker._buffer
 
 
 def test_active_indexes_are_reconciled_again_on_periodic_full_cycle():

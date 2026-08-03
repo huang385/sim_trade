@@ -12,6 +12,7 @@ from app.infrastructure.redis_keys import (
     active_order_contract_member,
     active_order_key,
     instrument_active_orders_key,
+    underlying_sell_open_orders_key,
     parse_active_order_contract_member,
     processed_order_event_key,
 )
@@ -29,6 +30,9 @@ redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('SADD', KEYS[3], ARGV[1])
 redis.call('SADD', KEYS[4], ARGV[1])
 redis.call('SADD', KEYS[6], ARGV[3])
+if KEYS[7] ~= '' then
+    redis.call('SADD', KEYS[7], ARGV[1])
+end
 if is_new_event == 1 then
     redis.call('SET', KEYS[5], '1', 'EX', ARGV[2])
 end
@@ -42,6 +46,9 @@ redis.call('DEL', KEYS[1])
 redis.call('SREM', KEYS[2], ARGV[1])
 redis.call('SREM', KEYS[3], ARGV[1])
 redis.call('SREM', KEYS[4], ARGV[1])
+if KEYS[7] ~= '' then
+    redis.call('SREM', KEYS[7], ARGV[1])
+end
 if redis.call('SCARD', KEYS[2]) == 0 and ARGV[3] ~= '' then
     redis.call('SREM', KEYS[6], ARGV[3])
 end
@@ -59,6 +66,9 @@ redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('SADD', KEYS[3], ARGV[1])
 redis.call('SADD', KEYS[4], ARGV[1])
 redis.call('SADD', KEYS[5], ARGV[2])
+if KEYS[6] ~= '' then
+    redis.call('SADD', KEYS[6], ARGV[1])
+end
 return 1
 """
 
@@ -77,6 +87,10 @@ ACTIVE_ORDER_FIELDS = (
     "exchange_id",
     "symbol",
     "order_book_id",
+    "instrument_type",
+    "underlying_order_book_id",
+    "underlying_exchange_id",
+    "underlying_symbol",
     "direction",
     "offset_flag",
     "order_type",
@@ -87,6 +101,7 @@ ACTIVE_ORDER_FIELDS = (
     "cancelled_volume",
     "average_price",
     "frozen_margin",
+    "frozen_cash",
     "frozen_commission",
     "frozen_position_volume",
     "status",
@@ -134,6 +149,23 @@ class ActiveOrderIndex:
             for field in ACTIVE_ORDER_FIELDS
         }
 
+    @staticmethod
+    def _underlying_dependency_key(order: Any) -> str:
+        """商品期权卖出开仓才需要监听标的行情变化。"""
+
+        if (
+            str(getattr(order, "instrument_type", "")) == "FUTURES_OPTION"
+            and str(getattr(order, "direction", "")) == "SELL"
+            and str(getattr(order, "offset_flag", "")) == "OPEN"
+            and getattr(order, "underlying_exchange_id", None)
+            and getattr(order, "underlying_symbol", None)
+        ):
+            return underlying_sell_open_orders_key(
+                str(order.underlying_exchange_id),
+                str(order.underlying_symbol),
+            )
+        return ""
+
     def add_active_order(
         self,
         order: Any,
@@ -155,13 +187,14 @@ class ActiveOrderIndex:
             hash_arguments.extend((field, value))
         result = self.redis_client.eval(
             ADD_ACTIVE_ORDER_SCRIPT,
-            6,
+            7,
             active_order_key(order.order_id),
             instrument_active_orders_key(order.exchange_id, order.symbol),
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_order_event_key(event_id),
             ACTIVE_ORDER_CONTRACTS_KEY,
+            self._underlying_dependency_key(order),
             order.order_id,
             processed_ttl_seconds,
             active_order_contract_member(
@@ -186,12 +219,13 @@ class ActiveOrderIndex:
             hash_arguments.extend((field, value))
         self.redis_client.eval(
             UPSERT_ACTIVE_ORDER_FOR_REBUILD_SCRIPT,
-            5,
+            6,
             active_order_key(order.order_id),
             instrument_active_orders_key(order.exchange_id, order.symbol),
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
             ACTIVE_ORDER_CONTRACTS_KEY,
+            self._underlying_dependency_key(order),
             order.order_id,
             active_order_contract_member(
                 order.exchange_id,
@@ -239,15 +273,28 @@ class ActiveOrderIndex:
                 symbol,
                 detail["order_book_id"],
             )
+        dependency_key = ""
+        if (
+            detail.get("instrument_type") == "FUTURES_OPTION"
+            and detail.get("direction") == "SELL"
+            and detail.get("offset_flag") == "OPEN"
+            and detail.get("underlying_exchange_id")
+            and detail.get("underlying_symbol")
+        ):
+            dependency_key = underlying_sell_open_orders_key(
+                detail["underlying_exchange_id"],
+                detail["underlying_symbol"],
+            )
         self.redis_client.eval(
             REMOVE_ACTIVE_ORDER_SCRIPT,
-            6,
+            7,
             active_order_key(order_id),
             instrument_active_orders_key(exchange_id, symbol),
             account_active_orders_key(account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_key,
             ACTIVE_ORDER_CONTRACTS_KEY,
+            dependency_key,
             order_id,
             processed_ttl_seconds,
             contract_member,
@@ -274,6 +321,17 @@ class ActiveOrderIndex:
 
         return self.redis_client.smembers(
             account_active_orders_key(account_id)
+        )
+
+    def list_underlying_sell_open_order_ids(
+        self,
+        exchange_id: str,
+        symbol: str,
+    ) -> set[str]:
+        """读取标的行情变化时需要重新估值的活动期权卖出开仓订单。"""
+
+        return self.redis_client.smembers(
+            underlying_sell_open_orders_key(exchange_id, symbol)
         )
 
     def list_all_order_ids(self) -> set[str]:

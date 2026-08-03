@@ -1,0 +1,210 @@
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from app.common.exceptions import DataAccessError
+from app.enums.option_enums import MarginPriceMode
+from app.services.option_order_margin_adjustment_service import (
+    OptionOrderMarginAdjustmentResult,
+    OptionOrderMarginAdjustmentService,
+)
+from app.matching.models import MatchResult
+from app.services.trade_settlement_service import (
+    SettlementCommand,
+    TradeSettlementService,
+)
+from datetime import datetime, timezone
+
+
+def make_order(**overrides):
+    values = {
+        "order_id": "O-OPTION-1",
+        "account_id": "A001",
+        "status": "ACCEPTED",
+        "remaining_volume": 2,
+        "instrument_type": "FUTURES_OPTION",
+        "direction": "SELL",
+        "offset_flag": "OPEN",
+        "order_type": "LIMIT",
+        "frozen_margin": Decimal("1000"),
+        "margin_price_mode": "ORDER_FREEZE",
+        "margin_underlying_price": Decimal("4000"),
+        "margin_option_price": Decimal("100"),
+        "margin_calculation_version": "OPTION_MARGIN_V1",
+        "updated_at": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def make_account(**overrides):
+    values = {
+        "account_id": "A001",
+        "risk_state": "NORMAL",
+        "available_cash": Decimal("10000"),
+        "risk_available_cash": Decimal("9000"),
+        "frozen_margin": Decimal("1000"),
+        "updated_at": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def margin_result(total: str):
+    return SimpleNamespace(
+        total_margin=Decimal(total),
+        price_mode=MarginPriceMode.REALTIME,
+        underlying_price=Decimal("4100"),
+        option_price=Decimal("120"),
+        calculation_version="OPTION_MARGIN_V1",
+    )
+
+
+def make_service(total: str = "1500"):
+    service = OptionOrderMarginAdjustmentService(
+        market_tick_store=Mock()
+    )
+    service._calculate_required = Mock(return_value=margin_result(total))
+    return service
+
+
+def test_active_sell_open_order_adds_margin_difference():
+    order = make_order()
+    account = make_account()
+
+    result = make_service().ensure_locked(
+        Mock(),
+        order=order,
+        account=account,
+        instrument=SimpleNamespace(),
+    )
+
+    assert result.action == "ADDED"
+    assert result.added_margin == Decimal("500.000000")
+    assert order.frozen_margin == Decimal("1500.000000")
+    assert account.frozen_margin == Decimal("1500.000000")
+    assert account.available_cash == Decimal("9500.000000")
+    assert account.risk_available_cash == Decimal("8500.000000")
+
+
+def test_required_margin_decrease_does_not_release_active_order_funds():
+    order = make_order()
+    account = make_account()
+
+    result = make_service("800").ensure_locked(
+        Mock(),
+        order=order,
+        account=account,
+        instrument=SimpleNamespace(),
+    )
+
+    assert result.action == "SUFFICIENT"
+    assert order.frozen_margin == Decimal("1000")
+    assert account.frozen_margin == Decimal("1000")
+    assert account.available_cash == Decimal("10000")
+
+
+def test_margin_addition_failure_marks_deficit_without_partial_freeze():
+    order = make_order()
+    account = make_account(
+        available_cash=Decimal("400"),
+        risk_available_cash=Decimal("400"),
+    )
+
+    result = make_service().ensure_locked(
+        Mock(),
+        order=order,
+        account=account,
+        instrument=SimpleNamespace(),
+    )
+
+    assert result.action == "MARGIN_DEFICIT"
+    assert account.risk_state == "MARGIN_DEFICIT"
+    assert order.frozen_margin == Decimal("1000")
+    assert account.frozen_margin == Decimal("1000")
+    assert account.available_cash == Decimal("400")
+
+
+def test_missing_market_marks_valuation_unavailable_without_freeze():
+    service = make_service()
+    service._calculate_required.side_effect = DataAccessError(
+        "行情不可用",
+        error_code="OPTION_MARGIN_PRICE_UNAVAILABLE",
+    )
+    order = make_order()
+    account = make_account()
+
+    result = service.ensure_locked(
+        Mock(),
+        order=order,
+        account=account,
+        instrument=SimpleNamespace(),
+    )
+
+    assert result.action == "VALUATION_UNAVAILABLE"
+    # 订单行情缺失只阻止本轮补冻；完整账户风险状态由持仓估值链路维护，
+    # 因而行情恢复后本订单仍可重新进入保证金校验并自动恢复处理。
+    assert account.risk_state == "NORMAL"
+    assert order.frozen_margin == Decimal("1000")
+
+
+def test_settlement_blocks_trade_when_final_margin_check_fails():
+    """500ms重估之外，成交事务仍必须执行最后一次保证金检查。"""
+
+    order = make_order(
+        order_book_id="JD2609-C-4000",
+        exchange_id="DCE",
+        symbol="JD2609-C-4000",
+        traded_volume=0,
+        average_price=None,
+    )
+    account = make_account()
+    order_repository = Mock()
+    order_repository.get_by_order_id_for_update.return_value = order
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = account
+    instrument_repository = Mock()
+    instrument_repository.get_by_order_book_id.return_value = SimpleNamespace()
+    trade_repository = Mock()
+    trade_repository.get_by_order_market_event.return_value = None
+    final_checker = Mock()
+    final_checker.ensure_locked.return_value = (
+        OptionOrderMarginAdjustmentResult(
+            action="MARGIN_DEFICIT",
+            order_id=order.order_id,
+            required_margin=Decimal("2000"),
+            account_id=order.account_id,
+        )
+    )
+    db = Mock()
+
+    result = TradeSettlementService(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        instrument_repository=instrument_repository,
+        trade_repository=trade_repository,
+        option_order_margin_service=final_checker,
+    ).settle(
+        db,
+        SettlementCommand(
+            order_id=order.order_id,
+            market_event_id="TICK-1",
+            market_stream_message_id="1-0",
+            tick_event_time=datetime.now(timezone.utc),
+            tick_sequence_id=1,
+            match_result=MatchResult(
+                matched=True,
+                fill_price=Decimal("120"),
+                fill_volume=1,
+                reason=None,
+                engine_name="TEST",
+                engine_version="1",
+            ),
+        ),
+    )
+
+    assert result.action == "MARGIN_DEFICIT"
+    db.commit.assert_called_once()
+    trade_repository.add.assert_not_called()
+    assert order.traded_volume == 0
+    assert order.remaining_volume == 2

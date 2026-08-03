@@ -876,7 +876,7 @@ class RealtimePnlService:
                 if (
                     model is not None
                     and model.realtime_required_margin
-                    > position.persisted_used_margin
+                    != position.persisted_used_margin
                 ):
                     margin_adjustments.append(
                         (

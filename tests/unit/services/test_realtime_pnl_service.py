@@ -3,6 +3,8 @@ import json
 
 from types import MappingProxyType
 
+import pytest
+
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.services.active_position_cache import (
     AccountPnlSnapshot,
@@ -562,7 +564,17 @@ def test_account_fact_dirty_reuses_existing_pnl_without_contract_rebuild():
     assert store.accounts["A001"]["available_cash"] == "87390.000000"
 
 
-def test_option_long_short_market_value_and_margin_are_exact():
+@pytest.mark.parametrize(
+    ("booked_margin", "expected_risk_available"),
+    [
+        ("1000", "97550.000000"),
+        ("1500", "97300.000000"),
+    ],
+)
+def test_option_long_short_market_value_and_margin_are_exact(
+    booked_margin,
+    expected_risk_available,
+):
     """同账户期权多空持仓只写一次快照，并精确核对权益与风险保证金。"""
 
     def option_position(position_id, direction, volume, open_price):
@@ -590,7 +602,9 @@ def test_option_long_short_market_value_and_margin_are_exact():
                 Decimal("1000") if direction == "SHORT" else Decimal("0")
             ),
             persisted_used_margin=(
-                Decimal("1000") if direction == "SHORT" else Decimal("0")
+                Decimal(booked_margin)
+                if direction == "SHORT"
+                else Decimal("0")
             ),
             option_type="CALL",
             strike_price=Decimal("110"),
@@ -617,7 +631,7 @@ def test_option_long_short_market_value_and_margin_are_exact():
     account = AccountPnlSnapshot(
         account_id="A001",
         cash_balance=Decimal("100000"),
-        used_margin=Decimal("1000"),
+        used_margin=Decimal(booked_margin),
         frozen_margin=Decimal("0"),
         frozen_cash=Decimal("0"),
         frozen_commission=Decimal("0"),
@@ -625,8 +639,8 @@ def test_option_long_short_market_value_and_margin_are_exact():
         daily_position_pnl=Decimal("0"),
         daily_close_pnl=Decimal("0"),
         daily_commission=Decimal("0"),
-        option_used_margin=Decimal("1000"),
-        option_realtime_required_margin=Decimal("1000"),
+        option_used_margin=Decimal(booked_margin),
+        option_realtime_required_margin=Decimal(booked_margin),
     )
     cycle = ActivePositionCycleSnapshot(
         by_contract=MappingProxyType(
@@ -708,7 +722,10 @@ def test_option_long_short_market_value_and_margin_are_exact():
         store.accounts["A001"]["option_realtime_required_margin"]
         == "1250.000000"
     )
-    assert store.accounts["A001"]["risk_available_cash"] == "97550.000000"
+    assert (
+        store.accounts["A001"]["risk_available_cash"]
+        == expected_risk_available
+    )
     assert store.accounts["A001"]["daily_position_pnl"] == "300.000000"
     assert result.accounts_updated == 1
     assert result.margin_adjustment_positions == (

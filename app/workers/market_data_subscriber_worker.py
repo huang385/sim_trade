@@ -23,11 +23,18 @@ from app.infrastructure.market_data.remote_feed_client import (
     create_remote_sdk_client,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
+from app.repositories.instrument_market_data_mapping_repository import (
+    InstrumentMarketDataMappingRepository,
+)
 from app.repositories.instrument_repository import InstrumentRepository
 from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import (
     MarketDataProcessAction,
     MarketDataService,
+)
+from app.services.market_data_code_mapping_service import (
+    MarketDataCodeMappingService,
+    MarketDataCodeMappingSnapshot,
 )
 from app.services.market_subscription_service import MarketSubscriptionService
 from app.services.market_tick_normalizer import (
@@ -95,6 +102,7 @@ class MarketDataSubscriberWorker:
         session_factory: Callable[[], Session],
         feed_client: RemoteFeedClient,
         market_data_service: MarketDataService,
+        code_mapping_service: MarketDataCodeMappingService,
         subscription_service: MarketSubscriptionService,
         tick_store: MarketTickStore,
         queue_size: int,
@@ -107,6 +115,7 @@ class MarketDataSubscriberWorker:
         self.session_factory = session_factory
         self.feed_client = feed_client
         self.market_data_service = market_data_service
+        self.code_mapping_service = code_mapping_service
         self.subscription_service = subscription_service
         self.tick_store = tick_store
         self.refresh_seconds = refresh_seconds
@@ -165,6 +174,7 @@ class MarketDataSubscriberWorker:
         raw: dict[str, Any],
         *,
         generation: int | None = None,
+        code_mapping: MarketDataCodeMappingSnapshot | None = None,
     ) -> None:
         """SDK 回调：记录接收时间并非阻塞入队，不执行数据库或 Redis 操作。"""
 
@@ -177,15 +187,22 @@ class MarketDataSubscriberWorker:
         with self._state_lock:
             self.last_tick_at = utc_now()
         try:
+            normalized_data = dict(data)
+            if code_mapping is not None:
+                normalized_data["code"] = code_mapping.to_internal(
+                    str(data.get("code") or "")
+                )
             self.tick_queue.put_nowait(
                 QueuedTick(
-                    data=dict(data),
+                    data=normalized_data,
                     raw=dict(raw),
                     ingest_type=MarketTickIngestType.LIVE_CALLBACK,
                     subscription_generation=generation,
                 )
             )
             self._increment("enqueued_count")
+        except ValueError:
+            self._increment("invalid_count")
         except queue.Full:
             self._increment("queue_full_drop_count")
             with self._state_lock:
@@ -213,17 +230,26 @@ class MarketDataSubscriberWorker:
         report: dict[str, Any],
         *,
         generation: int | None = None,
+        code_mapping: MarketDataCodeMappingSnapshot | None = None,
     ) -> None:
         """幂等处理异步逐合约订阅回执，不记录原始报文或任何凭证。"""
 
+        normalized_report = dict(report)
+        contracts = report.get("contracts") or {}
+        if code_mapping is not None:
+            normalized_report["contracts"] = {
+                code_mapping.to_internal(raw_code): item
+                for raw_code, item in contracts.items()
+            }
+
         state = self.subscription_service.apply_subscription_report(
-            report,
+            normalized_report,
             generation=generation,
         )
         if generation is not None and generation != state.generation:
             return
 
-        contracts = report.get("contracts") or {}
+        contracts = normalized_report.get("contracts") or {}
         for code in sorted(state.failed_codes):
             if code in contracts:
                 logger.warning(
@@ -334,19 +360,23 @@ class MarketDataSubscriberWorker:
             self._disconnected_waiting = False
             self._retry_generation = None
 
-        # 一次 SQL 批量预热；后续正常 Tick 不再创建数据库 Session。
+        # 一次SQL批量预热并建立本订阅代次专用的双向代码映射；后续正常
+        # Tick只执行内存字典查询，不再创建数据库Session。
         with self.session_factory() as db:
             self.market_data_service.refresh_instrument_cache(db, codes)
+            code_mapping = self.code_mapping_service.build_snapshot(db, codes)
         subscription = self.feed_client.start_tick_callbacks(
-            codes,
+            code_mapping.source_codes,
             on_quote=lambda data, raw: self.on_quote(
                 data,
                 raw,
                 generation=generation,
+                code_mapping=code_mapping,
             ),
             on_subscribe=lambda report: self.on_subscribe(
                 report,
                 generation=generation,
+                code_mapping=code_mapping,
             ),
             on_message=self.on_message,
             on_error=self.on_error,
@@ -571,6 +601,9 @@ def build_worker() -> MarketDataSubscriberWorker:
         validation_service=MarketTickValidationService(),
         tick_store=tick_store,
     )
+    code_mapping_service = MarketDataCodeMappingService(
+        InstrumentMarketDataMappingRepository()
+    )
     subscription_service = MarketSubscriptionService(
         active_order_index=ActiveOrderIndex(redis_client),
         # 活动持仓合约索引由实时盈亏Worker维护在Redis中。复用该索引可让
@@ -584,6 +617,7 @@ def build_worker() -> MarketDataSubscriberWorker:
         session_factory=SessionLocal,
         feed_client=RemoteFeedClient(create_remote_sdk_client(settings)),
         market_data_service=market_data_service,
+        code_mapping_service=code_mapping_service,
         subscription_service=subscription_service,
         tick_store=tick_store,
         queue_size=settings.remote_market_data_queue_size,

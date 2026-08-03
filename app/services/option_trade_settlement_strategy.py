@@ -176,6 +176,12 @@ class OptionTradeSettlementStrategy:
         account.option_used_margin = quantize_money(
             account.option_used_margin + allocated_margin
         )
+        # 成交后的账面保证金在下一轮实时行情重估前就是当前可靠风险要求。
+        # 同步更新账户和持仓快照，确保用户可以立即平仓，不依赖未来Tick
+        # 才修复realtime_required_margin。
+        account.option_realtime_required_margin = quantize_money(
+            account.option_realtime_required_margin + allocated_margin
+        )
         account.used_commission = quantize_money(
             account.used_commission + actual_commission
         )
@@ -249,6 +255,7 @@ class OptionTradeSettlementStrategy:
                 used_margin=Decimal("0"),
                 initial_occupied_margin=Decimal("0"),
                 realtime_required_margin=Decimal("0"),
+                option_market_value=Decimal("0"),
                 realized_pnl=Decimal("0"),
                 unrealized_pnl=Decimal("0"),
                 daily_position_pnl=Decimal("0"),
@@ -274,8 +281,14 @@ class OptionTradeSettlementStrategy:
         position.position_cost = quantize_money(
             position.position_cost + premium
         )
+        position.option_market_value = quantize_money(
+            position.option_market_value + premium
+        )
         position.used_margin = quantize_money(
             position.used_margin + allocated_margin
+        )
+        position.realtime_required_margin = quantize_money(
+            position.realtime_required_margin + allocated_margin
         )
         position.initial_occupied_margin = quantize_money(
             position.initial_occupied_margin + allocated_margin

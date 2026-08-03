@@ -218,6 +218,155 @@ def command(event_id, price, volume):
     )
 
 
+def configure_option_close(
+    session_factory,
+    *,
+    close_direction: str,
+) -> None:
+    """把通用平仓夹具转换成带可靠标记市值的商品期权持仓。"""
+
+    is_short = close_direction == "BUY"
+    with session_factory() as db:
+        order = db.scalar(select(Order))
+        account = db.scalar(select(Account))
+        position = db.scalar(select(Position))
+        detail = db.scalar(select(PositionDetail))
+
+        order.instrument_type = "FUTURES_OPTION"
+        order.direction = close_direction
+        order.limit_price = Decimal("25")
+        position.instrument_type = "FUTURES_OPTION"
+        position.direction = "SHORT" if is_short else "LONG"
+        position.average_open_price = Decimal("20")
+        position.position_cost = Decimal("2000")
+        position.multiplier_snapshot = Decimal("10")
+        position.option_market_value = Decimal("2000")
+        position.realtime_required_margin = (
+            Decimal("8000") if is_short else Decimal("0")
+        )
+        detail.direction = position.direction
+        detail.open_price = Decimal("20")
+        detail.multiplier_snapshot = Decimal("10")
+        detail.realtime_required_margin = (
+            Decimal("8000") if is_short else Decimal("0")
+        )
+
+        if is_short:
+            position.used_margin = Decimal("5000")
+            detail.open_margin = Decimal("5000")
+            detail.remaining_margin = Decimal("5000")
+            account.cash_balance = Decimal("102000")
+            account.used_margin = Decimal("5000")
+            account.option_used_margin = Decimal("5000")
+            account.option_realtime_required_margin = Decimal("8000")
+            account.long_option_market_value = Decimal("0")
+            account.short_option_market_value = Decimal("2000")
+        else:
+            position.used_margin = Decimal("0")
+            detail.open_margin = Decimal("0")
+            detail.remaining_margin = Decimal("0")
+            account.cash_balance = Decimal("98000")
+            account.used_margin = Decimal("0")
+            account.option_used_margin = Decimal("0")
+            account.option_realtime_required_margin = Decimal("0")
+            account.long_option_market_value = Decimal("2000")
+            account.short_option_market_value = Decimal("0")
+        account.net_option_market_value = (
+            Decimal("-2000") if is_short else Decimal("2000")
+        )
+        db.commit()
+
+
+@pytest.mark.parametrize(
+    ("close_direction", "market_field"),
+    [
+        ("SELL", "long_option_market_value"),
+        ("BUY", "short_option_market_value"),
+    ],
+)
+def test_option_partial_close_releases_mark_value_not_trade_turnover(
+    close_direction,
+    market_field,
+):
+    """平仓价与标记价不同时，只按旧持仓标记市值比例扣减。"""
+
+    session_factory = factory()
+    seed_close(
+        session_factory,
+        close_direction=close_direction,
+        order_volume=4,
+        position_volume=10,
+        open_margin=(
+            Decimal("5000")
+            if close_direction == "BUY"
+            else Decimal("0")
+        ),
+    )
+    configure_option_close(
+        session_factory,
+        close_direction=close_direction,
+    )
+
+    with session_factory() as db:
+        result = TradeSettlementService().settle(
+            db,
+            command("TICK-OPTION-CLOSE", "25", 4),
+        )
+        assert result.action == "SETTLED"
+
+    with session_factory() as db:
+        account = db.scalar(select(Account))
+        position = db.scalar(select(Position))
+        detail = db.scalar(select(PositionDetail))
+        trade = db.scalar(select(Trade))
+
+        # 原标记市值2000，平4/10只扣800；成交额1000仅用于权利金现金流。
+        assert trade.turnover == Decimal("1000.000000")
+        assert getattr(account, market_field) == Decimal("1200.000000")
+        assert position.option_market_value == Decimal("1200.000000")
+        assert position.total_volume == 6
+        if close_direction == "BUY":
+            assert account.option_realtime_required_margin == Decimal(
+                "4800.000000"
+            )
+            assert position.realtime_required_margin == Decimal(
+                "4800.000000"
+            )
+            assert detail.realtime_required_margin == Decimal("4800.000000")
+        else:
+            assert account.option_realtime_required_margin == Decimal(
+                "0.000000"
+            )
+
+
+def test_option_full_close_clears_position_market_value_and_realtime_margin():
+    session_factory = factory()
+    seed_close(
+        session_factory,
+        close_direction="BUY",
+        order_volume=10,
+        position_volume=10,
+        open_margin=Decimal("5000"),
+    )
+    configure_option_close(session_factory, close_direction="BUY")
+
+    with session_factory() as db:
+        result = TradeSettlementService().settle(
+            db,
+            command("TICK-OPTION-FULL-CLOSE", "25", 10),
+        )
+        assert result.action == "SETTLED"
+
+    with session_factory() as db:
+        account = db.scalar(select(Account))
+        position = db.scalar(select(Position))
+        assert account.short_option_market_value == Decimal("0.000000")
+        assert account.option_realtime_required_margin == Decimal("0.000000")
+        assert position.option_market_value == Decimal("0.000000")
+        assert position.realtime_required_margin == Decimal("0.000000")
+        assert position.total_volume == 0
+
+
 def seed_cross_day_close(session_factory):
     """构造昨仓5手、今仓5手的普通 CLOSE 订单。"""
 

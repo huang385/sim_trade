@@ -76,17 +76,50 @@ class OrderFreezeService:
             frozen_margin + frozen_commission
         )
 
-        # 资金不足时不能先扣一部分，账户字段必须保持原值。
-        if account.available_cash < required_amount:
+        # 统一账户中，账面可用资金和风险可用资金任意一个不足，都不能继续
+        # 增加风险。历史期货账户没有risk_available_cash时兼容使用账面值。
+        available_cash = quantize_money(account.available_cash)
+        risk_available_cash = quantize_money(
+            getattr(account, "risk_available_cash", account.available_cash)
+        )
+        # 兼容统一账户字段上线前由测试夹具或历史脚本直接创建的纯期货账户：
+        # 这些记录可能保持server_default=0，但没有任何期权资产或负债。
+        # 此时按统一估值公式，风险可用资金本就应等于账面可用资金，先修复
+        # 该缺省快照再冻结；存在任何期权暴露时绝不启用此兼容分支。
+        if (
+            hasattr(account, "risk_available_cash")
+            and risk_available_cash == Decimal("0")
+            and available_cash > Decimal("0")
+            and getattr(account, "risk_state", "NORMAL") == "NORMAL"
+            and Decimal(getattr(account, "option_used_margin", 0)) == 0
+            and Decimal(
+                getattr(account, "option_realtime_required_margin", 0)
+            )
+            == 0
+            and Decimal(getattr(account, "long_option_market_value", 0)) == 0
+            and Decimal(getattr(account, "short_option_market_value", 0)) == 0
+        ):
+            risk_available_cash = available_cash
+            account.risk_available_cash = available_cash
+        if available_cash < required_amount:
             raise BusinessRuleError(
                 "账户可用资金不足",
                 error_code="INSUFFICIENT_AVAILABLE_CASH",
+            )
+        if risk_available_cash < required_amount:
+            raise BusinessRuleError(
+                "账户风险可用资金不足",
+                error_code="INSUFFICIENT_RISK_AVAILABLE_CASH",
             )
 
         # 以下三个字段会与订单写入一起提交，任何后续异常都会回滚。
         account.available_cash = quantize_money(
             account.available_cash - required_amount
         )
+        if hasattr(account, "risk_available_cash"):
+            account.risk_available_cash = quantize_money(
+                account.risk_available_cash - required_amount
+            )
         account.frozen_margin = quantize_money(
             account.frozen_margin + frozen_margin
         )
@@ -149,10 +182,30 @@ class OrderFreezeService:
     ) -> None:
         """平仓下单只冻结预计手续费，不新增占用保证金。"""
 
-        OrderFreezeService.freeze_open_order(
-            account=account,
-            frozen_margin=Decimal("0"),
-            frozen_commission=frozen_commission,
+        # 平仓是降低风险的操作，即使risk_available_cash已经为负也必须允许。
+        # 这里只要求账面可用资金能够覆盖预计手续费，不能复用开仓的统一风险
+        # 限制，否则MARGIN_DEFICIT账户将无法主动减仓。
+        OrderFreezeService.validate_account_tradable(account)
+        if frozen_commission < Decimal("0"):
+            raise BusinessValidationError(
+                "冻结手续费不能小于0",
+                error_code="INVALID_FROZEN_COMMISSION",
+            )
+        frozen_commission = quantize_money(frozen_commission)
+        if account.available_cash < frozen_commission:
+            raise BusinessRuleError(
+                "账户可用资金不足",
+                error_code="INSUFFICIENT_AVAILABLE_CASH",
+            )
+        account.available_cash = quantize_money(
+            account.available_cash - frozen_commission
+        )
+        if hasattr(account, "risk_available_cash"):
+            account.risk_available_cash = quantize_money(
+                account.risk_available_cash - frozen_commission
+            )
+        account.frozen_commission = quantize_money(
+            account.frozen_commission + frozen_commission
         )
 
     @staticmethod

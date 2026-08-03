@@ -25,6 +25,22 @@ class OptionTradingPermissionService:
         instrument_type = InstrumentType(
             getattr(instrument, "instrument_type", InstrumentType.FUTURES.value)
         )
+        # 统一账户的风险状态属于账户级限制，必须先于具体产品开关判断。
+        # 无论本次开仓的是期货、商品期权还是股指期权，只要账户估值不可用
+        # 或风险可用资金已经不足，都不能继续增加风险；平仓仍然允许执行。
+        if (
+            getattr(account, "risk_state", AccountRiskState.NORMAL.value)
+            in {
+                AccountRiskState.MARGIN_DEFICIT.value,
+                AccountRiskState.VALUATION_UNAVAILABLE.value,
+            }
+            and offset_flag == OffsetFlag.OPEN
+        ):
+            raise BusinessRuleError(
+                "账户风险状态禁止增加风险",
+                error_code="ACCOUNT_RISK_INCREASE_BLOCKED",
+            )
+
         if instrument_type == InstrumentType.FUTURES:
             return
         if instrument_type == InstrumentType.INDEX:
@@ -45,20 +61,6 @@ class OptionTradingPermissionService:
                 "期权交易权限未开启",
                 error_code="OPTION_TRADING_NOT_ENABLED",
             )
-        # 风险异常账户只能减仓或撤单，不能继续提交任何OPEN订单。
-        if (
-            account.risk_state
-            in {
-                AccountRiskState.MARGIN_DEFICIT.value,
-                AccountRiskState.VALUATION_UNAVAILABLE.value,
-            }
-            and offset_flag == OffsetFlag.OPEN
-        ):
-            raise BusinessRuleError(
-                "账户风险状态禁止增加风险",
-                error_code="ACCOUNT_RISK_INCREASE_BLOCKED",
-            )
-
         if instrument_type == InstrumentType.FUTURES_OPTION:
             if not self.config.commodity_option_trading_enabled:
                 raise BusinessRuleError(

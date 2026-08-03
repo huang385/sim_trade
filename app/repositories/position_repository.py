@@ -60,6 +60,24 @@ class PositionRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_active_by_account_for_update(
+        db: Session,
+        account_id: str,
+    ) -> Sequence[Position]:
+        """按固定主键顺序锁定账户全部有效持仓，供资金事实完整重算。"""
+
+        statement = (
+            select(Position)
+            .where(
+                Position.account_id == account_id,
+                Position.total_volume > 0,
+            )
+            .order_by(Position.id)
+            .with_for_update()
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def list_by_account_contract(
         db: Session,
         *,

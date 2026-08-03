@@ -3,6 +3,7 @@ import threading
 import pytest
 
 from app.core.config import settings
+from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_data.remote_feed_client import (
@@ -10,6 +11,12 @@ from app.infrastructure.market_data.remote_feed_client import (
     create_remote_sdk_client,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
+from app.repositories.instrument_market_data_mapping_repository import (
+    InstrumentMarketDataMappingRepository,
+)
+from app.services.market_data_code_mapping_service import (
+    MarketDataCodeMappingService,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -30,7 +37,13 @@ def configured_codes():
     )
     if not codes:
         pytest.skip("Redis中没有活动订单或有效持仓合约")
-    return codes
+    # 活动索引保存项目内部代码；真实FeedHub调用必须使用行情源代码。
+    # 映射在测试开始前一次性批量构建，行为与生产订阅Worker保持一致。
+    with SessionLocal() as db:
+        snapshot = MarketDataCodeMappingService(
+            InstrumentMarketDataMappingRepository()
+        ).build_snapshot(db, codes)
+    return set(snapshot.source_codes)
 
 
 def test_real_feed_rest_snapshot_for_active_contracts():

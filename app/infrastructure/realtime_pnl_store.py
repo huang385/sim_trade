@@ -14,6 +14,9 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_CONTRACTS_KEY,
     PNL_DIRTY_CONTRACT_VERSIONS_KEY,
     PNL_DIRTY_ACCOUNTS_KEY,
+    PNL_DIRTY_ACCOUNT_SCAN_BUFFER_KEY,
+    PNL_DIRTY_ACCOUNT_SCAN_CURSOR_KEY,
+    PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
     PNL_DIRTY_POSITIONS_KEY,
     PNL_DIRTY_POSITION_SCAN_BUFFER_KEY,
     PNL_DIRTY_POSITION_SCAN_CURSOR_KEY,
@@ -452,6 +455,11 @@ class RealtimePnlStore:
                 mapping=_mapping(item),
             )
             pipeline.sadd(PNL_DIRTY_ACCOUNTS_KEY, item.account_id)
+            pipeline.hset(
+                PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+                item.account_id,
+                dirty_version,
+            )
         pipeline.execute()
         return len(position_items), len(account_items)
 
@@ -496,6 +504,14 @@ class RealtimePnlStore:
             operations.append(hash_operation)
             operations.append(
                 ["SADD", PNL_DIRTY_ACCOUNTS_KEY, item.account_id]
+            )
+            operations.append(
+                [
+                    "HSET",
+                    PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+                    item.account_id,
+                    dirty_version,
+                ]
             )
 
         for account_id, exchange_id, symbol, position_id in additions:
@@ -882,10 +898,106 @@ class RealtimePnlStore:
             )
         )
 
-    def complete_dirty_account(self, account_id: str) -> None:
-        """账户落库后清理辅助Dirty标记；持仓版本仍是可靠性主标记。"""
+    def list_dirty_accounts(
+        self,
+        batch_size: int,
+    ) -> list[tuple[str, str]]:
+        """
+        按Redis持久化游标轮转读取账户Dirty及其CAS版本。
 
-        self.redis_client.srem(PNL_DIRTY_ACCOUNTS_KEY, account_id)
+        账户估值可能因为行情长期缺失而持续保留Dirty。游标和溢出缓冲区
+        都保存在Redis中，使一个暂时无法处理的账户不会永久占满批次头部，
+        Worker重启后也能继续从上次位置扫描。
+        """
+
+        if batch_size <= 0:
+            return []
+
+        buffered = self.redis_client.eval(
+            POP_DIRTY_SCAN_BUFFER_SCRIPT,
+            1,
+            PNL_DIRTY_ACCOUNT_SCAN_BUFFER_KEY,
+            batch_size,
+        ) or []
+        account_ids: list[str] = list(dict.fromkeys(buffered))
+        seen = set(account_ids)
+        raw_cursor = self.redis_client.get(
+            PNL_DIRTY_ACCOUNT_SCAN_CURSOR_KEY
+        )
+        try:
+            cursor = int(raw_cursor or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+
+        start_cursor = cursor
+        first_scan = True
+        while len(account_ids) < batch_size:
+            cursor, members = self.redis_client.sscan(
+                PNL_DIRTY_ACCOUNTS_KEY,
+                cursor=cursor,
+                count=batch_size,
+            )
+            overflow: list[str] = []
+            for member in members:
+                if member in seen:
+                    continue
+                seen.add(member)
+                if len(account_ids) < batch_size:
+                    account_ids.append(member)
+                else:
+                    overflow.append(member)
+            if overflow:
+                self.redis_client.rpush(
+                    PNL_DIRTY_ACCOUNT_SCAN_BUFFER_KEY,
+                    *overflow,
+                )
+            if cursor == 0 or (
+                not first_scan and cursor == start_cursor
+            ):
+                break
+            first_scan = False
+
+        self.redis_client.set(
+            PNL_DIRTY_ACCOUNT_SCAN_CURSOR_KEY,
+            str(cursor),
+        )
+        account_ids = account_ids[:batch_size]
+        if not account_ids:
+            return []
+        versions = self.redis_client.hmget(
+            PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+            account_ids,
+        )
+        return [
+            (account_id, version or "")
+            for account_id, version in zip(
+                account_ids,
+                versions,
+                strict=True,
+            )
+        ]
+
+    def complete_dirty_account(
+        self,
+        account_id: str,
+        expected_version: str | None = None,
+    ) -> bool:
+        """仅清除本次已经提交的账户版本，保留处理期间产生的新Dirty。"""
+
+        if expected_version is None:
+            return bool(
+                self.redis_client.srem(PNL_DIRTY_ACCOUNTS_KEY, account_id)
+            )
+        return bool(
+            self.redis_client.eval(
+                CLEAR_DIRTY_IF_UNCHANGED_SCRIPT,
+                2,
+                PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+                PNL_DIRTY_ACCOUNTS_KEY,
+                account_id,
+                expected_version,
+            )
+        )
 
     def rebuild_active_indexes(
         self,

@@ -28,12 +28,13 @@ from app.services.option_margin_calculator import (
 
 class OptionMarginAdjustmentService:
     """
-    对商品期权空头执行保守的账面保证金追加。
+    按500ms合并后的最新行情双向调整商品期权空头账面保证金。
 
     该服务是资金事实的唯一调整入口之一。实时估值 Worker 只能生成派生
-    快照；当实时所需保证金高于账面占用时，由本服务按
-    Account→Position→PositionDetail 的固定顺序加锁、重算并提交。
-    行情下降不会自动释放账面保证金，释放仍由平仓或后续结算完成。
+    快照；当实时所需保证金与账面占用不一致时，由本服务按
+    Account→Position→PositionDetail 的固定顺序加锁、重算并提交。上涨时
+    追加、下降时释放，不设置金额阈值；initial_occupied_margin始终保留
+    成交时的历史值。
     """
 
     def __init__(
@@ -198,9 +199,8 @@ class OptionMarginAdjustmentService:
                 - previous_required
                 + required
             )
-            additional = max(
-                quantize_money(required - position.used_margin),
-                Decimal("0"),
+            margin_delta = quantize_money(
+                required - Decimal(position.used_margin)
             )
             active_details = [
                 item for item in details if item.remaining_volume > 0
@@ -236,7 +236,29 @@ class OptionMarginAdjustmentService:
                 frozen_commission=Decimal(account.frozen_commission),
                 option_collateral_ratio=settings.option_collateral_ratio,
             )
-            if proposed_valuation.risk_available_cash < Decimal("0"):
+            # 只有向上追加才受资金是否充足约束。向下释放会改善账户风险，
+            # 即使账户已经处于MARGIN_DEFICIT也必须允许继续执行。
+            if (
+                margin_delta > 0
+                and proposed_valuation.risk_available_cash < Decimal("0")
+            ):
+                remaining_required = required
+                for index, detail in enumerate(active_details):
+                    share = (
+                        remaining_required
+                        if index == len(active_details) - 1
+                        else quantize_money(
+                            required
+                            * Decimal(detail.remaining_volume)
+                            / Decimal(total_volume)
+                        )
+                    )
+                    # 资金不足时不增加账面remaining_margin，但明细的实时
+                    # 风险要求必须反映最新计算结果，避免展示历史旧值。
+                    detail.realtime_required_margin = share
+                    remaining_required = quantize_money(
+                        remaining_required - share
+                    )
                 account.available_cash = proposed_valuation.available_cash
                 account.risk_available_cash = (
                     proposed_valuation.risk_available_cash
@@ -254,36 +276,41 @@ class OptionMarginAdjustmentService:
                 position.updated_at = utc_now()
                 db.commit()
                 return account
-            if additional > 0:
-                position.used_margin = quantize_money(
-                    position.used_margin + additional
+
+            # 不设置阈值：只要六位小数量化后的差额非零，就把账面实际占用
+            # 精确同步到本轮加锁后重新计算的required。账户总额只调整当前
+            # 持仓的差额，不影响其他期货或期权持仓。
+            position.used_margin = required
+            account.used_margin = quantize_money(
+                Decimal(account.used_margin) + margin_delta
+            )
+            account.option_used_margin = quantize_money(
+                Decimal(account.option_used_margin) + margin_delta
+            )
+            if account.used_margin < 0 or account.option_used_margin < 0:
+                raise DataAccessError(
+                    "期权保证金释放后的账户占用金额不合法",
+                    error_code="OPTION_MARGIN_ACCOUNT_INCONSISTENT",
                 )
-                account.used_margin = quantize_money(
-                    account.used_margin + additional
+
+            # 按剩余数量重新分配目标金额，而不是在历史值上简单加减。最后
+            # 一条明细承接Decimal量化尾差，保证明细合计始终等于Position。
+            remaining_required = required
+            for index, detail in enumerate(active_details):
+                share = (
+                    remaining_required
+                    if index == len(active_details) - 1
+                    else quantize_money(
+                        required
+                        * Decimal(detail.remaining_volume)
+                        / Decimal(total_volume)
+                    )
                 )
-                account.option_used_margin = quantize_money(
-                    account.option_used_margin + additional
+                detail.remaining_margin = share
+                detail.realtime_required_margin = share
+                remaining_required = quantize_money(
+                    remaining_required - share
                 )
-                remaining_addition = additional
-                for index, detail in enumerate(active_details):
-                    share = (
-                        remaining_addition
-                        if index == len(active_details) - 1
-                        else quantize_money(
-                            additional
-                            * Decimal(detail.remaining_volume)
-                            / Decimal(total_volume)
-                        )
-                    )
-                    detail.remaining_margin = quantize_money(
-                        detail.remaining_margin + share
-                    )
-                    detail.realtime_required_margin = quantize_money(
-                        detail.realtime_required_margin + share
-                    )
-                    remaining_addition = quantize_money(
-                        remaining_addition - share
-                    )
             valuation = AccountValuationCalculator.calculate(
                 cash_balance=Decimal(account.cash_balance),
                 futures_unrealized_pnl=Decimal(account.unrealized_pnl),

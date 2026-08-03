@@ -22,6 +22,10 @@ def make_position(
         exchange_id="DCE",
         symbol=symbol,
         direction="LONG",
+        instrument_type="FUTURES",
+        multiplier_snapshot=Decimal("1"),
+        realtime_required_margin=Decimal("0"),
+        option_market_value=Decimal("0"),
         total_volume=1,
         unrealized_pnl=Decimal("0"),
         daily_position_pnl=Decimal("0"),
@@ -35,6 +39,33 @@ def make_position(
         remaining_volume=1,
     )
     return position, detail
+
+
+def make_account(account_id: str = "A001"):
+    return SimpleNamespace(
+        account_id=account_id,
+        cash_balance=Decimal("100000"),
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        daily_close_pnl=Decimal("0"),
+        daily_commission=Decimal("0"),
+        daily_pnl=Decimal("0"),
+        equity=Decimal("100000"),
+        available_cash=Decimal("90000"),
+        risk_available_cash=Decimal("90000"),
+        used_margin=Decimal("10000"),
+        option_used_margin=Decimal("0"),
+        option_realtime_required_margin=Decimal("0"),
+        frozen_margin=Decimal("0"),
+        frozen_cash=Decimal("0"),
+        frozen_commission=Decimal("0"),
+        long_option_market_value=Decimal("0"),
+        short_option_market_value=Decimal("0"),
+        net_option_market_value=Decimal("0"),
+        risk_state="NORMAL",
+        risk_ratio=Decimal("0"),
+        updated_at=None,
+    )
 
 
 def test_same_account_positions_are_loaded_and_persisted_in_batches():
@@ -55,6 +86,13 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
         frozen_cash=Decimal("0"),
         frozen_commission=Decimal("0"),
         risk_ratio=Decimal("0"),
+        option_used_margin=Decimal("0"),
+        option_realtime_required_margin=Decimal("0"),
+        long_option_market_value=Decimal("0"),
+        short_option_market_value=Decimal("0"),
+        net_option_market_value=Decimal("0"),
+        risk_available_cash=Decimal("90000"),
+        risk_state="NORMAL",
         updated_at=None,
     )
 
@@ -77,7 +115,7 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
         ("P1", "A001"),
         ("P2", "A001"),
     ]
-    position_repository.list_by_position_ids_for_update.return_value = [
+    position_repository.list_active_by_account_for_update.return_value = [
         first,
         second,
     ]
@@ -91,13 +129,20 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
     instrument_repository.list_by_order_book_ids.return_value = [
         SimpleNamespace(
             order_book_id="JD2609",
+            exchange_id="DCE",
+            symbol="JD2609",
+            underlying_instrument_id=None,
             contract_multiplier=Decimal("1"),
         ),
         SimpleNamespace(
             order_book_id="JM2609",
+            exchange_id="DCE",
+            symbol="JM2609",
+            underlying_instrument_id=None,
             contract_multiplier=Decimal("1"),
         ),
     ]
+    instrument_repository.list_by_ids.return_value = []
     market_tick_store = Mock()
     market_tick_store.get_latest_many.return_value = {
         ("DCE", "JD2609"): {
@@ -123,7 +168,7 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
 
     assert result.positions_persisted == 2
     account_repository.get_by_account_id_for_update.assert_called_once()
-    position_repository.list_by_position_ids_for_update.assert_called_once()
+    position_repository.list_active_by_account_for_update.assert_called_once()
     position_repository.list_open_details_by_position_ids_for_update.assert_called_once()
     instrument_repository.list_by_order_book_ids.assert_called_once()
     market_tick_store.get_latest_many.assert_called_once()
@@ -165,7 +210,14 @@ def test_only_successfully_committed_account_positions_clear_dirty():
             frozen_margin=Decimal("0"),
             frozen_cash=Decimal("0"),
             frozen_commission=Decimal("0"),
-            risk_ratio=Decimal("0"),
+                risk_ratio=Decimal("0"),
+                option_used_margin=Decimal("0"),
+                option_realtime_required_margin=Decimal("0"),
+                long_option_market_value=Decimal("0"),
+                short_option_market_value=Decimal("0"),
+                net_option_market_value=Decimal("0"),
+                risk_available_cash=Decimal("90000"),
+                risk_state="NORMAL",
             updated_at=None,
         )
 
@@ -185,13 +237,17 @@ def test_only_successfully_committed_account_positions_clear_dirty():
         ("P-A", "version-a"),
         ("P-B", "version-b"),
     ]
+    pnl_store.list_dirty_accounts.return_value = [
+        ("A001", "account-version-a"),
+        ("B001", "account-version-b"),
+    ]
     pnl_store.complete_dirty_position.return_value = True
     position_repository = Mock()
     position_repository.list_account_ids_for_positions.return_value = [
         ("P-A", "A001"),
         ("P-B", "B001"),
     ]
-    position_repository.list_by_position_ids_for_update.side_effect = [
+    position_repository.list_active_by_account_for_update.side_effect = [
         [first],
         [second],
     ]
@@ -209,16 +265,23 @@ def test_only_successfully_committed_account_positions_clear_dirty():
         [
             SimpleNamespace(
                 order_book_id="JD2609",
+                exchange_id="DCE",
+                symbol="JD2609",
+                underlying_instrument_id=None,
                 contract_multiplier=Decimal("1"),
             )
         ],
         [
             SimpleNamespace(
                 order_book_id="JM2609",
+                exchange_id="DCE",
+                symbol="JM2609",
+                underlying_instrument_id=None,
                 contract_multiplier=Decimal("1"),
             )
         ],
     ]
+    instrument_repository.list_by_ids.return_value = []
     market_tick_store = Mock()
     market_tick_store.get_latest_many.side_effect = [
         {
@@ -252,7 +315,10 @@ def test_only_successfully_committed_account_positions_clear_dirty():
         "P-A",
         "version-a",
     )
-    pnl_store.complete_dirty_account.assert_called_once_with("A001")
+    pnl_store.complete_dirty_account.assert_called_once_with(
+        "A001",
+        "account-version-a",
+    )
     account_a_db.commit.assert_called_once()
     account_b_db.commit.assert_called_once()
 
@@ -274,6 +340,13 @@ def test_dirty_version_change_keeps_new_version_after_database_commit():
         frozen_cash=Decimal("0"),
         frozen_commission=Decimal("0"),
         risk_ratio=Decimal("0"),
+        option_used_margin=Decimal("0"),
+        option_realtime_required_margin=Decimal("0"),
+        long_option_market_value=Decimal("0"),
+        short_option_market_value=Decimal("0"),
+        net_option_market_value=Decimal("0"),
+        risk_available_cash=Decimal("90000"),
+        risk_state="NORMAL",
         updated_at=None,
     )
     mapping_db = Mock()
@@ -286,7 +359,7 @@ def test_dirty_version_change_keeps_new_version_after_database_commit():
     position_repository.list_account_ids_for_positions.return_value = [
         ("P1", "A001")
     ]
-    position_repository.list_by_position_ids_for_update.return_value = [
+    position_repository.list_active_by_account_for_update.return_value = [
         first
     ]
     position_repository.list_open_details_by_position_ids_for_update.return_value = [
@@ -298,9 +371,13 @@ def test_dirty_version_change_keeps_new_version_after_database_commit():
     instrument_repository.list_by_order_book_ids.return_value = [
         SimpleNamespace(
             order_book_id="JD2609",
+            exchange_id="DCE",
+            symbol="JD2609",
+            underlying_instrument_id=None,
             contract_multiplier=Decimal("1"),
         )
     ]
+    instrument_repository.list_by_ids.return_value = []
     market_tick_store = Mock()
     market_tick_store.get_latest_many.return_value = {
         ("DCE", "JD2609"): {
@@ -331,3 +408,218 @@ def test_dirty_version_change_keeps_new_version_after_database_commit():
     )
     assert result.positions_persisted == 0
     assert result.retained == 1
+
+
+def test_account_dirty_without_position_dirty_is_persisted_and_cas_cleared():
+    mapping_db = Mock()
+    account_db = Mock()
+    pnl_store = Mock()
+    pnl_store.list_dirty_positions.return_value = []
+    pnl_store.list_dirty_accounts.return_value = [("A001", "account-v1")]
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = make_account()
+    position_repository = Mock()
+    position_repository.list_account_ids_for_positions.return_value = []
+    position_repository.list_active_by_account_for_update.return_value = []
+    position_repository.list_open_details_by_position_ids_for_update.return_value = []
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = []
+    instrument_repository.list_by_ids.return_value = []
+
+    result = PnlSnapshotPersistenceService(
+        session_factory=Mock(
+            side_effect=[nullcontext(mapping_db), nullcontext(account_db)]
+        ),
+        pnl_store=pnl_store,
+        market_tick_store=Mock(),
+        account_repository=account_repository,
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+    ).persist_batch(500)
+
+    assert result.accounts_requested == 1
+    assert result.accounts_persisted == 1
+    account_db.commit.assert_called_once()
+    pnl_store.complete_dirty_account.assert_called_once_with(
+        "A001", "account-v1"
+    )
+
+
+def test_missing_market_persists_unavailable_state_and_keeps_dirty_version():
+    position, detail = make_position("P1", "JD2609", "100")
+    account = make_account()
+    pnl_store = Mock()
+    pnl_store.list_dirty_positions.return_value = []
+    pnl_store.list_dirty_accounts.return_value = [("A001", "account-v1")]
+    position_repository = Mock()
+    position_repository.list_account_ids_for_positions.return_value = []
+    position_repository.list_active_by_account_for_update.return_value = [
+        position
+    ]
+    position_repository.list_open_details_by_position_ids_for_update.return_value = [
+        detail
+    ]
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = [
+        SimpleNamespace(
+            id=1,
+            order_book_id="JD2609",
+            exchange_id="DCE",
+            symbol="JD2609",
+            underlying_instrument_id=None,
+        )
+    ]
+    instrument_repository.list_by_ids.return_value = []
+    account_db = Mock()
+
+    result = PnlSnapshotPersistenceService(
+        session_factory=Mock(
+            side_effect=[nullcontext(Mock()), nullcontext(account_db)]
+        ),
+        pnl_store=pnl_store,
+        market_tick_store=Mock(
+            get_latest_many=Mock(return_value={})
+        ),
+        account_repository=Mock(
+            get_by_account_id_for_update=Mock(return_value=account)
+        ),
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+    ).persist_batch(500)
+
+    assert result.accounts_persisted == 1
+    assert account.risk_state == "VALUATION_UNAVAILABLE"
+    account_db.commit.assert_called_once()
+    pnl_store.complete_dirty_account.assert_not_called()
+    pnl_store.get_accounts_many.assert_not_called()
+    pnl_store.get_positions_many.assert_not_called()
+
+
+def test_option_amounts_are_recalculated_from_database_facts_not_redis():
+    """即使Redis金额被篡改，落库仍按锁定后的持仓、规则和行情重算。"""
+
+    account = make_account()
+    account.cash_balance = Decimal("103000")
+    account.used_margin = Decimal("10000")
+    account.option_used_margin = Decimal("10000")
+    position = SimpleNamespace(
+        position_id="P-OPT",
+        account_id="A001",
+        order_book_id="JD2609-C-4000",
+        exchange_id="DCE",
+        symbol="JD2609-C-4000",
+        direction="SHORT",
+        instrument_type="FUTURES_OPTION",
+        multiplier_snapshot=Decimal("15"),
+        total_volume=2,
+        used_margin=Decimal("10000"),
+        realtime_required_margin=Decimal("10000"),
+        option_market_value=Decimal("3000"),
+        margin_rule_id=7,
+        margin_rule_version="V1",
+        margin_rule_snapshot={
+            "rule_id": 7,
+            "rule_version": "V1",
+            "margin_algorithm": "COMMODITY_FUTURES_OPTION",
+            "margin_adjustment_rate": "1",
+            "minimum_guarantee_rate": "0",
+            "out_of_money_deduction_rate": "1",
+            "minimum_underlying_margin_ratio": "0.5",
+            "extra_margin_rate": "0",
+            "underlying_margin_rate": "0.1",
+            "underlying_multiplier": "10",
+        },
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        updated_at=None,
+    )
+    detail = SimpleNamespace(
+        position_detail_id="PD-OPT",
+        position_id="P-OPT",
+        open_price=Decimal("100"),
+        pnl_base_price=Decimal("100"),
+        remaining_volume=2,
+        realtime_required_margin=Decimal("10000"),
+        margin_price_mode=None,
+        margin_option_price=None,
+        margin_underlying_price=None,
+        margin_calculated_at=None,
+        updated_at=None,
+    )
+    option = SimpleNamespace(
+        id=1,
+        order_book_id="JD2609-C-4000",
+        exchange_id="DCE",
+        symbol="JD2609-C-4000",
+        instrument_type="FUTURES_OPTION",
+        underlying_instrument_id=2,
+        option_type="CALL",
+        strike_price=Decimal("4000"),
+    )
+    underlying = SimpleNamespace(
+        id=2,
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        symbol="JD2609",
+        instrument_type="FUTURES",
+        underlying_instrument_id=None,
+    )
+    pnl_store = Mock()
+    pnl_store.list_dirty_positions.return_value = []
+    pnl_store.list_dirty_accounts.return_value = [("A001", "v1")]
+    # 这些伪造金额故意与数据库事实不同；生产服务不应读取它们。
+    pnl_store.get_accounts_many.return_value = {
+        "A001": {"short_option_market_value": "999999999"}
+    }
+    pnl_store.get_positions_many.return_value = {
+        "P-OPT": {"realtime_required_margin": "1"}
+    }
+    position_repository = Mock()
+    position_repository.list_account_ids_for_positions.return_value = []
+    position_repository.list_active_by_account_for_update.return_value = [
+        position
+    ]
+    position_repository.list_open_details_by_position_ids_for_update.return_value = [
+        detail
+    ]
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = [option]
+    instrument_repository.list_by_ids.return_value = [underlying]
+
+    PnlSnapshotPersistenceService(
+        session_factory=Mock(
+            side_effect=[nullcontext(Mock()), nullcontext(Mock())]
+        ),
+        pnl_store=pnl_store,
+        market_tick_store=Mock(
+            get_latest_many=Mock(
+                return_value={
+                    ("DCE", "JD2609-C-4000"): {
+                        "source": "YML_FEEDHUB",
+                        "ingest_type": "LIVE_CALLBACK",
+                        "last_price": "105",
+                    },
+                    ("DCE", "JD2609"): {
+                        "source": "YML_FEEDHUB",
+                        "ingest_type": "LIVE_CALLBACK",
+                        "last_price": "4033",
+                    },
+                }
+            )
+        ),
+        account_repository=Mock(
+            get_by_account_id_for_update=Mock(return_value=account)
+        ),
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+    ).persist_batch(500)
+
+    assert position.option_market_value == Decimal("3150.000000")
+    assert position.realtime_required_margin == Decimal("11216.000000")
+    assert detail.realtime_required_margin == Decimal("11216.000000")
+    assert account.short_option_market_value == Decimal("3150.000000")
+    assert account.option_realtime_required_margin == Decimal(
+        "11216.000000"
+    )
+    pnl_store.get_accounts_many.assert_not_called()
+    pnl_store.get_positions_many.assert_not_called()

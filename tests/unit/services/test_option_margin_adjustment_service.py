@@ -191,6 +191,130 @@ def test_adjust_recalculates_risk_instead_of_using_stale_risk_cash():
     db.rollback.assert_not_called()
 
 
+def test_adjust_releases_margin_immediately_when_requirement_decreases():
+    account = make_account(
+        used_margin=Decimal("3000"),
+        option_used_margin=Decimal("3000"),
+        option_realtime_required_margin=Decimal("3000"),
+    )
+    position = make_position(
+        used_margin=Decimal("3000"),
+        realtime_required_margin=Decimal("3000"),
+    )
+    details = [
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1500"),
+            realtime_required_margin=Decimal("1500"),
+        ),
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1500"),
+            realtime_required_margin=Decimal("1500"),
+        ),
+    ]
+    service, account, position, details = build_service(
+        account=account,
+        position=position,
+        details=details,
+    )
+    db = Mock()
+
+    service.adjust(db, account_id="A1", position_id="P1")
+
+    assert position.used_margin == Decimal("2100.000000")
+    assert position.realtime_required_margin == Decimal("2100.000000")
+    assert account.used_margin == Decimal("2100.000000")
+    assert account.option_used_margin == Decimal("2100.000000")
+    assert account.available_cash == Decimal("7900.000000")
+    assert [item.remaining_margin for item in details] == [
+        Decimal("1050.000000"),
+        Decimal("1050.000000"),
+    ]
+    assert [item.realtime_required_margin for item in details] == [
+        Decimal("1050.000000"),
+        Decimal("1050.000000"),
+    ]
+    db.commit.assert_called_once_with()
+    db.rollback.assert_not_called()
+
+
+def test_adjust_has_no_release_threshold_even_for_smallest_money_delta():
+    account = make_account(
+        used_margin=Decimal("2100.000001"),
+        option_used_margin=Decimal("2100.000001"),
+        option_realtime_required_margin=Decimal("2100.000001"),
+    )
+    position = make_position(
+        used_margin=Decimal("2100.000001"),
+        realtime_required_margin=Decimal("2100.000001"),
+    )
+    details = [
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1050.0000005"),
+            realtime_required_margin=Decimal("1050.0000005"),
+        ),
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1050.0000005"),
+            realtime_required_margin=Decimal("1050.0000005"),
+        ),
+    ]
+    service, account, position, details = build_service(
+        account=account,
+        position=position,
+        details=details,
+    )
+
+    service.adjust(Mock(), account_id="A1", position_id="P1")
+
+    assert position.used_margin == Decimal("2100.000000")
+    assert account.used_margin == Decimal("2100.000000")
+    assert sum(
+        (item.remaining_margin for item in details),
+        Decimal("0"),
+    ) == Decimal("2100.000000")
+
+
+def test_release_is_allowed_even_if_account_remains_in_margin_deficit():
+    account = make_account(
+        cash_balance=Decimal("1500"),
+        used_margin=Decimal("3000"),
+        option_used_margin=Decimal("3000"),
+        option_realtime_required_margin=Decimal("3000"),
+    )
+    position = make_position(
+        used_margin=Decimal("3000"),
+        realtime_required_margin=Decimal("3000"),
+    )
+    details = [
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1500"),
+            realtime_required_margin=Decimal("1500"),
+        ),
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1500"),
+            realtime_required_margin=Decimal("1500"),
+        ),
+    ]
+    service, account, position, _details = build_service(
+        account=account,
+        position=position,
+        details=details,
+    )
+
+    service.adjust(Mock(), account_id="A1", position_id="P1")
+
+    assert position.used_margin == Decimal("2100.000000")
+    assert account.used_margin == Decimal("2100.000000")
+    assert account.option_used_margin == Decimal("2100.000000")
+    assert account.risk_available_cash == Decimal("-600.000000")
+    assert account.risk_state == "MARGIN_DEFICIT"
+
+
 def test_adjust_deficit_updates_risk_snapshot_without_booking_margin():
     account = make_account(cash_balance=Decimal("1500"))
     service, account, position, details = build_service(account=account)
@@ -208,6 +332,10 @@ def test_adjust_deficit_updates_risk_snapshot_without_booking_margin():
     assert [item.remaining_margin for item in details] == [
         Decimal("500"),
         Decimal("500"),
+    ]
+    assert [item.realtime_required_margin for item in details] == [
+        Decimal("1050.000000"),
+        Decimal("1050.000000"),
     ]
     db.commit.assert_called_once_with()
 

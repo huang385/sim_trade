@@ -26,7 +26,7 @@ def test_add_updates_active_contract_set_in_same_lua_command():
     )
 
     arguments = redis_client.eval.call_args.args
-    assert arguments[1] == 6
+    assert arguments[1] == 7
     assert "active_order_contracts" in arguments
     assert "DCE|JD2609|JD2609" in arguments
 
@@ -44,9 +44,31 @@ def test_remove_checks_contract_set_and_contract_member_in_same_lua():
     )
 
     arguments = redis_client.eval.call_args.args
-    assert arguments[1] == 6
+    assert arguments[1] == 7
     assert "SCARD" in arguments[0]
     assert "active_order_contracts" in arguments
+
+
+def test_option_sell_open_adds_underlying_dependency_in_same_lua():
+    redis_client = Mock()
+    redis_client.eval.return_value = 1
+    order = make_order()
+    order.instrument_type = "FUTURES_OPTION"
+    order.direction = "SELL"
+    order.offset_flag = "OPEN"
+    order.underlying_exchange_id = "DCE"
+    order.underlying_symbol = "JD2609"
+
+    ActiveOrderIndex(redis_client).add_active_order(
+        order,
+        event_id="E-OPTION",
+        processed_ttl_seconds=60,
+    )
+
+    assert (
+        "valuation:underlying_sell_open_orders:DCE:JD2609"
+        in redis_client.eval.call_args.args
+    )
 
 
 def test_list_active_contract_codes_does_not_read_order_hashes():

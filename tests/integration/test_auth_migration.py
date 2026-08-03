@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 import os
 import subprocess
 import sys
@@ -97,7 +98,7 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
             # 认证迁移之后已经追加统一期货/期权账户的三段正式迁移。
-            assert revision == "20260730_0011"
+            assert revision == "20260803_0013"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -251,3 +252,116 @@ def test_existing_accounts_are_safely_backfilled_before_foreign_key():
                 "WHERE account.user_id IS NULL OR app_user.id IS NULL"
             ).fetchone()[0]
             assert invalid_owner_count == 0
+
+
+def test_historical_futures_multipliers_are_repaired_from_instruments():
+    """0011遗留的NULL/固定1乘数必须按每个真实合约分别修复。"""
+
+    with _temporary_database() as database_name:
+        _run_alembic(database_name, "upgrade", "20260730_0011")
+        now = datetime.now(timezone.utc)
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            for index, multiplier in enumerate((15, 10), start=1):
+                code = f"LEGACY{index}"
+                db.execute(
+                    "INSERT INTO instrument ("
+                    "order_book_id, symbol, exchange_id, market_type, "
+                    "instrument_type, contract_multiplier, price_tick, "
+                    "min_volume, max_volume, is_active, is_tradeable, "
+                    "data_source, created_at, updated_at"
+                    ") VALUES (%s, %s, 'TEST', 'FUTURES', 'FUTURES', "
+                    "%s, 1, 1, 100, true, true, 'TEST', %s, %s)",
+                    (code, code, multiplier, now, now),
+                )
+                db.execute(
+                    "INSERT INTO position ("
+                    "position_id, account_id, order_book_id, exchange_id, "
+                    "symbol, direction, total_volume, today_volume, "
+                    "yesterday_volume, frozen_volume, available_volume, "
+                    "average_open_price, position_cost, used_margin, "
+                    "initial_occupied_margin, realtime_required_margin, "
+                    "multiplier_snapshot, realized_pnl, unrealized_pnl, "
+                    "daily_position_pnl, daily_close_pnl, trading_day, "
+                    "instrument_type, created_at, updated_at"
+                    ") VALUES ("
+                    "%s, 'A-LEGACY', %s, 'TEST', %s, 'LONG', "
+                    "1, 1, 0, 0, 1, 100, %s, 100, 100, 100, NULL, "
+                    "0, 0, 0, 0, CURRENT_DATE, 'FUTURES', %s, %s)",
+                    (
+                        f"P-{index}",
+                        code,
+                        code,
+                        Decimal("100") * multiplier,
+                        now,
+                        now,
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO position_detail ("
+                    "position_detail_id, position_id, account_id, "
+                    "open_trade_id, order_book_id, exchange_id, symbol, "
+                    "direction, open_trading_day, open_price, "
+                    "pnl_base_price, original_volume, remaining_volume, "
+                    "frozen_volume, open_margin, remaining_margin, "
+                    "initial_occupied_margin, realtime_required_margin, "
+                    "multiplier_snapshot, open_commission, status, "
+                    "instrument_type, created_at, updated_at"
+                    ") VALUES ("
+                    "%s, %s, 'A-LEGACY', %s, %s, 'TEST', %s, 'LONG', "
+                    "CURRENT_DATE, 100, 100, 1, 1, 0, 100, 100, 100, "
+                    "100, 1, 0, 'OPEN', 'FUTURES', %s, %s)",
+                    (
+                        f"PD-{index}",
+                        f"P-{index}",
+                        f"T-{index}",
+                        code,
+                        code,
+                        now,
+                        now,
+                    ),
+                )
+            db.commit()
+
+        _run_alembic(database_name, "upgrade", "head")
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            positions = db.execute(
+                "SELECT position_id, multiplier_snapshot FROM position "
+                "ORDER BY position_id"
+            ).fetchall()
+            details = db.execute(
+                "SELECT position_detail_id, multiplier_snapshot "
+                "FROM position_detail ORDER BY position_detail_id"
+            ).fetchall()
+
+        assert positions == [("P-1", Decimal("15")), ("P-2", Decimal("10"))]
+        assert details == [("PD-1", Decimal("15")), ("PD-2", Decimal("10"))]
+
+
+def test_untraceable_historical_detail_stops_multiplier_migration():
+    """找不到Instrument且没有成交事实时，禁止把0011默认值1当成真值。"""
+
+    with _temporary_database() as database_name:
+        _run_alembic(database_name, "upgrade", "20260730_0011")
+        now = datetime.now(timezone.utc)
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            db.execute(
+                "INSERT INTO position_detail ("
+                "position_detail_id, position_id, account_id, "
+                "open_trade_id, order_book_id, exchange_id, symbol, "
+                "direction, open_trading_day, open_price, pnl_base_price, "
+                "original_volume, remaining_volume, frozen_volume, "
+                "open_margin, remaining_margin, initial_occupied_margin, "
+                "realtime_required_margin, multiplier_snapshot, "
+                "open_commission, status, instrument_type, created_at, "
+                "updated_at"
+                ") VALUES ("
+                "'PD-ORPHAN', 'P-ORPHAN', 'A-ORPHAN', 'T-MISSING', "
+                "'MISSING', 'TEST', 'MISSING', 'LONG', CURRENT_DATE, "
+                "100, 100, 1, 1, 0, 100, 100, 100, 100, 1, 0, "
+                "'OPEN', 'FUTURES', %s, %s)",
+                (now, now),
+            )
+            db.commit()
+
+        with pytest.raises(subprocess.CalledProcessError):
+            _run_alembic(database_name, "upgrade", "head")

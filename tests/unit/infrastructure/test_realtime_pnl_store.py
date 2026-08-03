@@ -74,6 +74,19 @@ def test_dirty_contract_cas_does_not_delete_newer_version():
     redis_client.delete.assert_not_called()
 
 
+def test_dirty_account_cas_does_not_delete_newer_version():
+    redis_client = Mock()
+    redis_client.eval.return_value = 0
+    store = RealtimePnlStore(redis_client)
+
+    completed = store.complete_dirty_account("A001", "old-version")
+
+    assert completed is False
+    args = redis_client.eval.call_args.args
+    assert "pnl:dirty_account_versions" in args
+    assert "pnl:dirty_accounts" in args
+
+
 def test_worker_lease_release_is_owner_checked_by_lua():
     redis_client = Mock()
     redis_client.eval.return_value = 1
@@ -269,6 +282,26 @@ def test_dirty_position_scan_cursor_is_reused_after_store_restart():
 
     assert result == [("P-AFTER-RESTART", "v1")]
     assert redis_client.sscan.call_args.kwargs["cursor"] == 27
+
+
+def test_dirty_account_scan_cursor_rotates_past_unprocessable_first_batch():
+    redis_client = Mock()
+    redis_client.eval.return_value = []
+    redis_client.get.side_effect = ["0", "15"]
+    redis_client.sscan.side_effect = [
+        (15, ["A-BAD"]),
+        (0, ["A-GOOD"]),
+    ]
+    redis_client.hmget.side_effect = [["v-bad"], ["v-good"]]
+    store = RealtimePnlStore(redis_client)
+
+    assert store.list_dirty_accounts(1) == [("A-BAD", "v-bad")]
+    assert store.list_dirty_accounts(1) == [("A-GOOD", "v-good")]
+
+    assert redis_client.sscan.call_args_list[0].kwargs["cursor"] == 0
+    assert redis_client.sscan.call_args_list[1].kwargs["cursor"] == 15
+    assert redis_client.set.call_args_list[0].args[-1] == "15"
+    assert redis_client.set.call_args_list[1].args[-1] == "0"
 
 
 def test_rebuild_active_indexes_retries_watch_conflict_then_succeeds():

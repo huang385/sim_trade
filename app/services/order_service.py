@@ -341,6 +341,15 @@ class OrderService:
             margin_rule_snapshot = None
             margin_snapshot_schema_version = None
             margin_calculation_version = None
+            underlying_order_book_id = None
+            underlying_exchange_id = None
+            underlying_symbol = None
+            if is_option and rules.underlying_instrument is not None:
+                underlying_order_book_id = (
+                    rules.underlying_instrument.order_book_id
+                )
+                underlying_exchange_id = rules.underlying_instrument.exchange_id
+                underlying_symbol = rules.underlying_instrument.symbol
             # 只有开仓订单需要新增保证金；平仓订单只冻结手续费和持仓。
             frozen_margin = (
                 self.margin_calculator.calculate_open_margin(
@@ -738,6 +747,9 @@ class OrderService:
                 exchange_id=rules.instrument.exchange_id,
                 trading_day=trading_day,
                 instrument_type=instrument_type,
+                underlying_order_book_id=underlying_order_book_id,
+                underlying_exchange_id=underlying_exchange_id,
+                underlying_symbol=underlying_symbol,
                 direction=request.direction.value,
                 offset_flag=request.offset_flag.value,
                 order_type=request.order_type.value,

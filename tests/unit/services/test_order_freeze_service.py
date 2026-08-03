@@ -63,6 +63,40 @@ def test_rejects_insufficient_cash_without_mutation():
     assert account.frozen_commission == Decimal("0.000000")
 
 
+def test_futures_open_uses_lower_risk_available_cash():
+    account = make_account(
+        available_cash=Decimal("100000"),
+        risk_available_cash=Decimal("100"),
+    )
+
+    with pytest.raises(BusinessRuleError) as exc_info:
+        OrderFreezeService.freeze_open_order(
+            account=account,
+            frozen_margin=Decimal("100"),
+            frozen_commission=Decimal("1"),
+        )
+
+    assert exc_info.value.error_code == "INSUFFICIENT_RISK_AVAILABLE_CASH"
+    assert account.available_cash == Decimal("100000")
+    assert account.risk_available_cash == Decimal("100")
+
+
+def test_close_commission_remains_allowed_during_margin_deficit():
+    account = make_account(
+        available_cash=Decimal("100"),
+        risk_available_cash=Decimal("-500"),
+    )
+
+    OrderFreezeService.freeze_close_order_commission(
+        account=account,
+        frozen_commission=Decimal("6"),
+    )
+
+    assert account.available_cash == Decimal("94.000000")
+    assert account.risk_available_cash == Decimal("-506.000000")
+    assert account.frozen_commission == Decimal("6.000000")
+
+
 def test_rejects_missing_account():
     with pytest.raises(ResourceNotFoundError) as exc_info:
         OrderFreezeService.freeze_open_order(

@@ -28,6 +28,10 @@ from app.services.market_data_service import (
     MarketDataService,
 )
 from app.services.market_subscription_service import MarketSubscriptionService
+from app.services.market_data_code_mapping_service import (
+    MarketDataCodeMappingService,
+    MarketDataCodeMappingSnapshot,
+)
 from app.services.market_tick_normalizer import MarketTickNormalizer
 from app.services.market_tick_validation_service import (
     MarketTickValidationService,
@@ -76,6 +80,9 @@ from app.services.account_valuation_calculator import (
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
 )
+from app.services.option_order_margin_adjustment_service import (
+    OptionOrderMarginAdjustmentService,
+)
 from app.services.option_premium_calculator import OptionPremiumCalculator
 from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
@@ -106,6 +113,8 @@ __all__ = [
     "MarketDataProcessAction",
     "MarketInstrumentSnapshot",
     "MarketSubscriptionService",
+    "MarketDataCodeMappingService",
+    "MarketDataCodeMappingSnapshot",
     "MarketTickNormalizer",
     "MarketTickValidationService",
     "TradeSettlementService",
@@ -132,6 +141,7 @@ __all__ = [
     "TokenService",
     "AccountValuationCalculator",
     "OptionMarginAdjustmentService",
+    "OptionOrderMarginAdjustmentService",
     "OptionPremiumCalculator",
     "OptionTradingPermissionService",
 ]
