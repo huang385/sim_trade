@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -69,6 +71,16 @@ class Settings(BaseSettings):
     auth_refresh_cookie_secure: bool = False
     auth_refresh_cookie_samesite: str = "lax"
 
+    # 期权能力全部采用失败关闭的双层开关。系统产品开关开启后，账户自身
+    # option_trading_enabled仍必须为True。股指期权卖方和行权本阶段固定
+    # 保持关闭，代码只预留模型与纯计算能力。
+    option_trading_enabled: bool = False
+    commodity_option_trading_enabled: bool = False
+    index_option_buy_trading_enabled: bool = False
+    index_option_short_trading_enabled: bool = False
+    option_exercise_enabled: bool = False
+    option_collateral_ratio: Decimal = Decimal("0")
+
     # 订单事件消费配置。Consumer 名称为空时由主机名和进程号自动生成。
     order_stream_name: str = "stream:orders"
     order_consumer_group: str = "group:order-engine"
@@ -137,6 +149,11 @@ class Settings(BaseSettings):
     pnl_persist_batch_size: int = 500
     pnl_persist_max_batches_per_cycle: int = 10
     pnl_persist_time_budget_ms: int = 800
+
+    # 期权加入后沿用同一个单写者估值链路；独立命名用于逐步替换旧PNL
+    # 配置，默认值与现有持久化周期一致。
+    valuation_persist_interval_ms: int = 1000
+    valuation_persist_batch_size: int = 500
 
     # 订单事实事件独立消费组用于提交后立即失效账户和活动持仓缓存。
     pnl_trade_consumer_group: str = "group:pnl-trade-engine"

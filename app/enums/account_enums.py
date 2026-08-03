@@ -28,3 +28,11 @@ class AccountStatus(str, Enum):
 
     # 强平处理中，不允许提交普通订单
     LIQUIDATION = "LIQUIDATION"
+
+
+class AccountRiskState(str, Enum):
+    """实时估值产生的账户风险状态，不替代账户启停状态。"""
+
+    NORMAL = "NORMAL"
+    MARGIN_DEFICIT = "MARGIN_DEFICIT"
+    VALUATION_UNAVAILABLE = "VALUATION_UNAVAILABLE"

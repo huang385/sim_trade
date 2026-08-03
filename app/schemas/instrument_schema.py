@@ -1,6 +1,12 @@
 from datetime import date, datetime
 from decimal import Decimal
 from app.enums.market_enums import MarketType
+from app.enums.option_enums import (
+    ExerciseStyle,
+    InstrumentType,
+    OptionType,
+    SettlementType,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -29,6 +35,12 @@ class InstrumentCreate(BaseModel):
 
     # 市场类型，第一版固定期货
     market_type: MarketType = MarketType.FUTURES
+    instrument_type: InstrumentType = InstrumentType.FUTURES
+    underlying_instrument_id: int | None = Field(default=None, gt=0)
+    option_type: OptionType | None = None
+    strike_price: Decimal | None = Field(default=None, gt=0)
+    exercise_style: ExerciseStyle | None = None
+    settlement_type: SettlementType | None = None
     # 合约乘数，必须大于 0
     contract_multiplier: Decimal = Field(gt=0)
 
@@ -46,9 +58,11 @@ class InstrumentCreate(BaseModel):
 
     # 到期日期
     expire_date: date | None = None
+    last_trading_date: date | None = None
 
     # 是否允许交易
     is_active: bool = True
+    is_tradeable: bool = True
 
     # 数据来源
     data_source: str = "MANUAL"
@@ -69,6 +83,12 @@ class InstrumentResponse(BaseModel):
     instrument_name: str | None
     product_id: str | None
     market_type: MarketType = MarketType.FUTURES
+    instrument_type: InstrumentType = InstrumentType.FUTURES
+    underlying_instrument_id: int | None
+    option_type: OptionType | None
+    strike_price: Decimal | None
+    exercise_style: ExerciseStyle | None
+    settlement_type: SettlementType | None
 
     contract_multiplier: Decimal
     price_tick: Decimal
@@ -78,7 +98,9 @@ class InstrumentResponse(BaseModel):
 
     listed_date: date | None
     expire_date: date | None
+    last_trading_date: date | None
     is_active: bool
+    is_tradeable: bool
 
     data_source: str
     synced_at: datetime | None

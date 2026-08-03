@@ -1,7 +1,15 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -30,6 +38,24 @@ class Account(Base):
     """
 
     __tablename__ = "account"
+    __table_args__ = (
+        CheckConstraint(
+            "option_used_margin >= 0",
+            name="ck_account_option_used_margin_nonnegative",
+        ),
+        CheckConstraint(
+            "option_realtime_required_margin >= 0",
+            name="ck_account_option_realtime_margin_nonnegative",
+        ),
+        CheckConstraint(
+            "long_option_market_value >= 0",
+            name="ck_account_long_option_value_nonnegative",
+        ),
+        CheckConstraint(
+            "short_option_market_value >= 0",
+            name="ck_account_short_option_value_nonnegative",
+        ),
+    )
 
     # 数据库内部自增主键
     id: Mapped[int] = mapped_column(
@@ -64,6 +90,14 @@ class Account(Base):
         String(32),
         nullable=False,
         default="FUTURES",
+    )
+
+    # 账户级期权交易权限。系统总开关和产品开关同时开启时，本字段仍需
+    # 为True，期权订单才能进入资金冻结流程。
+    option_trading_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
     )
 
     # 创建账户时设置的初始资金
@@ -139,6 +173,53 @@ class Account(Base):
         Numeric(24, 6),
         nullable=False,
         default=Decimal("0"),
+    )
+
+    # used_margin中由期权空头持仓实际占用的保证金。
+    option_used_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 500ms实时估值得出的期权空头风险保证金；它是派生值，不能由估值
+    # Worker直接覆盖上面的实际资金占用字段。
+    option_realtime_required_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 期权多头、空头绝对市值以及二者净额。空头市值保存非负绝对值。
+    long_option_market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+    short_option_market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+    net_option_market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 使用实时风险保证金计算的可用资金。available_cash继续表示数据库
+    # 账面冻结口径，本字段供风险限制和实时页面使用。
+    risk_available_cash: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # NORMAL、MARGIN_DEFICIT或VALUATION_UNAVAILABLE。
+    risk_state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="NORMAL",
     )
 
     # 当前交易日平仓成交相对 pnl_base_price 的累计盈亏

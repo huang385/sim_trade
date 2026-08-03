@@ -1,7 +1,16 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.time_utils import utc_now
@@ -51,6 +60,18 @@ class PositionDetail(Base):
             name="ck_position_detail_remaining_margin_nonnegative",
         ),
         CheckConstraint(
+            "initial_occupied_margin >= 0",
+            name="ck_position_detail_initial_margin_nonnegative",
+        ),
+        CheckConstraint(
+            "realtime_required_margin >= 0",
+            name="ck_position_detail_realtime_margin_nonnegative",
+        ),
+        CheckConstraint(
+            "multiplier_snapshot > 0",
+            name="ck_position_detail_multiplier_positive",
+        ),
+        CheckConstraint(
             "pnl_base_price > 0",
             name="ck_position_detail_pnl_base_price_positive",
         ),
@@ -79,6 +100,14 @@ class PositionDetail(Base):
 
     # 系统内部合约代码
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 开仓成交时固定的精确合约类型。
+    instrument_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+        index=True,
+    )
 
     # 持仓方向：LONG或SHORT
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -112,6 +141,37 @@ class PositionDetail(Base):
     # 当前尚未随平仓释放的保证金；open_margin保留原始审计值不再修改
     remaining_margin: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False
+    )
+
+    # 与open_margin语义相同的统一账户审计名称。保留open_margin兼容现有
+    # 期货结算，后续代码使用本字段表达期权原始占用保证金。
+    initial_occupied_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+    realtime_required_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+    margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_rule_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    margin_rule_snapshot: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True
+    )
+    margin_price_mode: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    margin_underlying_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    margin_option_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    margin_calculated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    multiplier_snapshot: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("1")
     )
 
     # 该笔成交实际确认的开仓手续费

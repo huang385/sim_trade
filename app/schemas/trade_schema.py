@@ -31,6 +31,7 @@ class TradeResponse(BaseModel):
     symbol: str
     # 订单和成交所属交易日
     trading_day: date
+    instrument_type: str = "FUTURES"
     # 原订单买卖方向和开平标志
     direction: str
     offset_flag: str
@@ -40,6 +41,10 @@ class TradeResponse(BaseModel):
     # 成交额、保证金、手续费和已实现盈亏
     turnover: Decimal
     margin: Decimal
+    premium_cash_flow: Decimal = Decimal("0")
+    margin_rule_id: int | None = None
+    margin_rule_version: str | None = None
+    margin_calculation_version: str | None = None
     commission: Decimal
     realized_pnl: Decimal
     daily_close_pnl: Decimal

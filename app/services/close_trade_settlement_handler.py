@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError
 from app.common.time_utils import utc_now
+from app.core.config import settings
+from app.enums.account_enums import AccountRiskState
 from app.enums.order_enums import (
     OffsetFlag,
     OrderStatus,
@@ -15,6 +17,7 @@ from app.enums.order_enums import (
     PositionDirection,
     PositionFreezeAllocationStatus,
 )
+from app.enums.option_enums import InstrumentType
 from app.models.trade import Trade
 from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.position_freeze_allocation_repository import (
@@ -31,6 +34,7 @@ from app.services.fee_calculator import (
     FeeCalculator,
 )
 from app.services.margin_release_calculator import MarginReleaseCalculator
+from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.pnl_calculator import PnlCalculator
 from app.services.realized_pnl_calculator import RealizedPnlCalculator
 
@@ -339,6 +343,26 @@ class CloseTradeSettlementHandler:
     ) -> Trade:
         """消费本订单冻结分配并原子更新成交、账户和剩余持仓。"""
 
+        instrument_type = InstrumentType(
+            getattr(order, "instrument_type", InstrumentType.FUTURES.value)
+        )
+        is_option = instrument_type in {
+            InstrumentType.FUTURES_OPTION,
+            InstrumentType.INDEX_OPTION,
+        }
+        order_frozen_cash = Decimal(
+            getattr(order, "frozen_cash", Decimal("0"))
+        )
+        released_frozen_cash = (
+            self._allocate_frozen_commission(
+                order_frozen_cash,
+                fill_volume=fill_volume,
+                remaining_volume=remaining_before,
+            )
+            if is_option
+            else Decimal("0")
+        )
+
         position_direction = (
             PositionDirection.LONG.value
             if order.direction == "SELL"
@@ -524,6 +548,8 @@ class CloseTradeSettlementHandler:
         if (
             account.used_margin < released_margin
             or account.frozen_commission < released_frozen_commission
+            or Decimal(getattr(account, "frozen_cash", Decimal("0")))
+            < released_frozen_cash
             or position.used_margin < released_margin
             or position.frozen_volume < fill_volume
         ):
@@ -542,6 +568,14 @@ class CloseTradeSettlementHandler:
             detail.remaining_margin = quantize_money(
                 detail.remaining_margin - item.released_margin
             )
+            if is_option:
+                detail.realtime_required_margin = max(
+                    quantize_money(
+                        detail.realtime_required_margin
+                        - item.released_margin
+                    ),
+                    Decimal("0"),
+                )
             detail.status = (
                 PositionDetailStatus.CLOSED.value
                 if detail.remaining_volume == 0
@@ -611,12 +645,23 @@ class CloseTradeSettlementHandler:
             exchange_id=order.exchange_id,
             symbol=order.symbol,
             trading_day=order.trading_day,
+            instrument_type=instrument_type.value,
             direction=order.direction,
             offset_flag=order.offset_flag,
             trade_price=fill_price,
             trade_volume=fill_volume,
             turnover=turnover,
             margin=released_margin,
+            premium_cash_flow=(
+                turnover if order.direction == "SELL" else -turnover
+            )
+            if is_option
+            else Decimal("0"),
+            margin_rule_id=getattr(order, "margin_rule_id", None),
+            margin_rule_version=getattr(order, "margin_rule_version", None),
+            margin_calculation_version=getattr(
+                order, "margin_calculation_version", None
+            ),
             commission=actual_commission,
             realized_pnl=realized_pnl,
             daily_close_pnl=daily_close_pnl,
@@ -686,6 +731,10 @@ class CloseTradeSettlementHandler:
         order.frozen_commission = quantize_money(
             order.frozen_commission - released_frozen_commission
         )
+        if is_option:
+            order.frozen_cash = quantize_money(
+                order_frozen_cash - released_frozen_cash
+            )
         order.frozen_position_volume -= fill_volume
         order.updated_at = now
 
@@ -707,21 +756,76 @@ class CloseTradeSettlementHandler:
         account.daily_commission = quantize_money(
             account.daily_commission + actual_commission
         )
-        account.cash_balance = quantize_money(
-            account.cash_balance + realized_pnl - actual_commission
-        )
-        # 下单时预计手续费已经从可用资金扣除。成交时先释放本次预计值，
-        # 再扣实际手续费，同时返还保证金并计入平仓盈亏。
-        account.available_cash = quantize_money(
-            account.available_cash
-            + released_frozen_commission
-            - actual_commission
-            + released_margin
-            + realized_pnl
-        )
-        account.equity = quantize_money(
-            account.cash_balance + account.unrealized_pnl
-        )
+        if is_option:
+            # 期权现金只按权利金流和手续费变化。realized_pnl 是审计统计，
+            # 不能像期货一样再次计入 cash_balance，否则会重复计算盈亏。
+            premium_cash_flow = trade.premium_cash_flow
+            account.frozen_cash = quantize_money(
+                account.frozen_cash - released_frozen_cash
+            )
+            account.option_used_margin = quantize_money(
+                account.option_used_margin - released_margin
+            )
+            account.cash_balance = quantize_money(
+                account.cash_balance + premium_cash_flow - actual_commission
+            )
+            if position_direction == PositionDirection.LONG.value:
+                account.long_option_market_value = max(
+                    quantize_money(
+                        account.long_option_market_value - turnover
+                    ),
+                    Decimal("0"),
+                )
+            else:
+                account.short_option_market_value = max(
+                    quantize_money(
+                        account.short_option_market_value - turnover
+                    ),
+                    Decimal("0"),
+                )
+            valuation = AccountValuationCalculator.calculate(
+                cash_balance=Decimal(account.cash_balance),
+                futures_unrealized_pnl=Decimal(account.unrealized_pnl),
+                long_option_market_value=Decimal(
+                    account.long_option_market_value
+                ),
+                short_option_market_value=Decimal(
+                    account.short_option_market_value
+                ),
+                used_margin=Decimal(account.used_margin),
+                option_used_margin=Decimal(account.option_used_margin),
+                option_realtime_required_margin=Decimal(
+                    account.option_realtime_required_margin
+                ),
+                frozen_margin=Decimal(account.frozen_margin),
+                frozen_cash=Decimal(account.frozen_cash),
+                frozen_commission=Decimal(account.frozen_commission),
+                option_collateral_ratio=settings.option_collateral_ratio,
+            )
+            account.available_cash = valuation.available_cash
+            account.risk_available_cash = valuation.risk_available_cash
+            account.equity = valuation.equity
+            account.net_option_market_value = (
+                valuation.net_option_market_value
+            )
+            if account.risk_available_cash >= Decimal("0"):
+                account.risk_state = AccountRiskState.NORMAL.value
+        else:
+            account.cash_balance = quantize_money(
+                account.cash_balance + realized_pnl - actual_commission
+            )
+            # 下单时预计手续费已经从可用资金扣除。成交时先释放本次预计值，
+            # 再扣实际手续费，同时返还保证金并计入平仓盈亏。
+            account.available_cash = quantize_money(
+                account.available_cash
+                + released_frozen_commission
+                - actual_commission
+                + released_margin
+                + realized_pnl
+            )
+            account.equity = quantize_money(
+                account.cash_balance + account.unrealized_pnl
+            )
         account.daily_pnl = quantize_money(
             account.daily_position_pnl
             + account.daily_close_pnl
@@ -734,6 +838,13 @@ class CloseTradeSettlementHandler:
         position.used_margin = quantize_money(
             position.used_margin - released_margin
         )
+        if is_option:
+            position.realtime_required_margin = max(
+                quantize_money(
+                    position.realtime_required_margin - released_margin
+                ),
+                Decimal("0"),
+            )
         position.realized_pnl = quantize_money(
             position.realized_pnl + realized_pnl
         )
@@ -775,6 +886,7 @@ class CloseTradeSettlementHandler:
             position.average_open_price = Decimal("0.000000")
             position.position_cost = Decimal("0.000000")
             position.used_margin = Decimal("0.000000")
+            position.realtime_required_margin = Decimal("0.000000")
             position.unrealized_pnl = Decimal("0.000000")
         else:
             remaining_cost = sum(

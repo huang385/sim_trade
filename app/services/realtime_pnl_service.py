@@ -7,6 +7,14 @@ from typing import Mapping
 
 from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
+from app.core.config import settings
+from app.enums.account_enums import AccountRiskState
+from app.enums.order_enums import PositionDirection
+from app.enums.option_enums import (
+    InstrumentType,
+    MarginPriceMode,
+    OptionType,
+)
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.schemas.market_tick_schema import MarketTick
@@ -22,6 +30,14 @@ from app.services.pnl_calculator import (
     PnlCalculator,
     PositionPnlResult,
     PositionPnlSnapshot,
+)
+from app.services.account_valuation_calculator import AccountValuationCalculator
+from app.services.commodity_option_margin_calculator import (
+    CommodityFuturesOptionMarginCalculator,
+)
+from app.services.option_margin_calculator import (
+    OptionMarginInput,
+    OptionMarginRuleSnapshot,
 )
 
 
@@ -71,6 +87,9 @@ class RealtimePnlProcessResult:
     reconciled_accounts: int = 0
     successful_account_facts: frozenset[str] = frozenset()
     failed_account_facts: frozenset[str] = frozenset()
+    margin_adjustment_positions: tuple[
+        tuple[str, str, ContractKey], ...
+    ] = ()
 
 
 class RealtimePnlService:
@@ -151,6 +170,8 @@ class RealtimePnlService:
         result: PositionPnlResult,
         tick: MarketTick,
         updated_at: datetime,
+        option_market_value: Decimal = Decimal("0"),
+        realtime_required_margin: Decimal = Decimal("0"),
     ) -> PositionRealtimePnl:
         return PositionRealtimePnl(
             position_id=snapshot.position_id,
@@ -163,9 +184,54 @@ class RealtimePnlService:
                 result.cumulative_unrealized_pnl
             ),
             daily_position_pnl=result.daily_position_pnl,
+            instrument_type=snapshot.instrument_type,
+            option_market_value=option_market_value,
+            realtime_required_margin=realtime_required_margin,
             event_time=tick.event_time,
             source_event_id=tick.source_event_id,
             updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _option_rule(
+        snapshot: PositionPnlSnapshot,
+    ) -> tuple[OptionMarginRuleSnapshot, Decimal, Decimal]:
+        values = dict(snapshot.margin_rule_snapshot)
+        required = {
+            "rule_id",
+            "rule_version",
+            "margin_algorithm",
+            "margin_adjustment_rate",
+            "minimum_guarantee_rate",
+            "out_of_money_deduction_rate",
+            "minimum_underlying_margin_ratio",
+            "extra_margin_rate",
+            "underlying_margin_rate",
+            "underlying_multiplier",
+        }
+        if not required.issubset(values):
+            raise ValueError("期权空头持仓缺少完整保证金规则快照")
+        return (
+            OptionMarginRuleSnapshot(
+                rule_id=int(values["rule_id"]),
+                rule_version=values["rule_version"],
+                margin_algorithm=values["margin_algorithm"],
+                margin_adjustment_rate=Decimal(
+                    values["margin_adjustment_rate"]
+                ),
+                minimum_guarantee_rate=Decimal(
+                    values["minimum_guarantee_rate"]
+                ),
+                out_of_money_deduction_rate=Decimal(
+                    values["out_of_money_deduction_rate"]
+                ),
+                minimum_underlying_margin_ratio=Decimal(
+                    values["minimum_underlying_margin_ratio"]
+                ),
+                extra_margin_rate=Decimal(values["extra_margin_rate"]),
+            ),
+            Decimal(values["underlying_margin_rate"]),
+            Decimal(values["underlying_multiplier"]),
         )
 
     def _calculate_missing_position(
@@ -227,6 +293,25 @@ class RealtimePnlService:
             all_position_ids.update(item.position_id for item in positions)
             all_position_ids.update(indexed_ids[key])
         old_positions = self.pnl_store.get_positions_many(all_position_ids)
+        option_underlying_keys = {
+            position.underlying_key
+            for positions in current_by_key.values()
+            for position in positions
+            if position.underlying_key is not None
+        }
+        underlying_ticks: dict[ContractKey, MarketTick | None] = {}
+        if option_underlying_keys and self.market_tick_store is not None:
+            latest_underlyings = self.market_tick_store.get_latest_many(
+                option_underlying_keys
+            )
+            for key in option_underlying_keys:
+                raw = latest_underlyings.get(key, {})
+                try:
+                    underlying_ticks[key] = (
+                        MarketTickStore.mapping_to_tick(raw) if raw else None
+                    )
+                except Exception:
+                    underlying_ticks[key] = None
 
         calculated: dict[str, PositionPnlResult] = {}
         position_models: dict[str, PositionRealtimePnl] = {}
@@ -238,6 +323,7 @@ class RealtimePnlService:
         failed: set[ContractKey] = set()
         no_position: set[ContractKey] = set()
         accounts_by_contract: dict[ContractKey, set[str]] = {}
+        valuation_unavailable_accounts: set[str] = set()
 
         for request in requests:
             key = request.key
@@ -253,6 +339,9 @@ class RealtimePnlService:
                 or request.tick.last_price is None
                 or request.tick.last_price <= 0
             ):
+                valuation_unavailable_accounts.update(
+                    position.account_id for position in positions
+                )
                 failed.add(key)
                 continue
 
@@ -271,6 +360,82 @@ class RealtimePnlService:
                         mark_price=request.tick.last_price,
                         snapshot=position,
                     )
+                    option_market_value = Decimal("0")
+                    realtime_required_margin = Decimal("0")
+                    instrument_type = InstrumentType(
+                        position.instrument_type
+                    )
+                    if instrument_type in {
+                        InstrumentType.FUTURES_OPTION,
+                        InstrumentType.INDEX_OPTION,
+                    }:
+                        option_market_value = quantize_money(
+                            request.tick.last_price
+                            * position.contract_multiplier
+                            * Decimal(position.total_volume)
+                        )
+                        if (
+                            instrument_type
+                            == InstrumentType.FUTURES_OPTION
+                            and position.direction
+                            == PositionDirection.SHORT.value
+                        ):
+                            underlying_tick = underlying_ticks.get(
+                                position.underlying_key
+                            )
+                            if (
+                                underlying_tick is None
+                                or underlying_tick.last_price is None
+                                or underlying_tick.last_price <= 0
+                                or position.strike_price is None
+                                or position.option_type is None
+                            ):
+                                raise ValueError(
+                                    "商品期权空头缺少有效标的行情"
+                                )
+                            (
+                                margin_rule,
+                                underlying_margin_rate,
+                                underlying_multiplier,
+                            ) = self._option_rule(position)
+                            underlying_margin_per_lot = quantize_money(
+                                underlying_tick.last_price
+                                * underlying_multiplier
+                                * underlying_margin_rate
+                            )
+                            margin_result = (
+                                CommodityFuturesOptionMarginCalculator()
+                                .calculate(
+                                    OptionMarginInput(
+                                        option_type=OptionType(
+                                            position.option_type
+                                        ),
+                                        strike_price=position.strike_price,
+                                        option_price=request.tick.last_price,
+                                        underlying_price=(
+                                            underlying_tick.last_price
+                                        ),
+                                        option_multiplier=(
+                                            position.contract_multiplier
+                                        ),
+                                        underlying_multiplier=(
+                                            underlying_multiplier
+                                        ),
+                                        volume=position.total_volume,
+                                        price_mode=(
+                                            MarginPriceMode.REALTIME
+                                        ),
+                                        calculated_at=updated_at,
+                                        rule=margin_rule,
+                                        underlying_margin_per_lot=(
+                                            underlying_margin_per_lot
+                                        ),
+                                    )
+                                )
+                            )
+                            realtime_required_margin = (
+                                margin_result.total_margin
+                            )
                     local_calculated[position.position_id] = result
                     local_models[position.position_id] = (
                         self._position_model(
@@ -278,6 +443,10 @@ class RealtimePnlService:
                             result=result,
                             tick=request.tick,
                             updated_at=updated_at,
+                            option_market_value=option_market_value,
+                            realtime_required_margin=(
+                                realtime_required_margin
+                            ),
                         )
                     )
                     old = old_positions.get(position.position_id, {})
@@ -396,6 +565,9 @@ class RealtimePnlService:
                     "合约实时PnL计算失败 contract=%s:%s",
                     *key,
                 )
+                valuation_unavailable_accounts.update(
+                    position.account_id for position in positions
+                )
                 failed.add(key)
 
         # 失败合约不会产生快照，也不会被Worker ACK或清除Dirty。
@@ -405,7 +577,11 @@ class RealtimePnlService:
             for key in successful
             for account_id in accounts_by_contract.get(key, ())
         }
-        affected_accounts = contract_affected_accounts | account_fact_ids
+        affected_accounts = (
+            contract_affected_accounts
+            | account_fact_ids
+            | valuation_unavailable_accounts
+        )
         old_accounts = self.pnl_store.get_accounts_many(affected_accounts)
 
         # 成交结构Dirty需要重新汇总该账户的全部持仓；订单接受和撤单只刷新
@@ -423,6 +599,20 @@ class RealtimePnlService:
             or not old_accounts.get(account_id)
             or account_id in structural_dirty_account_ids
         }
+        # 期权账户同时汇总多头市值、空头市值和实时保证金，不能只应用
+        # 期货浮盈的两项增量。受期权 Tick 影响的账户在本周期做一次
+        # 内存全量汇总，仍只写一条账户快照且不额外查询 PostgreSQL。
+        option_affected_accounts = {
+            position.account_id
+            for positions in current_by_key.values()
+            for position in positions
+            if InstrumentType(position.instrument_type)
+            in {
+                InstrumentType.FUTURES_OPTION,
+                InstrumentType.INDEX_OPTION,
+            }
+        }
+        full_accounts.update(option_affected_accounts)
         full_position_ids = {
             position.position_id
             for account_id in full_accounts
@@ -472,6 +662,7 @@ class RealtimePnlService:
                 latest_ticks[key] = tick
 
         account_models: list[AccountRealtimePnl] = []
+        margin_adjustments: list[tuple[str, str, ContractKey]] = []
         reconciled_accounts = 0
         failed_account_facts: set[str] = set()
         for account_id in affected_accounts:
@@ -488,6 +679,9 @@ class RealtimePnlService:
             if account_id in full_accounts:
                 cumulative = Decimal("0")
                 daily_position = Decimal("0")
+                long_option_market_value = Decimal("0")
+                short_option_market_value = Decimal("0")
+                option_realtime_required_margin = Decimal("0")
                 for position in cycle_snapshot.get_by_account(account_id):
                     result = calculated.get(position.position_id)
                     if result is None:
@@ -510,7 +704,49 @@ class RealtimePnlService:
                                 position,
                                 latest_by_key=latest_ticks,
                             )
-                    cumulative += result.cumulative_unrealized_pnl
+                    position_type = InstrumentType(
+                        position.instrument_type
+                    )
+                    if position_type in {
+                        InstrumentType.FUTURES_OPTION,
+                        InstrumentType.INDEX_OPTION,
+                    }:
+                        position_values = position_models.get(
+                            position.position_id
+                        )
+                        old_values = old_positions.get(
+                            position.position_id, {}
+                        )
+                        market_value = (
+                            position_values.option_market_value
+                            if position_values is not None
+                            else self._decimal(
+                                old_values,
+                                "option_market_value",
+                                Decimal("0"),
+                            )
+                        )
+                        required_margin = (
+                            position_values.realtime_required_margin
+                            if position_values is not None
+                            else self._decimal(
+                                old_values,
+                                "realtime_required_margin",
+                                position.persisted_realtime_required_margin,
+                            )
+                        )
+                        if (
+                            position.direction
+                            == PositionDirection.LONG.value
+                        ):
+                            long_option_market_value += market_value
+                        else:
+                            short_option_market_value += market_value
+                            option_realtime_required_margin += (
+                                required_margin
+                            )
+                    else:
+                        cumulative += result.cumulative_unrealized_pnl
                     daily_position += result.daily_position_pnl
                 reconciled_accounts += 1
                 previous = old_accounts.get(account_id, {})
@@ -548,23 +784,61 @@ class RealtimePnlService:
                     "daily_position_pnl",
                     account.daily_position_pnl,
                 ) + delta[1]
+                long_option_market_value = self._decimal(
+                    old,
+                    "long_option_market_value",
+                    account.long_option_market_value,
+                )
+                short_option_market_value = self._decimal(
+                    old,
+                    "short_option_market_value",
+                    account.short_option_market_value,
+                )
+                option_realtime_required_margin = self._decimal(
+                    old,
+                    "option_realtime_required_margin",
+                    account.option_realtime_required_margin,
+                )
 
             cumulative = quantize_money(cumulative)
             daily_position = quantize_money(daily_position)
+            long_option_market_value = quantize_money(
+                long_option_market_value
+            )
+            short_option_market_value = quantize_money(
+                short_option_market_value
+            )
+            option_realtime_required_margin = quantize_money(
+                option_realtime_required_margin
+            )
             daily_pnl = quantize_money(
                 daily_position
                 + account.daily_close_pnl
                 - account.daily_commission
             )
-            equity = quantize_money(
-                account.cash_balance + cumulative
+            valuation = AccountValuationCalculator.calculate(
+                cash_balance=account.cash_balance,
+                futures_unrealized_pnl=cumulative,
+                long_option_market_value=long_option_market_value,
+                short_option_market_value=short_option_market_value,
+                used_margin=account.used_margin,
+                option_used_margin=account.option_used_margin,
+                option_realtime_required_margin=(
+                    option_realtime_required_margin
+                ),
+                frozen_margin=account.frozen_margin,
+                frozen_cash=account.frozen_cash,
+                frozen_commission=account.frozen_commission,
+                option_collateral_ratio=settings.option_collateral_ratio,
             )
-            available_cash = quantize_money(
-                equity
-                - account.used_margin
-                - account.frozen_margin
-                - account.frozen_cash
-                - account.frozen_commission
+            risk_state = (
+                AccountRiskState.VALUATION_UNAVAILABLE.value
+                if account_id in valuation_unavailable_accounts
+                else (
+                    AccountRiskState.MARGIN_DEFICIT.value
+                    if valuation.risk_available_cash < Decimal("0")
+                    else AccountRiskState.NORMAL.value
+                )
             )
             account_models.append(
                 AccountRealtimePnl(
@@ -574,17 +848,43 @@ class RealtimePnlService:
                     daily_close_pnl=account.daily_close_pnl,
                     daily_commission=account.daily_commission,
                     daily_pnl=daily_pnl,
-                    equity=equity,
-                    available_cash=available_cash,
+                    equity=valuation.equity,
+                    available_cash=valuation.available_cash,
+                    futures_unrealized_pnl=cumulative,
+                    option_realtime_required_margin=(
+                        option_realtime_required_margin
+                    ),
+                    long_option_market_value=long_option_market_value,
+                    short_option_market_value=short_option_market_value,
+                    net_option_market_value=(
+                        valuation.net_option_market_value
+                    ),
+                    risk_available_cash=valuation.risk_available_cash,
+                    risk_state=risk_state,
                     risk_ratio=self._risk_ratio(
-                        account.used_margin,
-                        equity,
+                        valuation.effective_required_margin,
+                        valuation.equity,
                     ),
                     updated_at=updated_at,
                 )
             )
 
         successful -= failed
+        for key in successful:
+            for position in current_by_key[key]:
+                model = position_models.get(position.position_id)
+                if (
+                    model is not None
+                    and model.realtime_required_margin
+                    > position.persisted_used_margin
+                ):
+                    margin_adjustments.append(
+                        (
+                            position.account_id,
+                            position.position_id,
+                            key,
+                        )
+                    )
         written_account_ids = {
             model.account_id for model in account_models
         }
@@ -671,6 +971,7 @@ class RealtimePnlService:
             failed_account_facts=frozenset(
                 account_fact_ids - successful_account_facts
             ),
+            margin_adjustment_positions=tuple(margin_adjustments),
         )
 
     def process(

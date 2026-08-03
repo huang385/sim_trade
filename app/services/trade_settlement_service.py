@@ -20,6 +20,7 @@ from app.enums.order_enums import (
     PositionDetailStatus,
     PositionDirection,
 )
+from app.enums.option_enums import InstrumentType
 from app.matching.models import MatchResult
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
@@ -41,6 +42,9 @@ from app.services.close_trade_settlement_handler import (
     CloseTradeSettlementHandler,
 )
 from app.services.fee_calculator import FeeCalculator
+from app.services.option_trade_settlement_strategy import (
+    OptionTradeSettlementStrategy,
+)
 
 
 @dataclass(frozen=True)
@@ -118,6 +122,7 @@ class TradeSettlementService:
         position_repository: PositionRepository | None = None,
         allocation_repository: PositionFreezeAllocationRepository | None = None,
         close_handler: CloseTradeSettlementHandler | None = None,
+        option_strategy: OptionTradeSettlementStrategy | None = None,
         fee_calculator: FeeCalculator | None = None,
         outbox_repository: OutboxRepository | None = None,
         trade_id_factory: Callable[[], str] | None = None,
@@ -140,6 +145,7 @@ class TradeSettlementService:
             allocation_repository=self.allocation_repository,
             trade_repository=self.trade_repository,
         )
+        self.option_strategy = option_strategy or OptionTradeSettlementStrategy()
         self.fee_calculator = fee_calculator or FeeCalculator()
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.trade_id_factory = trade_id_factory or (lambda: _generate_id("T"))
@@ -228,6 +234,9 @@ class TradeSettlementService:
                 "trade_volume": trade.trade_volume,
                 "turnover": _decimal_string(trade.turnover),
                 "margin": _decimal_string(trade.margin),
+                "premium_cash_flow": _decimal_string(
+                    getattr(trade, "premium_cash_flow", None) or Decimal("0")
+                ),
                 "commission": _decimal_string(trade.commission),
                 "realized_pnl": _decimal_string(trade.realized_pnl),
                 "daily_close_pnl": _decimal_string(
@@ -269,6 +278,9 @@ class TradeSettlementService:
                 "cancelled_volume": order.cancelled_volume,
                 "average_price": _decimal_string(order.average_price),
                 "frozen_margin": _decimal_string(order.frozen_margin),
+                "frozen_cash": _decimal_string(
+                    getattr(order, "frozen_cash", None) or Decimal("0")
+                ),
                 "frozen_commission": _decimal_string(order.frozen_commission),
                 "frozen_position_volume": order.frozen_position_volume,
                 "released_margin": _decimal_string(trade.margin),
@@ -395,6 +407,52 @@ class TradeSettlementService:
                 symbol=order.symbol,
                 direction=position_direction,
             )
+
+            instrument_type = InstrumentType(
+                getattr(
+                    order,
+                    "instrument_type",
+                    InstrumentType.FUTURES.value,
+                )
+            )
+            if instrument_type in {
+                InstrumentType.FUTURES_OPTION,
+                InstrumentType.INDEX_OPTION,
+            }:
+                # 期权权利金和卖方保证金的现金语义与期货不同，必须走
+                # 独立策略；数据库锁顺序仍保持 Order→Account→Position。
+                trade = self.option_strategy.apply_open(
+                    db=db,
+                    order=order,
+                    account=account,
+                    instrument=instrument,
+                    command=command,
+                    fill_volume=fill_volume,
+                    fill_price=fill_price,
+                    remaining_before=remaining_before,
+                    traded_before=traded_before,
+                    average_before=average_before,
+                    position=position,
+                    trade_id=self.trade_id_factory(),
+                    position_id=self.position_id_factory(),
+                    position_detail_id=self.position_detail_id_factory(),
+                    now=now,
+                    fee_calculator=self.fee_calculator,
+                    trade_repository=self.trade_repository,
+                    position_repository=self.position_repository,
+                )
+                self._create_outbox_events(
+                    db,
+                    trade=trade,
+                    order=order,
+                    now=now,
+                )
+                db.commit()
+                return SettlementResult(
+                    trade.trade_id,
+                    order.order_id,
+                    "SETTLED",
+                )
 
             # 保证金仍从成交前剩余冻结资源按数量转为实际占用；手续费则
             # 明确区分“本次释放的预计冻结值”和“按实际成交价重算的值”。

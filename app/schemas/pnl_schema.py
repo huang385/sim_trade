@@ -18,6 +18,9 @@ class PositionRealtimePnl(BaseModel):
     mark_price: Decimal
     cumulative_unrealized_pnl: Decimal
     daily_position_pnl: Decimal
+    instrument_type: str = "FUTURES"
+    option_market_value: Decimal = Decimal("0")
+    realtime_required_margin: Decimal = Decimal("0")
     event_time: datetime
     source_event_id: str
     updated_at: datetime
@@ -35,6 +38,13 @@ class AccountRealtimePnl(BaseModel):
     daily_pnl: Decimal
     equity: Decimal
     available_cash: Decimal
+    futures_unrealized_pnl: Decimal = Decimal("0")
+    option_realtime_required_margin: Decimal = Decimal("0")
+    long_option_market_value: Decimal = Decimal("0")
+    short_option_market_value: Decimal = Decimal("0")
+    net_option_market_value: Decimal = Decimal("0")
+    risk_available_cash: Decimal = Decimal("0")
+    risk_state: str = "NORMAL"
     risk_ratio: Decimal
     updated_at: datetime
     data_source: str = "REDIS_REALTIME"

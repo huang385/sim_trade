@@ -117,6 +117,7 @@ class OrderResponse(BaseModel):
 
     # 订单所属交易日
     trading_day: date
+    instrument_type: str = "FUTURES"
 
     # 买卖、开平和订单类型
     direction: OrderDirection
@@ -133,8 +134,17 @@ class OrderResponse(BaseModel):
 
     # 当前订单冻结的资金和持仓资源
     frozen_margin: Decimal
+    frozen_cash: Decimal = Decimal("0")
     frozen_commission: Decimal
     frozen_position_volume: int
+    margin_rule_id: int | None = None
+    margin_rule_version: str | None = None
+    margin_price_mode: str | None = None
+    margin_underlying_price: Decimal | None = None
+    margin_option_price: Decimal | None = None
+    margin_calculation_version: str | None = None
+    fee_rule_id: int | None = None
+    fee_rule_version: str | None = None
 
     # 订单状态及可能的拒绝原因
     status: OrderStatus

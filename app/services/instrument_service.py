@@ -5,11 +5,13 @@ from sqlalchemy.orm import Session
 
 from app.common.code_utils import normalize_code
 from app.common.exceptions import (
+    BusinessValidationError,
     DataAccessError,
     ResourceNotFoundError,
 )
 from app.common.time_utils import utc_now
 from app.enums.reference_data_enums import ReferenceDataSource
+from app.enums.option_enums import InstrumentType
 from app.models.instrument import Instrument
 from app.repositories.instrument_repository import (
     InstrumentRepository,
@@ -41,6 +43,47 @@ class InstrumentService:
 
         current_time = utc_now()
 
+        underlying = None
+        if request.underlying_instrument_id is not None:
+            underlying = db.get(Instrument, request.underlying_instrument_id)
+            if underlying is None:
+                raise BusinessValidationError(
+                    "期权标的合约不存在",
+                    error_code="OPTION_UNDERLYING_NOT_FOUND",
+                )
+        if request.instrument_type in {
+            InstrumentType.FUTURES_OPTION,
+            InstrumentType.INDEX_OPTION,
+        }:
+            if (
+                underlying is None
+                or request.option_type is None
+                or request.strike_price is None
+                or request.expire_date is None
+            ):
+                raise BusinessValidationError(
+                    "期权合约缺少标的、类型、行权价或到期日",
+                    error_code="OPTION_INSTRUMENT_INCOMPLETE",
+                )
+            expected_underlying_type = (
+                InstrumentType.FUTURES.value
+                if request.instrument_type
+                == InstrumentType.FUTURES_OPTION
+                else InstrumentType.INDEX.value
+            )
+            if underlying.instrument_type != expected_underlying_type:
+                raise BusinessValidationError(
+                    "期权标的合约类型不匹配",
+                    error_code="OPTION_UNDERLYING_TYPE_MISMATCH",
+                )
+        elif request.underlying_instrument_id is not None:
+            raise BusinessValidationError(
+                "非期权合约不能设置标的合约",
+                error_code="UNEXPECTED_UNDERLYING_INSTRUMENT",
+            )
+        if request.instrument_type == InstrumentType.INDEX:
+            request.is_tradeable = False
+
         try:
             self.repository.upsert(
                 db=db,
@@ -50,13 +93,33 @@ class InstrumentService:
                 instrument_name=request.instrument_name,
                 product_id=request.product_id,
                 market_type=request.market_type.value,
+                instrument_type=request.instrument_type.value,
+                underlying_instrument_id=request.underlying_instrument_id,
+                option_type=(
+                    request.option_type.value
+                    if request.option_type is not None
+                    else None
+                ),
+                strike_price=request.strike_price,
+                exercise_style=(
+                    request.exercise_style.value
+                    if request.exercise_style is not None
+                    else None
+                ),
+                settlement_type=(
+                    request.settlement_type.value
+                    if request.settlement_type is not None
+                    else None
+                ),
                 contract_multiplier=request.contract_multiplier,
                 price_tick=request.price_tick,
                 min_volume=request.min_volume,
                 max_volume=request.max_volume,
                 listed_date=request.listed_date,
                 expire_date=request.expire_date,
+                last_trading_date=request.last_trading_date,
                 is_active=request.is_active,
+                is_tradeable=request.is_tradeable,
                 data_source=ReferenceDataSource.MANUAL.value,
                 synced_at=current_time,
                 updated_at=current_time,

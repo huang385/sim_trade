@@ -1,7 +1,7 @@
 from typing import Sequence
 
 from sqlalchemy import select, tuple_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.models.account import Account
 from app.models.instrument import Instrument
@@ -176,8 +176,15 @@ class PositionRepository:
         为不可变快照，禁止把这些ORM对象跨Session保存。
         """
 
+        underlying = aliased(Instrument)
         statement = (
-            select(Position, PositionDetail, Instrument, Account)
+            select(
+                Position,
+                PositionDetail,
+                Instrument,
+                Account,
+                underlying,
+            )
             .join(
                 PositionDetail,
                 PositionDetail.position_id == Position.position_id,
@@ -189,6 +196,10 @@ class PositionRepository:
             .join(
                 Account,
                 Account.account_id == Position.account_id,
+            )
+            .outerjoin(
+                underlying,
+                underlying.id == Instrument.underlying_instrument_id,
             )
             .where(
                 Position.total_volume > 0,
@@ -223,8 +234,15 @@ class PositionRepository:
         )
         if not keys:
             return []
+        underlying = aliased(Instrument)
         statement = (
-            select(Position, PositionDetail, Instrument, Account)
+            select(
+                Position,
+                PositionDetail,
+                Instrument,
+                Account,
+                underlying,
+            )
             .join(
                 PositionDetail,
                 PositionDetail.position_id == Position.position_id,
@@ -236,6 +254,10 @@ class PositionRepository:
             .join(
                 Account,
                 Account.account_id == Position.account_id,
+            )
+            .outerjoin(
+                underlying,
+                underlying.id == Instrument.underlying_instrument_id,
             )
             .where(
                 Position.total_volume > 0,

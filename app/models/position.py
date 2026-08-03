@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     UniqueConstraint,
@@ -53,6 +54,14 @@ class Position(Base):
             "available_volume = total_volume - frozen_volume",
             name="ck_position_available_balance",
         ),
+        CheckConstraint(
+            "initial_occupied_margin >= 0",
+            name="ck_position_initial_margin_nonnegative",
+        ),
+        CheckConstraint(
+            "realtime_required_margin >= 0",
+            name="ck_position_realtime_margin_nonnegative",
+        ),
         Index("ix_position_account_id", "account_id"),
         Index("ix_position_exchange_symbol", "exchange_id", "symbol"),
     )
@@ -74,6 +83,14 @@ class Position(Base):
 
     # 系统内部合约代码
     symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # 精确合约类型，避免参考数据变化改变历史持仓估值方式。
+    instrument_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+        index=True,
+    )
 
     # 持仓方向：BUY+OPEN形成LONG，SELL+OPEN形成SHORT
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -106,6 +123,40 @@ class Position(Base):
     # 当前持仓实际占用的保证金
     used_margin: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+
+    # 持仓建立时累计分配的原始保证金审计值；平仓不修改该历史总额。
+    initial_occupied_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+
+    # 当前行情口径下的期权空头风险保证金。期货和期权多头保持0。
+    realtime_required_margin: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+    margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_rule_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    # 卖方开仓时使用的不可变保证金规则快照。实时估值直接读取该快照，
+    # 不在每个 Tick 到来时回查规则表，历史持仓也不会被新规则改写。
+    margin_rule_snapshot: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True
+    )
+    margin_price_mode: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    margin_underlying_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    margin_option_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    margin_calculated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    multiplier_snapshot: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
     )
 
     # 基于原始开仓价累计确认的已实现盈亏

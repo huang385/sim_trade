@@ -3,6 +3,7 @@ import json
 
 from types import MappingProxyType
 
+from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.services.active_position_cache import (
     AccountPnlSnapshot,
     ActivePositionCycleSnapshot,
@@ -559,3 +560,157 @@ def test_account_fact_dirty_reuses_existing_pnl_without_contract_rebuild():
         "cumulative_unrealized_pnl"
     ] == "2400.000000"
     assert store.accounts["A001"]["available_cash"] == "87390.000000"
+
+
+def test_option_long_short_market_value_and_margin_are_exact():
+    """同账户期权多空持仓只写一次快照，并精确核对权益与风险保证金。"""
+
+    def option_position(position_id, direction, volume, open_price):
+        return PositionPnlSnapshot(
+            position_id=position_id,
+            account_id="A001",
+            order_book_id="AGOPT",
+            exchange_id="SHFE",
+            symbol="AGOPT",
+            direction=direction,
+            contract_multiplier=Decimal("10"),
+            persisted_unrealized_pnl=Decimal("0"),
+            persisted_daily_position_pnl=Decimal("0"),
+            details=(
+                PnlDetailSnapshot(
+                    f"D-{position_id}",
+                    Decimal(open_price),
+                    Decimal(open_price),
+                    volume,
+                ),
+            ),
+            instrument_type="FUTURES_OPTION",
+            total_volume=volume,
+            persisted_realtime_required_margin=(
+                Decimal("1000") if direction == "SHORT" else Decimal("0")
+            ),
+            persisted_used_margin=(
+                Decimal("1000") if direction == "SHORT" else Decimal("0")
+            ),
+            option_type="CALL",
+            strike_price=Decimal("110"),
+            underlying_exchange_id="SHFE",
+            underlying_symbol="AG",
+            margin_rule_snapshot=tuple(
+                {
+                    "rule_id": "1",
+                    "rule_version": "V1",
+                    "margin_algorithm": "COMMODITY_FUTURES_OPTION",
+                    "margin_adjustment_rate": "0.1",
+                    "minimum_guarantee_rate": "0.05",
+                    "out_of_money_deduction_rate": "1",
+                    "minimum_underlying_margin_ratio": "0.5",
+                    "extra_margin_rate": "0",
+                    "underlying_margin_rate": "0.1",
+                    "underlying_multiplier": "10",
+                }.items()
+            ),
+        )
+
+    long_position = option_position("PL", "LONG", 2, "100")
+    short_position = option_position("PS", "SHORT", 1, "110")
+    account = AccountPnlSnapshot(
+        account_id="A001",
+        cash_balance=Decimal("100000"),
+        used_margin=Decimal("1000"),
+        frozen_margin=Decimal("0"),
+        frozen_cash=Decimal("0"),
+        frozen_commission=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        daily_close_pnl=Decimal("0"),
+        daily_commission=Decimal("0"),
+        option_used_margin=Decimal("1000"),
+        option_realtime_required_margin=Decimal("1000"),
+    )
+    cycle = ActivePositionCycleSnapshot(
+        by_contract=MappingProxyType(
+            {("SHFE", "AGOPT"): (long_position, short_position)}
+        ),
+        by_account=MappingProxyType(
+            {"A001": (long_position, short_position)}
+        ),
+        accounts=MappingProxyType({"A001": account}),
+        cache_version="OPTION-1",
+        refresh_count=1,
+    )
+
+    option_payload = json.loads(make_fields(last_price="120")["payload"])
+    option_payload.update(
+        {
+            "source_event_id": "OPT-1",
+            "order_book_id": "AGOPT",
+            "exchange_id": "SHFE",
+            "symbol": "AGOPT",
+        }
+    )
+    option_tick = RealtimePnlService.parse_tick(
+        {
+            "event_type": "MARKET_TICK",
+            "payload": json.dumps(option_payload),
+        }
+    )
+    underlying_payload = dict(option_payload)
+    underlying_payload.update(
+        {
+            "source_event_id": "UNDERLYING-1",
+            "order_book_id": "AG",
+            "symbol": "AG",
+            "last_price": "100",
+        }
+    )
+    underlying_tick = RealtimePnlService.parse_tick(
+        {
+            "event_type": "MARKET_TICK",
+            "payload": json.dumps(underlying_payload),
+        }
+    )
+
+    class LatestMarket:
+        def get_latest_many(self, _keys):
+            return {
+                ("SHFE", "AG"): MarketTickStore.tick_to_mapping(
+                    underlying_tick
+                )
+            }
+
+    store = FakeStore()
+    result = RealtimePnlService(
+        active_position_cache=FakeCache(),
+        pnl_store=store,
+        market_tick_store=LatestMarket(),
+    ).process_batch(
+        requests=[
+            ContractPnlRequest(
+                exchange_id="SHFE",
+                symbol="AGOPT",
+                tick=option_tick,
+            )
+        ],
+        cycle_snapshot=cycle,
+        dirty_version="OPTION-CYCLE",
+    )
+
+    # 多头2手市值2400，空头1手市值1200；账户权益净增加1200。
+    assert store.accounts["A001"]["long_option_market_value"] == "2400.000000"
+    assert (
+        store.accounts["A001"]["short_option_market_value"]
+        == "1200.000000"
+    )
+    assert store.accounts["A001"]["equity"] == "101200.000000"
+    # 空头每手：权利金1200 + 最低风险50 = 1250。
+    assert (
+        store.accounts["A001"]["option_realtime_required_margin"]
+        == "1250.000000"
+    )
+    assert store.accounts["A001"]["risk_available_cash"] == "97550.000000"
+    assert store.accounts["A001"]["daily_position_pnl"] == "300.000000"
+    assert result.accounts_updated == 1
+    assert result.margin_adjustment_positions == (
+        ("A001", "PS", ("SHFE", "AGOPT")),
+    )

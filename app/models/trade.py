@@ -83,6 +83,14 @@ class Trade(Base):
     # 成交所属交易日，沿用订单交易日
     trading_day: Mapped[date] = mapped_column(Date, nullable=False, index=True)
 
+    # 成交沿用订单接受时保存的精确合约类型。
+    instrument_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+        index=True,
+    )
+
     # 原订单买卖方向：BUY或SELL
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
 
@@ -100,6 +108,24 @@ class Trade(Base):
 
     # OPEN表示新增占用保证金，CLOSE类成交表示本次释放的保证金
     margin: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
+
+    # 账户视角的期权权利金现金流：收到为正、支付为负；期货恒为0。
+    premium_cash_flow: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
+
+    # 本次卖方保证金使用的规则审计信息；期权买方和期货可以为空。
+    margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    margin_rule_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    margin_calculation_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
 
     # 本次按实际成交价和接受时规则快照计算的实际手续费；它可能与本次
     # 释放的预计冻结手续费不同，差额由成交结算修正账户可用资金。

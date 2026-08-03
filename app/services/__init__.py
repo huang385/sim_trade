@@ -70,6 +70,16 @@ from app.services.admin_user_service import AdminUserService
 from app.services.auth_service import AuthService
 from app.services.password_service import PasswordService
 from app.services.token_service import TokenService
+from app.services.account_valuation_calculator import (
+    AccountValuationCalculator,
+)
+from app.services.option_margin_adjustment_service import (
+    OptionMarginAdjustmentService,
+)
+from app.services.option_premium_calculator import OptionPremiumCalculator
+from app.services.option_trading_permission_service import (
+    OptionTradingPermissionService,
+)
 
 
 __all__ = [
@@ -120,4 +130,8 @@ __all__ = [
     "AuthService",
     "PasswordService",
     "TokenService",
+    "AccountValuationCalculator",
+    "OptionMarginAdjustmentService",
+    "OptionPremiumCalculator",
+    "OptionTradingPermissionService",
 ]

@@ -1,5 +1,5 @@
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping
@@ -31,6 +31,12 @@ class AccountPnlSnapshot:
     daily_position_pnl: Decimal
     daily_close_pnl: Decimal
     daily_commission: Decimal
+    option_used_margin: Decimal = Decimal("0")
+    option_realtime_required_margin: Decimal = Decimal("0")
+    long_option_market_value: Decimal = Decimal("0")
+    short_option_market_value: Decimal = Decimal("0")
+    risk_available_cash: Decimal = Decimal("0")
+    risk_state: str = "NORMAL"
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,9 @@ class ActivePositionCycleSnapshot:
     accounts: Mapping[str, AccountPnlSnapshot]
     cache_version: str | None
     refresh_count: int
+    by_underlying: Mapping[
+        ContractKey, tuple[PositionPnlSnapshot, ...]
+    ] = field(default_factory=lambda: MappingProxyType({}))
 
     def get_by_contract(
         self,
@@ -67,6 +76,19 @@ class ActivePositionCycleSnapshot:
 
     def get_account(self, account_id: str) -> AccountPnlSnapshot | None:
         return self.accounts.get(account_id)
+
+    def get_by_underlying(
+        self,
+        exchange_id: str,
+        symbol: str,
+    ) -> tuple[PositionPnlSnapshot, ...]:
+        return self.by_underlying.get(
+            (
+                exchange_id.strip().upper(),
+                symbol.strip().upper(),
+            ),
+            (),
+        )
 
 
 class ActivePositionCache:
@@ -125,6 +147,34 @@ class ActivePositionCache:
             daily_position_pnl=Decimal(account.daily_position_pnl),
             daily_close_pnl=Decimal(account.daily_close_pnl),
             daily_commission=Decimal(account.daily_commission),
+            option_used_margin=Decimal(
+                getattr(account, "option_used_margin", Decimal("0"))
+            ),
+            option_realtime_required_margin=Decimal(
+                getattr(
+                    account,
+                    "option_realtime_required_margin",
+                    Decimal("0"),
+                )
+            ),
+            long_option_market_value=Decimal(
+                getattr(
+                    account,
+                    "long_option_market_value",
+                    Decimal("0"),
+                )
+            ),
+            short_option_market_value=Decimal(
+                getattr(
+                    account,
+                    "short_option_market_value",
+                    Decimal("0"),
+                )
+            ),
+            risk_available_cash=Decimal(
+                getattr(account, "risk_available_cash", Decimal("0"))
+            ),
+            risk_state=getattr(account, "risk_state", "NORMAL"),
         )
 
     def invalidate(
@@ -159,13 +209,16 @@ class ActivePositionCache:
 
         grouped: dict[str, dict[str, object]] = {}
         accounts: dict[str, AccountPnlSnapshot] = {}
-        for position, detail, instrument, account in rows:
+        for row in rows:
+            position, detail, instrument, account = row[:4]
+            underlying = row[4] if len(row) > 4 else None
             item = grouped.setdefault(
                 position.position_id,
                 {
                     "position": position,
                     "instrument": instrument,
                     "details": [],
+                    "underlying": underlying,
                 },
             )
             item["details"].append(
@@ -186,6 +239,10 @@ class ActivePositionCache:
         for item in grouped.values():
             position = item["position"]
             instrument = item["instrument"]
+            underlying = item["underlying"]
+            raw_rule_snapshot = (
+                getattr(position, "margin_rule_snapshot", None) or {}
+            )
             snapshot = PositionPnlSnapshot(
                 position_id=position.position_id,
                 account_id=position.account_id,
@@ -203,6 +260,45 @@ class ActivePositionCache:
                     position.daily_position_pnl
                 ),
                 details=tuple(item["details"]),
+                instrument_type=getattr(
+                    position, "instrument_type", "FUTURES"
+                ),
+                total_volume=getattr(
+                    position,
+                    "total_volume",
+                    sum(
+                        detail.remaining_volume
+                        for detail in item["details"]
+                    ),
+                ),
+                persisted_realtime_required_margin=Decimal(
+                    getattr(
+                        position,
+                        "realtime_required_margin",
+                        Decimal("0"),
+                    )
+                ),
+                persisted_used_margin=Decimal(
+                    getattr(position, "used_margin", Decimal("0"))
+                ),
+                option_type=getattr(instrument, "option_type", None),
+                strike_price=(
+                    Decimal(instrument.strike_price)
+                    if getattr(instrument, "strike_price", None) is not None
+                    else None
+                ),
+                underlying_exchange_id=(
+                    underlying.exchange_id if underlying is not None else None
+                ),
+                underlying_symbol=(
+                    underlying.symbol if underlying is not None else None
+                ),
+                margin_rule_snapshot=tuple(
+                    sorted(
+                        (str(key), str(value))
+                        for key, value in raw_rule_snapshot.items()
+                    )
+                ),
             )
             key = (
                 position.exchange_id.strip().upper(),
@@ -241,9 +337,7 @@ class ActivePositionCache:
     ) -> None:
         with self.session_factory() as db:
             rows = self.position_repository.list_active_calculation_rows(db)
-            active_account_ids = {
-                account.account_id for *_items, account in rows
-            }
+            active_account_ids = {row[3].account_id for row in rows}
             missing_account_ids = extra_account_ids - active_account_ids
             extra_accounts = self.account_repository.list_by_account_ids(
                 db,
@@ -427,6 +521,16 @@ class ActivePositionCache:
         self._account_fact_versions.update(account_versions)
         self._contract_fact_versions.update(contract_versions)
 
+        by_underlying_mutable: dict[
+            ContractKey, list[PositionPnlSnapshot]
+        ] = {}
+        for positions in self._by_contract.values():
+            for position in positions:
+                if position.underlying_key is not None:
+                    by_underlying_mutable.setdefault(
+                        position.underlying_key, []
+                    ).append(position)
+
         return ActivePositionCycleSnapshot(
             # 每个周期复制最外层映射，避免下一轮增量刷新改变已经交给当前
             # 计算周期的视图；内部Position/Account对象本身均为冻结快照。
@@ -435,6 +539,12 @@ class ActivePositionCache:
             accounts=MappingProxyType(dict(self._accounts)),
             cache_version=self._external_version,
             refresh_count=self._refresh_count,
+            by_underlying=MappingProxyType(
+                {
+                    key: tuple(positions)
+                    for key, positions in by_underlying_mutable.items()
+                }
+            ),
         )
 
     # 下列兼容方法供查询服务和旧测试使用；实时Worker每轮只调用上面的周期接口。

@@ -3,8 +3,11 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
+    ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -42,6 +45,44 @@ class Instrument(Base):
             "exchange_id",
             "symbol",
             name="uq_instrument_exchange_symbol",
+        ),
+        CheckConstraint(
+            "instrument_type NOT IN ('FUTURES_OPTION', 'INDEX_OPTION') "
+            "OR underlying_instrument_id IS NOT NULL",
+            name="ck_instrument_option_underlying",
+        ),
+        CheckConstraint(
+            "instrument_type NOT IN ('FUTURES_OPTION', 'INDEX_OPTION') "
+            "OR option_type IN ('CALL', 'PUT')",
+            name="ck_instrument_option_type",
+        ),
+        CheckConstraint(
+            "instrument_type NOT IN ('FUTURES_OPTION', 'INDEX_OPTION') "
+            "OR strike_price > 0",
+            name="ck_instrument_option_strike",
+        ),
+        CheckConstraint(
+            "instrument_type NOT IN ('FUTURES_OPTION', 'INDEX_OPTION') "
+            "OR expire_date IS NOT NULL",
+            name="ck_instrument_option_expiry",
+        ),
+        CheckConstraint(
+            "underlying_instrument_id IS NULL "
+            "OR underlying_instrument_id <> id",
+            name="ck_instrument_not_self_underlying",
+        ),
+        CheckConstraint(
+            "instrument_type <> 'INDEX' OR is_tradeable = false",
+            name="ck_instrument_index_not_tradeable",
+        ),
+        CheckConstraint(
+            "instrument_type = 'INDEX' OR contract_multiplier > 0",
+            name="ck_instrument_derivative_multiplier_positive",
+        ),
+        Index(
+            "ix_instrument_underlying_type",
+            "underlying_instrument_id",
+            "instrument_type",
         ),
     )
 
@@ -93,6 +134,47 @@ class Instrument(Base):
         default="FUTURES",
     )
 
+    # 精确合约类型。market_type继续保留宽泛市场分类，实际交易业务必须
+    # 使用本字段区分普通期货、商品期权、指数和股指期权。
+    instrument_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+        index=True,
+    )
+
+    # 期权标的合约的Instrument内部主键。商品期权关联FUTURES，
+    # 股指期权关联INDEX；普通期货和指数保持为空。
+    underlying_instrument_id: Mapped[int | None] = mapped_column(
+        ForeignKey("instrument.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    # CALL或PUT。非期权合约保持为空。
+    option_type: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+
+    # 期权行权价格。所有资金计算仍使用Decimal。
+    strike_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6),
+        nullable=True,
+    )
+
+    # AMERICAN或EUROPEAN；本阶段只保存，不执行行权。
+    exercise_style: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+
+    # PHYSICAL或CASH；本阶段只保存，不执行交割或现金结算。
+    settlement_type: Mapped[str | None] = mapped_column(
+        String(16),
+        nullable=True,
+    )
+
     # 合约乘数
     #
     # 例如螺纹钢合约乘数为 10。
@@ -138,8 +220,24 @@ class Instrument(Base):
         index=True,
     )
 
+    # 最后交易日只作为参考数据保存；本阶段不增加新的下单时间限制。
+    last_trading_date: Mapped[date | None] = mapped_column(
+        Date,
+        nullable=True,
+        index=True,
+    )
+
     # 是否允许交易
     is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        index=True,
+    )
+
+    # 与is_active分离的可交易标志。INDEX默认不可交易；本阶段只维护
+    # 字段，不改变现有订单校验对is_active的处理方式。
+    is_tradeable: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         default=True,

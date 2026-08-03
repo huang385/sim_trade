@@ -13,10 +13,15 @@ SQLAlchemy 必须提前加载所有模型类，
 
 from app.models.account import Account
 from app.models.instrument import Instrument
+from app.models.instrument_market_data_mapping import (
+    InstrumentMarketDataMapping,
+)
 from app.models.margin_rule import MarginRule
 from app.models.margin_rule_daily import MarginRuleDaily
 from app.models.fee_rule import FeeRule
 from app.models.fee_rule_daily import FeeRuleDaily
+from app.models.fee_rule_item import FeeRuleItem
+from app.models.option_margin_rule import OptionMarginRule
 from app.models.reference_sync_log import ReferenceSyncLog
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
@@ -32,10 +37,13 @@ from app.models.auth_refresh_session import AuthRefreshSession
 __all__ = [
     "Account",
     "Instrument",
+    "InstrumentMarketDataMapping",
     "MarginRule",
     "MarginRuleDaily",
     "FeeRule",
     "FeeRuleDaily",
+    "FeeRuleItem",
+    "OptionMarginRule",
     "ReferenceSyncLog",
     "Order",
     "OutboxEvent",

@@ -3,6 +3,9 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
+from app.core.config import settings
+from app.enums.account_enums import AccountRiskState
+from app.enums.option_enums import InstrumentType
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.account_repository import AccountRepository
@@ -14,6 +17,7 @@ from app.services.pnl_calculator import (
     PositionPnlResult,
     PositionPnlSnapshot,
 )
+from app.services.account_valuation_calculator import AccountValuationCalculator
 
 
 RISK_QUANT = Decimal("0.00000001")
@@ -132,6 +136,9 @@ class PnlSnapshotPersistenceService:
         if not dirty:
             return PnlPersistenceResult()
         versions = dict(dirty)
+        redis_positions = self.pnl_store.get_positions_many(versions)
+        if not isinstance(redis_positions, dict):
+            redis_positions = {}
         with self.session_factory() as db:
             mappings = (
                 self.position_repository.list_account_ids_for_positions(
@@ -143,6 +150,9 @@ class PnlSnapshotPersistenceService:
         by_account: dict[str, list[str]] = {}
         for position_id, account_id in mappings:
             by_account.setdefault(account_id, []).append(position_id)
+        redis_accounts = self.pnl_store.get_accounts_many(by_account)
+        if not isinstance(redis_accounts, dict):
+            redis_accounts = {}
 
         persisted_ids: list[str] = []
         accounts_persisted = 0
@@ -214,31 +224,59 @@ class PnlSnapshotPersistenceService:
                     daily_delta = Decimal("0")
                     updated_positions = []
                     for position in positions:
-                        result = self._calculate_locked_position(
-                            position,
-                            details=details_by_position.get(
-                                position.position_id,
-                                (),
-                            ),
-                            instrument=(
-                                instrument_by_order_book_id.get(
-                                    position.order_book_id
-                                )
-                            ),
-                            latest=latest_by_contract.get(
-                                (
-                                    position.exchange_id.strip().upper(),
-                                    position.symbol.strip().upper(),
-                                ),
-                                {},
-                            ),
+                        is_option = (
+                            getattr(position, "instrument_type", "FUTURES")
+                            in {
+                                InstrumentType.FUTURES_OPTION.value,
+                                InstrumentType.INDEX_OPTION.value,
+                            }
                         )
+                        redis_position = redis_positions.get(
+                            position.position_id, {}
+                        )
+                        if is_option and redis_position:
+                            result = PositionPnlResult(
+                                cumulative_unrealized_pnl=Decimal(
+                                    redis_position[
+                                        "cumulative_unrealized_pnl"
+                                    ]
+                                ),
+                                daily_position_pnl=Decimal(
+                                    redis_position["daily_position_pnl"]
+                                ),
+                            )
+                            position.realtime_required_margin = Decimal(
+                                redis_position.get(
+                                    "realtime_required_margin", "0"
+                                )
+                            )
+                        else:
+                            result = self._calculate_locked_position(
+                                position,
+                                details=details_by_position.get(
+                                    position.position_id,
+                                    (),
+                                ),
+                                instrument=(
+                                    instrument_by_order_book_id.get(
+                                        position.order_book_id
+                                    )
+                                ),
+                                latest=latest_by_contract.get(
+                                    (
+                                        position.exchange_id.strip().upper(),
+                                        position.symbol.strip().upper(),
+                                    ),
+                                    {},
+                                ),
+                            )
                         if result is None:
                             continue
-                        cumulative_delta += (
-                            result.cumulative_unrealized_pnl
-                            - position.unrealized_pnl
-                        )
+                        if not is_option:
+                            cumulative_delta += (
+                                result.cumulative_unrealized_pnl
+                                - position.unrealized_pnl
+                            )
                         daily_delta += (
                             result.daily_position_pnl
                             - position.daily_position_pnl
@@ -268,20 +306,87 @@ class PnlSnapshotPersistenceService:
                         + account.daily_close_pnl
                         - account.daily_commission
                     )
-                    # 日终尚未实现，累计浮盈仍未进入cash_balance。
-                    account.equity = quantize_money(
-                        account.cash_balance
-                        + account.unrealized_pnl
+                    redis_account = redis_accounts.get(account_id, {})
+                    if redis_account:
+                        account.option_realtime_required_margin = Decimal(
+                            redis_account.get(
+                                "option_realtime_required_margin", "0"
+                            )
+                        )
+                        account.long_option_market_value = Decimal(
+                            redis_account.get(
+                                "long_option_market_value", "0"
+                            )
+                        )
+                        account.short_option_market_value = Decimal(
+                            redis_account.get(
+                                "short_option_market_value", "0"
+                            )
+                        )
+                    long_option_value = Decimal(
+                        getattr(
+                            account,
+                            "long_option_market_value",
+                            Decimal("0"),
+                        )
                     )
-                    account.available_cash = quantize_money(
-                        account.equity
-                        - account.used_margin
-                        - account.frozen_margin
-                        - account.frozen_cash
-                        - account.frozen_commission
+                    short_option_value = Decimal(
+                        getattr(
+                            account,
+                            "short_option_market_value",
+                            Decimal("0"),
+                        )
+                    )
+                    option_used_margin = Decimal(
+                        getattr(
+                            account,
+                            "option_used_margin",
+                            Decimal("0"),
+                        )
+                    )
+                    option_realtime_margin = Decimal(
+                        getattr(
+                            account,
+                            "option_realtime_required_margin",
+                            Decimal("0"),
+                        )
+                    )
+                    valuation = AccountValuationCalculator.calculate(
+                        cash_balance=Decimal(account.cash_balance),
+                        futures_unrealized_pnl=Decimal(
+                            account.unrealized_pnl
+                        ),
+                        long_option_market_value=long_option_value,
+                        short_option_market_value=short_option_value,
+                        used_margin=Decimal(account.used_margin),
+                        option_used_margin=option_used_margin,
+                        option_realtime_required_margin=(
+                            option_realtime_margin
+                        ),
+                        frozen_margin=Decimal(account.frozen_margin),
+                        frozen_cash=Decimal(account.frozen_cash),
+                        frozen_commission=Decimal(
+                            account.frozen_commission
+                        ),
+                        option_collateral_ratio=(
+                            settings.option_collateral_ratio
+                        ),
+                    )
+                    account.equity = valuation.equity
+                    account.available_cash = valuation.available_cash
+                    account.risk_available_cash = (
+                        valuation.risk_available_cash
+                    )
+                    account.net_option_market_value = (
+                        valuation.net_option_market_value
+                    )
+                    account.risk_state = (
+                        AccountRiskState.MARGIN_DEFICIT.value
+                        if account.risk_available_cash < Decimal("0")
+                        else AccountRiskState.NORMAL.value
                     )
                     account.risk_ratio = self._risk(
-                        account.used_margin,
+                        valuation.effective_required_margin,
                         account.equity,
                     )
                     account.updated_at = utc_now()

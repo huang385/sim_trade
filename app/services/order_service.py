@@ -25,6 +25,11 @@ from app.enums.order_enums import (
     PositionFreezeAllocationStatus,
 )
 from app.enums.reference_data_enums import CommissionType
+from app.enums.option_enums import (
+    InstrumentType,
+    MarginPriceMode,
+    OptionType,
+)
 from app.models.order import Order
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
@@ -45,6 +50,18 @@ from app.services.fee_calculator import (
 )
 from app.services.account_access_scope import AccountAccessScope
 from app.services.margin_calculator import MarginCalculator
+from app.services.option_margin_calculator import (
+    OptionMarginInput,
+    OptionMarginRuleSnapshot,
+)
+from app.services.option_margin_calculator_resolver import (
+    OptionMarginCalculatorResolver,
+)
+from app.services.option_market_price_service import OptionMarketPriceService
+from app.services.option_premium_calculator import OptionPremiumCalculator
+from app.services.option_trading_permission_service import (
+    OptionTradingPermissionService,
+)
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
@@ -126,6 +143,10 @@ class OrderService:
         event_id_factory: Callable[[], str] = generate_event_id,
         allocation_id_factory: Callable[[], str] = generate_allocation_id,
         default_access_scope: AccountAccessScope | None = None,
+        option_permission_service: OptionTradingPermissionService | None = None,
+        option_premium_calculator: OptionPremiumCalculator | None = None,
+        option_margin_resolver: OptionMarginCalculatorResolver | None = None,
+        option_market_price_service: OptionMarketPriceService | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -149,6 +170,16 @@ class OrderService:
         # 仅测试或受信任内部调用可在构造时显式提供管理员范围。生产HTTP
         # Service不设置默认值，每次请求必须传入由current_user构造的范围。
         self.default_access_scope = default_access_scope
+        self.option_permission_service = (
+            option_permission_service or OptionTradingPermissionService()
+        )
+        self.option_premium_calculator = (
+            option_premium_calculator or OptionPremiumCalculator()
+        )
+        self.option_margin_resolver = (
+            option_margin_resolver or OptionMarginCalculatorResolver()
+        )
+        self.option_market_price_service = option_market_price_service
 
     def create_order(
         self,
@@ -233,6 +264,8 @@ class OrderService:
                 exchange_id=request.exchange_id,
                 symbol=request.symbol,
                 trading_day=trading_day,
+                direction=request.direction.value,
+                offset_flag=request.offset_flag.value,
             )
 
             # 校验订单类型、开平标志、价格档位和数量范围。
@@ -242,18 +275,72 @@ class OrderService:
             )
 
             is_open = request.offset_flag == OffsetFlag.OPEN
-            commission_type = CommissionType(
-                rules.fee_rule.commission_type
-            ).value
-            commission_parameter = (
-                self.fee_calculator.resolve_commission_parameter(
-                    offset_flag=request.offset_flag,
-                    fee_rule=rules.fee_rule,
-                )
+            instrument_type = getattr(
+                rules.instrument,
+                "instrument_type",
+                InstrumentType.FUTURES.value,
             )
+            is_option = instrument_type in {
+                InstrumentType.FUTURES_OPTION.value,
+                InstrumentType.INDEX_OPTION.value,
+            }
+            fee_rule_id = None
+            fee_rule_version = None
+            fee_rule_snapshot = None
+            if is_option:
+                fee_item = rules.fee_rule_item
+                if fee_item is None:
+                    raise DataAccessError(
+                        "期权手续费规则查询结果不完整",
+                        error_code="OPTION_FEE_RULE_INCONSISTENT",
+                    )
+                commission_type = CommissionType(
+                    fee_item.commission_type
+                ).value
+                commission_parameter = Decimal(
+                    fee_item.commission_parameter
+                )
+                fee_rule_id = fee_item.id
+                fee_rule_version = fee_item.rule_version
+                fee_rule_snapshot = {
+                    "rule_id": fee_item.id,
+                    "rule_version": fee_item.rule_version,
+                    "instrument_type": instrument_type,
+                    "direction": request.direction.value,
+                    "offset_flag": request.offset_flag.value,
+                    "commission_type": commission_type,
+                    "commission_parameter": format(
+                        commission_parameter, "f"
+                    ),
+                    "data_source": fee_item.data_source,
+                }
+            else:
+                if rules.fee_rule is None or rules.margin_rule is None:
+                    raise DataAccessError(
+                        "期货交易规则查询结果不完整",
+                        error_code="FUTURES_RULE_INCONSISTENT",
+                    )
+                commission_type = CommissionType(
+                    rules.fee_rule.commission_type
+                ).value
+                commission_parameter = (
+                    self.fee_calculator.resolve_commission_parameter(
+                        offset_flag=request.offset_flag,
+                        fee_rule=rules.fee_rule,
+                    )
+                )
             commission_contract_multiplier = Decimal(
                 rules.instrument.contract_multiplier
             )
+            frozen_cash = Decimal("0.000000")
+            margin_rule_id = None
+            margin_rule_version = None
+            margin_price_mode = None
+            margin_underlying_price = None
+            margin_option_price = None
+            margin_rule_snapshot = None
+            margin_snapshot_schema_version = None
+            margin_calculation_version = None
             # 只有开仓订单需要新增保证金；平仓订单只冻结手续费和持仓。
             frozen_margin = (
                 self.margin_calculator.calculate_open_margin(
@@ -263,9 +350,124 @@ class OrderService:
                     instrument=rules.instrument,
                     margin_rule=rules.margin_rule,
                 )
-                if is_open
+                if is_open and not is_option
                 else Decimal("0.000000")
             )
+            if is_option and request.direction == OrderDirection.BUY:
+                frozen_cash = self.option_premium_calculator.calculate(
+                    price=request.limit_price,
+                    volume=request.volume,
+                    multiplier=commission_contract_multiplier,
+                )
+            if (
+                instrument_type == InstrumentType.FUTURES_OPTION.value
+                and request.direction == OrderDirection.SELL
+                and is_open
+            ):
+                if (
+                    rules.option_margin_rule is None
+                    or rules.underlying_instrument is None
+                    or rules.underlying_margin_rule is None
+                    or self.option_market_price_service is None
+                ):
+                    raise DataAccessError(
+                        "商品期权保证金计算上下文不完整",
+                        error_code="OPTION_MARGIN_CONTEXT_INCOMPLETE",
+                    )
+                prices = self.option_market_price_service.get_margin_prices(
+                    option_instrument=rules.instrument,
+                    underlying_instrument=rules.underlying_instrument,
+                    order_limit_price=request.limit_price,
+                )
+                option_rule = rules.option_margin_rule
+                rule_snapshot = OptionMarginRuleSnapshot(
+                    rule_id=option_rule.id,
+                    rule_version=option_rule.rule_version,
+                    margin_algorithm=option_rule.margin_algorithm,
+                    margin_adjustment_rate=Decimal(
+                        option_rule.margin_adjustment_rate
+                    ),
+                    minimum_guarantee_rate=Decimal(
+                        option_rule.minimum_guarantee_rate
+                    ),
+                    out_of_money_deduction_rate=Decimal(
+                        option_rule.out_of_money_deduction_rate
+                    ),
+                    minimum_underlying_margin_ratio=Decimal(
+                        option_rule.minimum_underlying_margin_ratio
+                    ),
+                    extra_margin_rate=Decimal(
+                        option_rule.extra_margin_rate
+                    ),
+                )
+                underlying_margin_rate = max(
+                    Decimal(rules.underlying_margin_rule.long_margin_rate),
+                    Decimal(rules.underlying_margin_rule.short_margin_rate),
+                )
+                underlying_margin_per_lot = quantize_money(
+                    prices.underlying_price
+                    * Decimal(
+                        rules.underlying_instrument.contract_multiplier
+                    )
+                    * underlying_margin_rate
+                )
+                calculator = self.option_margin_resolver.resolve(
+                    instrument_type=instrument_type,
+                    exchange_id=rules.instrument.exchange_id,
+                    margin_algorithm=option_rule.margin_algorithm,
+                )
+                margin_result = calculator.calculate(
+                    OptionMarginInput(
+                        option_type=OptionType(
+                            rules.instrument.option_type
+                        ),
+                        strike_price=Decimal(
+                            rules.instrument.strike_price
+                        ),
+                        option_price=prices.option_price,
+                        underlying_price=prices.underlying_price,
+                        option_multiplier=commission_contract_multiplier,
+                        underlying_multiplier=Decimal(
+                            rules.underlying_instrument.contract_multiplier
+                        ),
+                        volume=request.volume,
+                        price_mode=MarginPriceMode.ORDER_FREEZE,
+                        calculated_at=utc_now(),
+                        rule=rule_snapshot,
+                        underlying_margin_per_lot=(
+                            underlying_margin_per_lot
+                        ),
+                    )
+                )
+                frozen_margin = margin_result.total_margin
+                margin_rule_id = margin_result.rule_id
+                margin_rule_version = margin_result.rule_version
+                margin_price_mode = margin_result.price_mode.value
+                margin_underlying_price = (
+                    margin_result.underlying_price
+                )
+                margin_option_price = margin_result.option_price
+                margin_rule_snapshot = rule_snapshot.to_json_mapping()
+                # 实时保证金需要重放标的期货每手保证金。把当次采用的
+                # 标的保证金率和乘数一并固化，后续 Tick 不回查历史规则。
+                margin_rule_snapshot.update(
+                    {
+                        "underlying_margin_rate": format(
+                            underlying_margin_rate, "f"
+                        ),
+                        "underlying_multiplier": format(
+                            Decimal(
+                                rules.underlying_instrument
+                                .contract_multiplier
+                            ),
+                            "f",
+                        ),
+                    }
+                )
+                margin_snapshot_schema_version = "1"
+                margin_calculation_version = (
+                    margin_result.calculation_version
+                )
             # 开仓可以直接按整张订单计算；平仓必须先完成逐笔持仓分配，
             # 再按每条 Allocation 的最终平今/平昨标志分别计算。
             frozen_commission = (
@@ -324,17 +526,31 @@ class OrderService:
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
             self.freeze_service.validate_account_tradable(account)
+            self.option_permission_service.validate(
+                account=account,
+                instrument=rules.instrument,
+                direction=request.direction,
+                offset_flag=request.offset_flag,
+            )
 
             order_id = self.order_id_factory()
             accepted_at = utc_now()
             frozen_position_volume = 0
 
             if is_open:
-                self.freeze_service.freeze_open_order(
-                    account=account,
-                    frozen_margin=frozen_margin,
-                    frozen_commission=frozen_commission,
-                )
+                if is_option:
+                    self.freeze_service.freeze_option_resources(
+                        account=account,
+                        frozen_cash=frozen_cash,
+                        frozen_margin=frozen_margin,
+                        frozen_commission=frozen_commission,
+                    )
+                else:
+                    self.freeze_service.freeze_open_order(
+                        account=account,
+                        frozen_margin=frozen_margin,
+                        frozen_commission=frozen_commission,
+                    )
             else:
                 # SELL平多、BUY平空，方向必须和开平标志共同解释。
                 position_direction = (
@@ -368,15 +584,37 @@ class OrderService:
                 )
                 allocation_fee_metadata = []
                 for plan in plans:
-                    allocation_parameter = (
-                        self.fee_calculator.resolve_commission_parameter(
-                            offset_flag=plan.resolved_offset_flag,
-                            fee_rule=rules.fee_rule,
+                    if is_option:
+                        allocation_fee_rule = (
+                            self.rule_query_service.get_option_fee_rule(
+                                db,
+                                instrument=rules.instrument,
+                                direction=request.direction.value,
+                                offset_flag=(
+                                    plan.resolved_offset_flag.value
+                                ),
+                                trading_day=trading_day,
+                            )
                         )
-                    )
+                        allocation_type = CommissionType(
+                            allocation_fee_rule.commission_type
+                        ).value
+                        allocation_parameter = Decimal(
+                            allocation_fee_rule.commission_parameter
+                        )
+                    else:
+                        allocation_type = commission_type
+                        allocation_parameter = (
+                            self.fee_calculator
+                            .resolve_commission_parameter(
+                                offset_flag=plan.resolved_offset_flag,
+                                fee_rule=rules.fee_rule,
+                            )
+                        )
                     allocation_fee_metadata.append(
                         (
                             plan,
+                            allocation_type,
                             allocation_parameter,
                         )
                     )
@@ -391,7 +629,7 @@ class OrderService:
                                     resolved_offset_flag=(
                                         plan.resolved_offset_flag.value
                                     ),
-                                    commission_type=commission_type,
+                                    commission_type=allocation_type,
                                     commission_parameter=parameter,
                                     commission_contract_multiplier=(
                                         commission_contract_multiplier
@@ -399,13 +637,21 @@ class OrderService:
                                 ),
                                 volume=plan.volume,
                             )
-                            for plan, parameter in allocation_fee_metadata
+                            for (
+                                plan,
+                                allocation_type,
+                                parameter,
+                            ) in allocation_fee_metadata
                         ],
                     )
                 )
                 allocation_fee_snapshots = [
-                    (plan, parameter, commission)
-                    for (plan, parameter), commission in zip(
+                    (plan, allocation_type, parameter, commission)
+                    for (
+                        plan,
+                        allocation_type,
+                        parameter,
+                    ), commission in zip(
                         allocation_fee_metadata,
                         allocation_commissions,
                         strict=True,
@@ -414,18 +660,27 @@ class OrderService:
                 frozen_commission = quantize_money(
                     sum(
                         (
-                            item[2]
+                            item[3]
                             for item in allocation_fee_snapshots
                         ),
                         Decimal("0"),
                     )
                 )
-                self.freeze_service.freeze_close_order_commission(
-                    account=account,
-                    frozen_commission=frozen_commission,
-                )
+                if is_option:
+                    self.freeze_service.freeze_option_resources(
+                        account=account,
+                        frozen_cash=frozen_cash,
+                        frozen_margin=Decimal("0"),
+                        frozen_commission=frozen_commission,
+                    )
+                else:
+                    self.freeze_service.freeze_close_order_commission(
+                        account=account,
+                        frozen_commission=frozen_commission,
+                    )
                 for (
                     plan,
+                    allocation_type,
                     allocation_parameter,
                     allocation_frozen_commission,
                 ) in allocation_fee_snapshots:
@@ -445,7 +700,7 @@ class OrderService:
                             resolved_offset_flag=(
                                 plan.resolved_offset_flag.value
                             ),
-                            commission_type=commission_type,
+                            commission_type=allocation_type,
                             commission_parameter=allocation_parameter,
                             commission_contract_multiplier=(
                                 commission_contract_multiplier
@@ -482,6 +737,7 @@ class OrderService:
                 symbol=rules.instrument.symbol,
                 exchange_id=rules.instrument.exchange_id,
                 trading_day=trading_day,
+                instrument_type=instrument_type,
                 direction=request.direction.value,
                 offset_flag=request.offset_flag.value,
                 order_type=request.order_type.value,
@@ -490,15 +746,29 @@ class OrderService:
                 commission_contract_multiplier=(
                     commission_contract_multiplier
                 ),
+                fee_rule_id=fee_rule_id,
+                fee_rule_version=fee_rule_version,
+                fee_rule_snapshot=fee_rule_snapshot,
                 limit_price=request.limit_price,
                 total_volume=request.volume,
                 status=OrderStatus.ACCEPTED.value,
                 submit_status=OrderSubmitStatus.ACCEPTED.value,
                 frozen_margin=frozen_margin,
+                frozen_cash=frozen_cash,
                 frozen_commission=frozen_commission,
                 frozen_position_volume=frozen_position_volume,
                 created_at=accepted_at,
                 accepted_at=accepted_at,
+                margin_rule_id=margin_rule_id,
+                margin_rule_version=margin_rule_version,
+                margin_price_mode=margin_price_mode,
+                margin_underlying_price=margin_underlying_price,
+                margin_option_price=margin_option_price,
+                margin_rule_snapshot=margin_rule_snapshot,
+                margin_snapshot_schema_version=(
+                    margin_snapshot_schema_version
+                ),
+                margin_calculation_version=margin_calculation_version,
             )
 
             # ORDER_ACCEPTED 事件与订单、账户冻结共用当前 Session。
@@ -532,6 +802,7 @@ class OrderService:
                     "frozen_margin": decimal_to_json_string(
                         frozen_margin
                     ),
+                    "frozen_cash": decimal_to_json_string(frozen_cash),
                     "frozen_commission": decimal_to_json_string(
                         frozen_commission
                     ),
@@ -681,6 +952,11 @@ class OrderService:
 def get_order_service() -> OrderService:
     """创建供 FastAPI Depends 使用的订单服务。"""
 
+    from app.core.redis_client import redis_client
+    from app.infrastructure.market_data.market_tick_store import (
+        MarketTickStore,
+    )
+
     return OrderService(
         order_repository=OrderRepository(),
         account_repository=AccountRepository(),
@@ -693,4 +969,7 @@ def get_order_service() -> OrderService:
         position_repository=PositionRepository(),
         allocation_repository=PositionFreezeAllocationRepository(),
         close_allocator=PositionCloseAllocator(),
+        option_market_price_service=OptionMarketPriceService(
+            MarketTickStore(redis_client)
+        ),
     )

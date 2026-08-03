@@ -31,6 +31,9 @@ from app.services.realtime_pnl_service import (
     PnlWorkerLeaseLostError,
     RealtimePnlService,
 )
+from app.services.option_margin_adjustment_service import (
+    OptionMarginAdjustmentService,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +113,10 @@ class RealtimePnlWorker:
         lease_owner: str | None = None,
         lease_ttl_seconds: int = 15,
         lease_renew_seconds: int = 5,
+        option_margin_adjustment_service: (
+            OptionMarginAdjustmentService | None
+        ) = None,
+        session_factory=SessionLocal,
     ):
         self.stream_consumer = stream_consumer
         self.service = service
@@ -147,6 +154,10 @@ class RealtimePnlWorker:
         self._lease_acquired = False
         self._lease_ever_acquired = False
         self._lease_wait_logged = False
+        self.option_margin_adjustment_service = (
+            option_margin_adjustment_service
+        )
+        self.session_factory = session_factory
 
     def request_stop(self, *_args) -> None:
         self.stop_event.set()
@@ -432,6 +443,18 @@ class RealtimePnlWorker:
             },
             force_refresh=force_reconciliation,
         )
+        # 标的期货行情变化时，把依赖该标的的商品期权合约加入同一
+        # 500ms 周期。这里只扩展合约键，实际估值仍读取 market:latest，
+        # 不会使用旧 Pending 消息中的价格覆盖较新的行情快照。
+        dependent_option_keys = {
+            (
+                position.exchange_id.strip().upper(),
+                position.symbol.strip().upper(),
+            )
+            for key in tuple(keys)
+            for position in cycle.get_by_underlying(*key)
+        }
+        keys.update(dependent_option_keys)
         refresh_delta = max(
             cycle.refresh_count - self._last_cache_refresh_count,
             0,
@@ -547,6 +570,48 @@ class RealtimePnlWorker:
         # 对应结果也已可靠落入Redis，因此直接ACK，避免每500ms重复续租。
         request_by_key = {request.key: request for request in requests}
         successful = set(result.successful_contracts)
+        adjustment_failed: set[ContractKey] = set()
+        if self.option_margin_adjustment_service is not None:
+            for account_id, position_id, key in (
+                result.margin_adjustment_positions
+            ):
+                try:
+                    with self.session_factory() as db:
+                        self.option_margin_adjustment_service.adjust(
+                            db,
+                            account_id=account_id,
+                            position_id=position_id,
+                        )
+                    request = request_by_key[key]
+                    source_version = (
+                        request.tick.source_event_id
+                        if request.tick is not None
+                        else request.dirty_version or "DIRTY"
+                    )
+                    # 账面保证金已经在 PostgreSQL 事务中更新。通过独立的
+                    # 账户事实 Dirty 通知下一轮刷新缓存并重写 Redis 账户
+                    # 快照，避免页面继续使用最长 60 秒前的 used_margin 和
+                    # available_cash。事件编号稳定，Pending 重放不会重复递增。
+                    self.pnl_store.mark_account_fact_dirty_once(
+                        event_id=(
+                            "OPTION_MARGIN_ADJUSTED:"
+                            f"{source_version}:{position_id}"
+                        ),
+                        account_id=account_id,
+                        processed_ttl_seconds=(
+                            settings.order_event_processed_ttl_seconds
+                        ),
+                    )
+                except Exception:
+                    adjustment_failed.add(key)
+                    logger.exception(
+                        "商品期权保证金事务追加失败 contract=%s:%s "
+                        "position_id=%s",
+                        key[0],
+                        key[1],
+                        position_id,
+                    )
+        successful -= adjustment_failed
         for key in successful:
             request = request_by_key[key]
             if request.tick is not None:
@@ -567,7 +632,7 @@ class RealtimePnlWorker:
                 account_fact_versions[account_id],
             )
 
-        for key in result.failed_contracts:
+        for key in set(result.failed_contracts) | adjustment_failed:
             self._retain_or_dead_letter(
                 key,
                 "合约实时PnL计算失败",
@@ -724,6 +789,9 @@ def build_worker() -> RealtimePnlWorker:
         pnl_store=pnl_store,
         market_tick_store=market_tick_store,
     )
+    margin_adjustment_service = OptionMarginAdjustmentService(
+        market_tick_store=market_tick_store
+    )
     return RealtimePnlWorker(
         stream_consumer=consumer,
         service=service,
@@ -742,6 +810,8 @@ def build_worker() -> RealtimePnlWorker:
         ),
         lease_ttl_seconds=settings.pnl_worker_lease_ttl_seconds,
         lease_renew_seconds=settings.pnl_worker_lease_renew_seconds,
+        option_margin_adjustment_service=margin_adjustment_service,
+        session_factory=SessionLocal,
     )
 
 

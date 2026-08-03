@@ -30,6 +30,26 @@ class PositionPnlSnapshot:
     persisted_unrealized_pnl: Decimal
     persisted_daily_position_pnl: Decimal
     details: tuple[PnlDetailSnapshot, ...]
+    # 以下字段仅供统一期货/期权估值使用；默认值保证历史期货测试桩和
+    # 旧调用方不需要同步修改。
+    instrument_type: str = "FUTURES"
+    total_volume: int = 0
+    persisted_realtime_required_margin: Decimal = Decimal("0")
+    persisted_used_margin: Decimal = Decimal("0")
+    option_type: str | None = None
+    strike_price: Decimal | None = None
+    underlying_exchange_id: str | None = None
+    underlying_symbol: str | None = None
+    margin_rule_snapshot: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def underlying_key(self) -> tuple[str, str] | None:
+        if not self.underlying_exchange_id or not self.underlying_symbol:
+            return None
+        return (
+            self.underlying_exchange_id.strip().upper(),
+            self.underlying_symbol.strip().upper(),
+        )
 
 
 @dataclass(frozen=True)

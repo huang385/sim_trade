@@ -21,6 +21,7 @@ class PositionResponse(BaseModel):
     order_book_id: str
     exchange_id: str
     symbol: str
+    instrument_type: str = "FUTURES"
     # LONG或SHORT
     direction: str
     # 总量、今仓、昨仓、冻结量和可用量
@@ -33,6 +34,15 @@ class PositionResponse(BaseModel):
     average_open_price: Decimal
     position_cost: Decimal
     used_margin: Decimal
+    initial_occupied_margin: Decimal = Decimal("0")
+    realtime_required_margin: Decimal = Decimal("0")
+    margin_rule_id: int | None = None
+    margin_rule_version: str | None = None
+    margin_price_mode: str | None = None
+    margin_underlying_price: Decimal | None = None
+    margin_option_price: Decimal | None = None
+    margin_calculated_at: datetime | None = None
+    multiplier_snapshot: Decimal | None = None
     # 已实现盈亏盘中累计；未实现盈亏仍等待后续盯市阶段更新
     realized_pnl: Decimal
     unrealized_pnl: Decimal

@@ -26,6 +26,9 @@ class AccountCreate(BaseModel):
     # 初始资金，必须大于 0
     initial_cash: Decimal = Field(gt=0)
 
+    # 管理员创建账户时可显式开启期权权限；系统级期权开关仍需同时开启。
+    option_trading_enabled: bool = False
+
 
 class AccountResponse(BaseModel):
     """
@@ -40,6 +43,7 @@ class AccountResponse(BaseModel):
     user_id: str
     account_name: str
     account_type: str
+    option_trading_enabled: bool = False
 
     initial_cash: Decimal
     cash_balance: Decimal
@@ -50,6 +54,13 @@ class AccountResponse(BaseModel):
 
     used_margin: Decimal
     frozen_margin: Decimal
+    option_used_margin: Decimal = Decimal("0")
+    option_realtime_required_margin: Decimal = Decimal("0")
+    long_option_market_value: Decimal = Decimal("0")
+    short_option_market_value: Decimal = Decimal("0")
+    net_option_market_value: Decimal = Decimal("0")
+    risk_available_cash: Decimal = Decimal("0")
+    risk_state: str = "NORMAL"
 
     realized_pnl: Decimal
     unrealized_pnl: Decimal

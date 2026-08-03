@@ -224,12 +224,16 @@ class OrderCancellationService:
             # 逐笔明细和本订单Allocation，开仓撤单不访问持仓。
             cancel_volume = order.remaining_volume
             released_margin = quantize_money(order.frozen_margin)
+            released_cash = quantize_money(
+                getattr(order, "frozen_cash", Decimal("0"))
+            )
             released_commission = quantize_money(order.frozen_commission)
 
             if order.offset_flag == OffsetFlag.OPEN.value:
                 self.freeze_service.release_open_order_frozen_resources(
                     account=account,
                     frozen_margin=released_margin,
+                    frozen_cash=released_cash,
                     frozen_commission=released_commission,
                 )
             elif order.offset_flag in {
@@ -394,12 +398,14 @@ class OrderCancellationService:
                 self.freeze_service.release_close_order_commission(
                     account=account,
                     frozen_commission=released_commission,
+                    frozen_cash=released_cash,
                 )
                 order.frozen_position_volume = 0
 
             order.cancelled_volume += cancel_volume
             order.remaining_volume = 0
             order.frozen_margin = Decimal("0.000000")
+            order.frozen_cash = Decimal("0.000000")
             order.frozen_commission = Decimal("0.000000")
             order.cancelled_at = cancelled_at
             order.updated_at = cancelled_at
@@ -452,10 +458,12 @@ class OrderCancellationService:
                         else ""
                     ),
                     "released_margin": _decimal_string(released_margin),
+                    "released_cash": _decimal_string(released_cash),
                     "released_commission": _decimal_string(
                         released_commission
                     ),
                     "frozen_margin": _decimal_string(order.frozen_margin),
+                    "frozen_cash": _decimal_string(order.frozen_cash),
                     "frozen_commission": _decimal_string(
                         order.frozen_commission
                     ),

@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     UniqueConstraint,
@@ -71,6 +72,18 @@ class Order(Base):
             "commission_contract_multiplier > 0",
             name="ck_order_commission_multiplier_positive",
         ),
+        CheckConstraint(
+            "frozen_cash >= 0",
+            name="ck_order_frozen_cash_nonnegative",
+        ),
+        CheckConstraint(
+            "margin_underlying_price IS NULL OR margin_underlying_price >= 0",
+            name="ck_order_margin_underlying_price_nonnegative",
+        ),
+        CheckConstraint(
+            "margin_option_price IS NULL OR margin_option_price >= 0",
+            name="ck_order_margin_option_price_nonnegative",
+        ),
     )
 
     # 数据库内部自增主键
@@ -120,6 +133,15 @@ class Order(Base):
         index=True,
     )
 
+    # 接单时保存的精确合约类型。后续参考数据变化不能改变历史订单的
+    # 结算分派方式。
+    instrument_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="FUTURES",
+        index=True,
+    )
+
     # 买卖方向：BUY 或 SELL
     direction: Mapped[str] = mapped_column(
         String(16),
@@ -150,6 +172,13 @@ class Order(Base):
     commission_contract_multiplier: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),
         nullable=False,
+    )
+    fee_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fee_rule_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    fee_rule_snapshot: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True
     )
 
     # 限价单委托价格
@@ -205,6 +234,12 @@ class Order(Base):
         nullable=False,
         default=Decimal("0"),
     )
+    # 期权买入开仓或买入平空订单尚未成交部分冻结的最大权利金。
+    frozen_cash: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+    )
     # 本订单预计并已冻结的手续费
     frozen_commission: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),
@@ -216,6 +251,41 @@ class Order(Base):
         Integer,
         nullable=False,
         default=0,
+    )
+
+    # 期权卖方保证金计算审计快照。Decimal在JSON中必须保存为字符串，
+    # 使历史活动订单不受当前规则版本变化影响。
+    margin_rule_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    margin_rule_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    margin_price_mode: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    margin_underlying_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6),
+        nullable=True,
+    )
+    margin_option_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6),
+        nullable=True,
+    )
+    margin_rule_snapshot: Mapped[dict | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    margin_snapshot_schema_version: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+    )
+    margin_calculation_version: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
 
     # 拒绝原因代码；ACCEPTED订单为空

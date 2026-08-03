@@ -115,6 +115,7 @@ class FakePnlStore:
         self.renew_calls = 0
         self.release_calls = 0
         self.rebuild_calls = 0
+        self.account_fact_marks = []
 
     def acquire_worker_lease(self, _owner, _ttl_seconds):
         self.acquire_calls += 1
@@ -133,6 +134,18 @@ class FakePnlStore:
     def complete_dirty_account_fact(self, account_id, expected_version):
         self.completed_accounts.append((account_id, expected_version))
         return True
+
+    def mark_account_fact_dirty_once(
+        self,
+        *,
+        event_id,
+        account_id,
+        processed_ttl_seconds,
+    ):
+        self.account_fact_marks.append(
+            (event_id, account_id, processed_ttl_seconds)
+        )
+        return "1"
 
     def rebuild_active_indexes(self, **_kwargs):
         self.rebuild_calls += 1
@@ -537,6 +550,57 @@ def test_account_fact_redis_write_failure_does_not_clear_dirty():
     assert store.account_dirty == [("A001", "9")]
     assert consumer.acked_batches == []
     assert worker._lease_acquired is False
+
+
+def test_option_margin_adjustment_marks_account_fact_dirty_before_ack():
+    store = FakePnlStore()
+
+    class MarginService(FakeService):
+        def process_batch(self, *, requests, **_kwargs):
+            self.calls.append(requests)
+            return RealtimePnlProcessResult(
+                action="CALCULATED",
+                successful_contracts=frozenset({("DCE", "JD2609")}),
+                margin_adjustment_positions=(
+                    ("A001", "P001", ("DCE", "JD2609")),
+                ),
+            )
+
+    class AdjustmentService:
+        def __init__(self):
+            self.calls = []
+
+        def adjust(self, db, *, account_id, position_id):
+            self.calls.append((db, account_id, position_id))
+
+    class SessionContext:
+        def __enter__(self):
+            return "DB"
+
+        def __exit__(self, *_args):
+            return False
+
+    adjustment = AdjustmentService()
+    service = MarginService(store)
+    worker, consumer, _service, _store, _clock = make_worker(
+        [("1-0", make_fields("JD2609", "3200", 1))],
+        service=service,
+        store=store,
+    )
+    worker.option_margin_adjustment_service = adjustment
+    worker.session_factory = SessionContext
+
+    worker.run_once(force_flush=True)
+
+    assert adjustment.calls == [("DB", "A001", "P001")]
+    assert store.account_fact_marks == [
+        (
+            "OPTION_MARGIN_ADJUSTED:JD2609-1:P001",
+            "A001",
+            604800,
+        )
+    ]
+    assert consumer.acked_batches == [["1-0"]]
 
 
 def test_active_indexes_are_reconciled_again_on_periodic_full_cycle():

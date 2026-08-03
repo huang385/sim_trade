@@ -11,6 +11,38 @@ from app.models.instrument import Instrument
 
 
 @dataclass(frozen=True)
+class FeeRuleSnapshot:
+    """订单接受时固定的方向化手续费规则。"""
+
+    rule_id: int
+    rule_version: str
+    instrument_type: str
+    direction: str
+    offset_flag: str
+    commission_type: str
+    commission_parameter: Decimal
+    contract_multiplier: Decimal
+    data_source: str
+
+    def to_json_mapping(self) -> dict[str, str | int]:
+        return {
+            "rule_id": self.rule_id,
+            "rule_version": self.rule_version,
+            "instrument_type": self.instrument_type,
+            "direction": self.direction,
+            "offset_flag": self.offset_flag,
+            "commission_type": self.commission_type,
+            "commission_parameter": format(
+                self.commission_parameter, "f"
+            ),
+            "contract_multiplier": format(
+                self.contract_multiplier, "f"
+            ),
+            "data_source": self.data_source,
+        }
+
+
+@dataclass(frozen=True)
 class FeeBucketKey:
     """
     手续费桶的稳定分组键。

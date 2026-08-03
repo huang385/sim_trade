@@ -40,6 +40,12 @@ class InstrumentRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def get_by_id(db: Session, instrument_id: int) -> Instrument | None:
+        """按数据库主键读取合约，供期权标的关系解析使用。"""
+
+        return db.get(Instrument, instrument_id)
+
+    @staticmethod
     def list_by_order_book_ids(
         db: Session,
         order_book_ids: set[str] | frozenset[str] | list[str],
@@ -90,13 +96,21 @@ class InstrumentRepository:
         instrument_name: str | None,
         product_id: str | None,
         market_type: str,
+        instrument_type: str,
+        underlying_instrument_id: int | None,
+        option_type: str | None,
+        strike_price: Decimal | None,
+        exercise_style: str | None,
+        settlement_type: str | None,
         contract_multiplier: Decimal,
         price_tick: Decimal,
         min_volume: int,
         max_volume: int,
         listed_date: date | None,
         expire_date: date | None,
+        last_trading_date: date | None,
         is_active: bool,
+        is_tradeable: bool,
         data_source: str,
         synced_at: datetime,
         updated_at: datetime,
@@ -108,13 +122,21 @@ class InstrumentRepository:
             instrument_name=instrument_name,
             product_id=product_id,
             market_type=market_type,
+            instrument_type=instrument_type,
+            underlying_instrument_id=underlying_instrument_id,
+            option_type=option_type,
+            strike_price=strike_price,
+            exercise_style=exercise_style,
+            settlement_type=settlement_type,
             contract_multiplier=contract_multiplier,
             price_tick=price_tick,
             min_volume=min_volume,
             max_volume=max_volume,
             listed_date=listed_date,
             expire_date=expire_date,
+            last_trading_date=last_trading_date,
             is_active=is_active,
+            is_tradeable=is_tradeable,
             data_source=data_source,
             synced_at=synced_at,
             updated_at=updated_at,
@@ -127,6 +149,14 @@ class InstrumentRepository:
                 "instrument_name": statement.excluded.instrument_name,
                 "product_id": statement.excluded.product_id,
                 "market_type": statement.excluded.market_type,
+                "instrument_type": statement.excluded.instrument_type,
+                "underlying_instrument_id": (
+                    statement.excluded.underlying_instrument_id
+                ),
+                "option_type": statement.excluded.option_type,
+                "strike_price": statement.excluded.strike_price,
+                "exercise_style": statement.excluded.exercise_style,
+                "settlement_type": statement.excluded.settlement_type,
                 "contract_multiplier": (
                     statement.excluded.contract_multiplier
                 ),
@@ -135,7 +165,9 @@ class InstrumentRepository:
                 "max_volume": statement.excluded.max_volume,
                 "listed_date": statement.excluded.listed_date,
                 "expire_date": statement.excluded.expire_date,
+                "last_trading_date": statement.excluded.last_trading_date,
                 "is_active": statement.excluded.is_active,
+                "is_tradeable": statement.excluded.is_tradeable,
                 "data_source": statement.excluded.data_source,
                 "synced_at": statement.excluded.synced_at,
                 "updated_at": statement.excluded.updated_at,

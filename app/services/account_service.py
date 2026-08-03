@@ -11,7 +11,7 @@ from app.common.exceptions import (
     ResourceConflictError,
     ResourceNotFoundError,
 )
-from app.enums.account_enums import AccountStatus
+from app.enums.account_enums import AccountRiskState, AccountStatus
 from app.models.account import Account
 from app.repositories.account_repository import AccountRepository
 from app.schemas.account_schema import AccountCreate
@@ -62,6 +62,7 @@ class AccountService:
             user_id=request.user_id,
             account_name=request.account_name,
             account_type=request.account_type.value,
+            option_trading_enabled=request.option_trading_enabled,
 
             initial_cash=request.initial_cash,
             cash_balance=request.initial_cash,
@@ -72,6 +73,13 @@ class AccountService:
 
             used_margin=0,
             frozen_margin=0,
+            option_used_margin=0,
+            option_realtime_required_margin=0,
+            long_option_market_value=0,
+            short_option_market_value=0,
+            net_option_market_value=0,
+            risk_available_cash=request.initial_cash,
+            risk_state=AccountRiskState.NORMAL.value,
 
             realized_pnl=0,
             unrealized_pnl=0,

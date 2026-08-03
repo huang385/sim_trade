@@ -96,7 +96,8 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            assert revision == "20260729_0008"
+            # 认证迁移之后已经追加统一期货/期权账户的三段正式迁移。
+            assert revision == "20260730_0011"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -113,6 +114,74 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
                 "('account', 'app_user', 'auth_refresh_session')"
             ).fetchone()[0]
             assert remaining_core_tables == 0
+
+
+def test_option_migrations_enforce_underlying_type_and_rule_scope():
+    """数据库自身拒绝错误标的类型，并对NULL范围规则执行真正唯一约束。"""
+
+    with _temporary_database() as database_name:
+        _run_alembic(database_name, "upgrade", "head")
+        now = datetime.now(timezone.utc)
+        insert_instrument = (
+            "INSERT INTO instrument ("
+            "order_book_id, symbol, exchange_id, market_type, "
+            "instrument_type, underlying_instrument_id, option_type, "
+            "strike_price, contract_multiplier, price_tick, min_volume, "
+            "max_volume, expire_date, is_active, is_tradeable, data_source, "
+            "created_at, updated_at"
+            ") VALUES ("
+            "%s, %s, %s, 'FUTURES', %s, %s, %s, %s, 10, 1, 1, 100, "
+            "'2026-09-30', true, %s, 'TEST', %s, %s"
+            ") RETURNING id"
+        )
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            futures_id = db.execute(
+                insert_instrument,
+                (
+                    "AG2609",
+                    "AG2609",
+                    "SHFE",
+                    "FUTURES",
+                    None,
+                    None,
+                    None,
+                    True,
+                    now,
+                    now,
+                ),
+            ).fetchone()[0]
+            db.commit()
+
+        with (
+            psycopg.connect(_admin_dsn(database=database_name)) as db,
+            pytest.raises(psycopg.errors.RaiseException),
+        ):
+            db.execute(
+                insert_instrument,
+                (
+                    "IO2609-C-4000",
+                    "IO2609-C-4000",
+                    "CFFEX",
+                    "INDEX_OPTION",
+                    futures_id,
+                    "CALL",
+                    4000,
+                    True,
+                    now,
+                    now,
+                ),
+            )
+
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            nulls_not_distinct = db.execute(
+                "SELECT bool_and(i.indnullsnotdistinct) "
+                "FROM pg_index i "
+                "JOIN pg_class c ON c.oid = i.indexrelid "
+                "WHERE c.relname IN "
+                "('uq_option_margin_rule_scope_version', "
+                "'uq_fee_rule_item_scope_version')"
+            ).fetchone()[0]
+            assert nulls_not_distinct is True
 
 
 def test_existing_accounts_are_safely_backfilled_before_foreign_key():
