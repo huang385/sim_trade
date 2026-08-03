@@ -1,12 +1,14 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import delete, select
 
 from app.core.database import SessionLocal
+from app.core.redis_client import redis_client
+from app.infrastructure.market_data.market_tick_store import MarketTickStore
+from app.infrastructure.redis_keys import market_latest_key
 from app.matching.models import MatchResult
 from app.models.account import Account
 from app.models.fee_rule_item import FeeRuleItem
@@ -14,7 +16,14 @@ from app.models.instrument import Instrument
 from app.models.option_margin_rule import OptionMarginRule
 from app.models.position import Position
 from app.models.trade import Trade
+from app.schemas.market_tick_schema import MarketTick
 from app.services.option_market_price_service import OptionMarginMarketPrices
+from app.services.option_order_margin_adjustment_service import (
+    OptionOrderMarginAdjustmentService,
+)
+from app.services.pnl_snapshot_persistence_service import (
+    PnlSnapshotPersistenceService,
+)
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
@@ -40,20 +49,11 @@ class _FixedOptionPrices:
         )
 
 
-class _SuccessfulFinalMarginCheck:
-    @staticmethod
-    def ensure_locked(_db, **kwargs):
-        return SimpleNamespace(
-            action="SUFFICIENT",
-            order_id=kwargs["order"].order_id,
-        )
-
-
 def _settle(order_id: str, event_id: str, price: str, volume: int):
     with SessionLocal() as db:
-        return TradeSettlementService(
-            option_order_margin_service=_SuccessfulFinalMarginCheck()
-        ).settle(
+        # 不注入保证金校验替身：商品期权卖出开仓必须实际读取Redis中的
+        # 期权和标的行情，并执行成交前最终保证金校验。
+        return TradeSettlementService().settle(
             db,
             SettlementCommand(
                 order_id=order_id,
@@ -71,6 +71,29 @@ def _settle(order_id: str, event_id: str, price: str, volume: int):
                 ),
             ),
         )
+
+
+def _put_live_tick(exchange_id: str, symbol: str, price: str) -> None:
+    now = datetime.now(timezone.utc)
+    tick = MarketTick(
+        source_event_id=f"IT-TICK-{uuid4().hex}",
+        ingest_type="LIVE_CALLBACK",
+        order_book_id=symbol,
+        exchange_id=exchange_id,
+        symbol=symbol,
+        trading_day=now.date(),
+        event_time=now,
+        local_recv_time=now,
+        sequence_id=1,
+        last_price=Decimal(price),
+        cumulative_volume=1,
+        bid_volume_1=0,
+        ask_volume_1=0,
+    )
+    redis_client.hset(
+        market_latest_key(exchange_id, symbol),
+        mapping=MarketTickStore.tick_to_mapping(tick),
+    )
 
 
 def test_commodity_option_four_directions_use_real_postgres(
@@ -162,6 +185,16 @@ def test_commodity_option_four_directions_use_real_postgres(
         order_service = make_order_service(integration_context)
         order_service.option_permission_service = _AllowOptionTrading()
         order_service.option_market_price_service = _FixedOptionPrices()
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "3500",
+        )
+        _put_live_tick(
+            integration_context.exchange_id,
+            option_symbol,
+            "100",
+        )
 
         def create(direction: str, offset_flag: str, price: str):
             with SessionLocal() as db:
@@ -196,6 +229,57 @@ def test_commodity_option_four_directions_use_real_postgres(
         assert _settle(
             buy_close.order_id, "OPT-BUY-CLOSE", "90", 2
         ).action == "SETTLED"
+
+        # 真实制造活动卖出开仓订单保证金缺口，验证PG风险来源、最终成交
+        # 拦截以及行情恢复后的完整账户估值恢复，不注入任何保证金替身。
+        deficit_order = create("SELL", "OPEN", "100")
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "1000000",
+        )
+        adjustment_service = OptionOrderMarginAdjustmentService(
+            market_tick_store=MarketTickStore(redis_client)
+        )
+        with SessionLocal() as db:
+            deficit = adjustment_service.adjust(
+                db,
+                order_id=deficit_order.order_id,
+            )
+        assert deficit.action == "MARGIN_DEFICIT"
+        assert _settle(
+            deficit_order.order_id,
+            "OPT-DEFICIT-BLOCKED",
+            "100",
+            2,
+        ).action == "RISK_BLOCKED"
+
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "3500",
+        )
+        with SessionLocal() as db:
+            recovered_order = adjustment_service.adjust(
+                db,
+                order_id=deficit_order.order_id,
+            )
+        assert recovered_order.action == "RECOVERED"
+        with SessionLocal() as db:
+            account = db.scalar(
+                select(Account)
+                .where(
+                    Account.account_id == integration_context.account_id
+                )
+                .with_for_update()
+            )
+            complete = PnlSnapshotPersistenceService(
+                session_factory=SessionLocal,
+                pnl_store=None,
+                market_tick_store=MarketTickStore(redis_client),
+            )._recalculate_locked_account(db, account)
+            db.commit()
+        assert complete is True
 
         with SessionLocal() as db:
             trades = db.scalars(
@@ -232,6 +316,7 @@ def test_commodity_option_four_directions_use_real_postgres(
             )
             assert account.long_option_market_value == Decimal("0.000000")
             assert account.short_option_market_value == Decimal("0.000000")
+            assert account.risk_state == "NORMAL"
     finally:
         # 订单、成交、持仓由通用integration_context夹具清理；这里先删除
         # 只属于本测试的规则与期权合约，避免污染用户现有参考数据。
@@ -258,3 +343,13 @@ def test_commodity_option_four_directions_use_real_postgres(
                     delete(Instrument).where(Instrument.id == option_id)
                 )
             db.commit()
+        redis_client.delete(
+            market_latest_key(
+                integration_context.exchange_id,
+                option_symbol,
+            ),
+            market_latest_key(
+                integration_context.exchange_id,
+                integration_context.symbol,
+            ),
+        )

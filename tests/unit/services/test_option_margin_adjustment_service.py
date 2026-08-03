@@ -85,6 +85,9 @@ def make_position(**overrides):
         "total_volume": 2,
         "used_margin": Decimal("1000"),
         "realtime_required_margin": Decimal("1000"),
+        "multiplier_snapshot": Decimal("10"),
+        "margin_rule_id": 1,
+        "margin_rule_version": "V1",
         "margin_rule_snapshot": {
             "rule_id": "1",
             "rule_version": "V1",
@@ -113,11 +116,13 @@ def make_details():
             remaining_volume=1,
             remaining_margin=Decimal("500"),
             realtime_required_margin=Decimal("500"),
+            multiplier_snapshot=Decimal("10"),
         ),
         SimpleNamespace(
             remaining_volume=1,
             remaining_margin=Decimal("500"),
             realtime_required_margin=Decimal("500"),
+            multiplier_snapshot=Decimal("10"),
         ),
     ]
 
@@ -126,6 +131,15 @@ def build_service(*, account=None, position=None, details=None, latest=None):
     account = account or make_account()
     position = position or make_position()
     details = details if details is not None else make_details()
+    for detail in details:
+        if not hasattr(detail, "multiplier_snapshot"):
+            detail.multiplier_snapshot = position.multiplier_snapshot
+        if not hasattr(detail, "margin_rule_id"):
+            detail.margin_rule_id = position.margin_rule_id
+        if not hasattr(detail, "margin_rule_version"):
+            detail.margin_rule_version = position.margin_rule_version
+        if not hasattr(detail, "margin_rule_snapshot"):
+            detail.margin_rule_snapshot = position.margin_rule_snapshot
     option = SimpleNamespace(
         id=1,
         order_book_id="AGOPT",
@@ -135,7 +149,8 @@ def build_service(*, account=None, position=None, details=None, latest=None):
         underlying_instrument_id=2,
         option_type="CALL",
         strike_price=Decimal("110"),
-        contract_multiplier=Decimal("10"),
+        # 当前参考数据乘数故意与不可变持仓快照不同。
+        contract_multiplier=Decimal("99"),
     )
     underlying = SimpleNamespace(
         id=2,
@@ -189,6 +204,15 @@ def test_adjust_recalculates_risk_instead_of_using_stale_risk_cash():
     ]
     db.commit.assert_called_once_with()
     db.rollback.assert_not_called()
+
+
+def test_local_position_success_cannot_clear_valuation_unavailable():
+    account = make_account(risk_state="VALUATION_UNAVAILABLE")
+    service, account, _position, _details = build_service(account=account)
+
+    service.adjust(Mock(), account_id="A1", position_id="P1")
+
+    assert account.risk_state == "VALUATION_UNAVAILABLE"
 
 
 def test_adjust_releases_margin_immediately_when_requirement_decreases():

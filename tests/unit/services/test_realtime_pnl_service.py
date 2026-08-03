@@ -641,6 +641,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
         daily_commission=Decimal("0"),
         option_used_margin=Decimal(booked_margin),
         option_realtime_required_margin=Decimal(booked_margin),
+        risk_state="MARGIN_DEFICIT",
     )
     cycle = ActivePositionCycleSnapshot(
         by_contract=MappingProxyType(
@@ -727,6 +728,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
         == expected_risk_available
     )
     assert store.accounts["A001"]["daily_position_pnl"] == "300.000000"
+    assert store.accounts["A001"]["risk_state"] == "MARGIN_DEFICIT"
     assert result.accounts_updated == 1
     assert result.margin_adjustment_positions == (
         ("A001", "PS", ("SHFE", "AGOPT")),

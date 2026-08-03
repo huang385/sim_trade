@@ -22,6 +22,7 @@ from app.enums.order_enums import (
     PositionDetailStatus,
     PositionDirection,
 )
+from app.enums.account_enums import AccountRiskState
 from app.enums.option_enums import InstrumentType
 from app.matching.models import MatchResult
 from app.models.position import Position
@@ -421,6 +422,7 @@ class TradeSettlementService:
                 order=order,
                 account=account,
                 instrument=instrument,
+                final_check=True,
             )
             if margin_check.action in {
                 "RISK_BLOCKED",
@@ -518,7 +520,7 @@ class TradeSettlementService:
             turnover = quantize_money(
                 fill_price
                 * Decimal(fill_volume)
-                * Decimal(instrument.contract_multiplier)
+                * Decimal(order.commission_contract_multiplier)
             )
             # Trade.commission 只记录实际手续费，不能写入预计冻结手续费。
             trade = Trade(
@@ -563,6 +565,8 @@ class TradeSettlementService:
                 if new_remaining == 0
                 else OrderStatus.PARTIALLY_FILLED.value
             )
+            if new_remaining == 0:
+                order.margin_risk_state = AccountRiskState.NORMAL.value
             order.frozen_margin = quantize_money(
                 order.frozen_margin - allocated_margin
             )
@@ -640,7 +644,7 @@ class TradeSettlementService:
                     realtime_required_margin=Decimal("0.000000"),
                     option_market_value=Decimal("0.000000"),
                     multiplier_snapshot=Decimal(
-                        instrument.contract_multiplier
+                        order.commission_contract_multiplier
                     ),
                     realized_pnl=Decimal("0.000000"),
                     unrealized_pnl=Decimal("0.000000"),
@@ -676,9 +680,13 @@ class TradeSettlementService:
             position.initial_occupied_margin = quantize_money(
                 position.initial_occupied_margin + allocated_margin
             )
-            position.multiplier_snapshot = Decimal(
-                instrument.contract_multiplier
-            )
+            if Decimal(position.multiplier_snapshot) != Decimal(
+                order.commission_contract_multiplier
+            ):
+                raise DataAccessError(
+                    "期货订单与既有持仓乘数快照不一致",
+                    error_code="POSITION_MULTIPLIER_INCONSISTENT",
+                )
             position.trading_day = order.trading_day
             position.updated_at = now
 
@@ -703,7 +711,7 @@ class TradeSettlementService:
                 initial_occupied_margin=allocated_margin,
                 realtime_required_margin=Decimal("0.000000"),
                 multiplier_snapshot=Decimal(
-                    instrument.contract_multiplier
+                    order.commission_contract_multiplier
                 ),
                 open_commission=actual_commission,
                 status=PositionDetailStatus.OPEN.value,

@@ -84,6 +84,11 @@ class Order(Base):
             "margin_option_price IS NULL OR margin_option_price >= 0",
             name="ck_order_margin_option_price_nonnegative",
         ),
+        CheckConstraint(
+            "margin_risk_state IN "
+            "('NORMAL', 'MARGIN_DEFICIT', 'VALUATION_UNAVAILABLE')",
+            name="ck_order_margin_risk_state_valid",
+        ),
     )
 
     # 数据库内部自增主键
@@ -297,6 +302,15 @@ class Order(Base):
     margin_calculation_version: Mapped[str | None] = mapped_column(
         String(64),
         nullable=True,
+    )
+    # 活动期权卖出开仓订单自身的保证金风险事实。该状态持久化在
+    # PostgreSQL，不能只依赖 Worker 内存或 Redis 派生索引，否则账户
+    # 全量估值可能把仍未解除的订单保证金缺口错误恢复为 NORMAL。
+    margin_risk_state: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="NORMAL",
+        server_default="NORMAL",
     )
 
     # 拒绝原因代码；ACCEPTED订单为空

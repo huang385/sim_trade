@@ -87,10 +87,16 @@ class OptionTradeSettlementStrategy:
             commission_parameter=order.commission_parameter,
             contract_multiplier=order.commission_contract_multiplier,
         )
+        order_multiplier = Decimal(order.commission_contract_multiplier)
+        if order_multiplier <= 0:
+            raise DataAccessError(
+                "期权订单合约乘数快照不合法",
+                error_code="OPTION_ORDER_MULTIPLIER_INVALID",
+            )
         premium = quantize_money(
             fill_price
             * Decimal(fill_volume)
-            * Decimal(instrument.contract_multiplier)
+            * order_multiplier
         )
         premium_cash_flow = (
             -premium
@@ -152,6 +158,8 @@ class OptionTradeSettlementStrategy:
             if new_remaining == 0
             else OrderStatus.PARTIALLY_FILLED.value
         )
+        if new_remaining == 0:
+            order.margin_risk_state = AccountRiskState.NORMAL.value
         order.frozen_margin = quantize_money(
             order.frozen_margin - allocated_margin
         )
@@ -261,12 +269,22 @@ class OptionTradeSettlementStrategy:
                 daily_position_pnl=Decimal("0"),
                 daily_close_pnl=Decimal("0"),
                 trading_day=order.trading_day,
-                multiplier_snapshot=Decimal(instrument.contract_multiplier),
+                multiplier_snapshot=order_multiplier,
                 created_at=now,
                 updated_at=now,
             )
             position_repository.add(db, position)
         old_volume = position.total_volume
+        if old_volume > 0 and (
+            position.margin_rule_id != order.margin_rule_id
+            or position.margin_rule_version != order.margin_rule_version
+            or (position.margin_rule_snapshot or {})
+            != (order.margin_rule_snapshot or {})
+        ):
+            raise DataAccessError(
+                "期权订单与既有持仓保证金规则快照不一致",
+                error_code="OPTION_POSITION_RULE_SNAPSHOT_INCONSISTENT",
+            )
         new_volume = old_volume + fill_volume
         position.average_open_price = quantize_money(
             (
@@ -300,9 +318,11 @@ class OptionTradeSettlementStrategy:
         position.margin_underlying_price = order.margin_underlying_price
         position.margin_option_price = fill_price
         position.margin_calculated_at = now
-        position.multiplier_snapshot = Decimal(
-            instrument.contract_multiplier
-        )
+        if Decimal(position.multiplier_snapshot) != order_multiplier:
+            raise DataAccessError(
+                "期权订单与既有持仓乘数快照不一致",
+                error_code="OPTION_POSITION_MULTIPLIER_INCONSISTENT",
+            )
         position.updated_at = now
 
         detail = PositionDetail(
@@ -332,7 +352,7 @@ class OptionTradeSettlementStrategy:
             margin_underlying_price=order.margin_underlying_price,
             margin_option_price=fill_price,
             margin_calculated_at=now,
-            multiplier_snapshot=Decimal(instrument.contract_multiplier),
+            multiplier_snapshot=order_multiplier,
             open_commission=actual_commission,
             status=PositionDetailStatus.OPEN.value,
             created_at=now,

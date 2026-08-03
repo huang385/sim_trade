@@ -57,6 +57,7 @@ def make_account(account_id="A001", frozen_margin="0"):
         frozen_commission=Decimal("0"),
         unrealized_pnl=Decimal("0"),
         daily_position_pnl=Decimal("0"),
+        multiplier_snapshot=Decimal("10"),
         daily_close_pnl=Decimal("0"),
         daily_commission=Decimal("0"),
     )
@@ -167,14 +168,16 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
         direction="LONG",
         unrealized_pnl=Decimal("0"),
         daily_position_pnl=Decimal("0"),
+        multiplier_snapshot=Decimal("10"),
     )
     detail = SimpleNamespace(
         position_detail_id="PD1",
         open_price=Decimal("3200"),
         pnl_base_price=Decimal("3200"),
         remaining_volume=1,
+        multiplier_snapshot=Decimal("10"),
     )
-    instrument = SimpleNamespace(contract_multiplier=Decimal("10"))
+    instrument = SimpleNamespace(contract_multiplier=Decimal("99"))
     positions.contract_rows = [
         (position, detail, instrument, account)
     ]
@@ -193,6 +196,9 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
 
     assert positions.calls == 1
     assert positions.contract_calls == 2
+    assert added.get_by_contract("DCE", "JD2609")[0].contract_multiplier == Decimal(
+        "10"
+    )
     assert len(added.get_by_contract("DCE", "JD2609")) == 1
     assert removed.get_by_contract("DCE", "JD2609") == ()
     assert removed.get_by_account("A001") == ()

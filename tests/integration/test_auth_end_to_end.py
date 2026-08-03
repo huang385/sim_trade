@@ -521,6 +521,7 @@ def test_login_account_authorization_refresh_and_logout(
                 average_open_price=Decimal("3500"),
                 position_cost=Decimal("35000"),
                 used_margin=Decimal("4200"),
+                multiplier_snapshot=Decimal("10"),
                 realized_pnl=Decimal("0"),
                 unrealized_pnl=Decimal("0"),
                 daily_position_pnl=Decimal("0"),

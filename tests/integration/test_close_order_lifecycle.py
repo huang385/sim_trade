@@ -133,6 +133,7 @@ def add_closed_history_detail(context):
                 frozen_volume=0,
                 open_margin=Decimal("4200"),
                 remaining_margin=Decimal("0"),
+                multiplier_snapshot=position.multiplier_snapshot,
                 open_commission=Decimal("3"),
                 status="CLOSED",
             )

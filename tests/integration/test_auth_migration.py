@@ -98,7 +98,7 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
             # 认证迁移之后已经追加统一期货/期权账户的三段正式迁移。
-            assert revision == "20260803_0013"
+            assert revision == "20260803_0014"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -365,3 +365,181 @@ def test_untraceable_historical_detail_stops_multiplier_migration():
 
         with pytest.raises(subprocess.CalledProcessError):
             _run_alembic(database_name, "upgrade", "head")
+
+
+def test_0014_repairs_option_account_aggregates_without_new_market_tick():
+    """历史期权账户升级后立即具备正确聚合资金，不依赖未来行情修复。"""
+
+    with _temporary_database() as database_name:
+        _run_alembic(database_name, "upgrade", "20260727_0007")
+        now = datetime.now(timezone.utc)
+        account_columns = (
+            "account_id, user_id, account_name, account_type, "
+            "initial_cash, cash_balance, available_cash, frozen_cash, "
+            "equity, used_margin, frozen_margin, realized_pnl, "
+            "unrealized_pnl, daily_position_pnl, daily_close_pnl, "
+            "daily_commission, daily_pnl, used_commission, "
+            "frozen_commission, risk_ratio, status, trading_day, "
+            "created_at, updated_at"
+        )
+        values = (
+            "%s, %s, %s, 'FUTURES', 100000, 100000, %s, 0, "
+            "100000, %s, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "
+            "'NORMAL', CURRENT_DATE, %s, %s"
+        )
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            db.execute(
+                f"INSERT INTO account ({account_columns}) VALUES ({values})",
+                (
+                    "A-OPTION-REPAIR",
+                    "LEGACY_OPTION_OWNER",
+                    "历史期权账户",
+                    Decimal("95000"),
+                    Decimal("5000"),
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                f"INSERT INTO account ({account_columns}) VALUES ({values})",
+                (
+                    "A-FUTURES-ONLY",
+                    "LEGACY_FUTURES_OWNER",
+                    "纯期货账户",
+                    Decimal("50000"),
+                    Decimal("0"),
+                    now,
+                    now,
+                ),
+            )
+            db.commit()
+
+        _run_alembic(database_name, "upgrade", "20260803_0013")
+        position_sql = (
+            "INSERT INTO position ("
+            "position_id, account_id, order_book_id, exchange_id, symbol, "
+            "direction, total_volume, today_volume, yesterday_volume, "
+            "frozen_volume, available_volume, average_open_price, "
+            "position_cost, used_margin, initial_occupied_margin, "
+            "realtime_required_margin, option_market_value, "
+            "multiplier_snapshot, realized_pnl, unrealized_pnl, "
+            "daily_position_pnl, daily_close_pnl, trading_day, "
+            "instrument_type, created_at, updated_at"
+            ") VALUES ("
+            "%s, 'A-OPTION-REPAIR', %s, 'DCE', %s, %s, %s, %s, 0, "
+            "0, %s, 100, %s, %s, %s, %s, %s, 10, 0, 0, 0, 0, "
+            "CURRENT_DATE, 'FUTURES_OPTION', %s, %s)"
+        )
+        detail_sql = (
+            "INSERT INTO position_detail ("
+            "position_detail_id, position_id, account_id, open_trade_id, "
+            "order_book_id, exchange_id, symbol, direction, "
+            "open_trading_day, open_price, pnl_base_price, "
+            "original_volume, remaining_volume, frozen_volume, "
+            "open_margin, remaining_margin, initial_occupied_margin, "
+            "realtime_required_margin, multiplier_snapshot, "
+            "open_commission, status, instrument_type, created_at, updated_at"
+            ") VALUES ("
+            "%s, %s, 'A-OPTION-REPAIR', %s, %s, 'DCE', %s, %s, "
+            "CURRENT_DATE, 100, 100, %s, %s, 0, %s, %s, %s, %s, "
+            "10, 0, 'OPEN', 'FUTURES_OPTION', %s, %s)"
+        )
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            rows = (
+                (
+                    "P-LONG",
+                    "OPT-LONG",
+                    "LONG",
+                    2,
+                    Decimal("2000"),
+                    Decimal("0"),
+                    Decimal("0"),
+                ),
+                (
+                    "P-SHORT",
+                    "OPT-SHORT",
+                    "SHORT",
+                    3,
+                    Decimal("3000"),
+                    Decimal("5000"),
+                    Decimal("6000"),
+                ),
+            )
+            for position_id, code, direction, volume, value, used, realtime in rows:
+                db.execute(
+                    position_sql,
+                    (
+                        position_id,
+                        code,
+                        code,
+                        direction,
+                        volume,
+                        volume,
+                        volume,
+                        value,
+                        used,
+                        used,
+                        realtime,
+                        value,
+                        now,
+                        now,
+                    ),
+                )
+                db.execute(
+                    detail_sql,
+                    (
+                        f"D-{position_id}",
+                        position_id,
+                        f"T-{position_id}",
+                        code,
+                        code,
+                        direction,
+                        volume,
+                        volume,
+                        used,
+                        used,
+                        used,
+                        realtime,
+                        now,
+                        now,
+                    ),
+                )
+            # 制造历史聚合错误，0014必须仅根据PG持仓事实修复。
+            db.execute(
+                "UPDATE account SET long_option_market_value = 999, "
+                "short_option_market_value = 888, "
+                "net_option_market_value = 111, "
+                "option_used_margin = 5000, "
+                "option_realtime_required_margin = 777, "
+                "equity = 1, available_cash = 2, risk_available_cash = 3 "
+                "WHERE account_id = 'A-OPTION-REPAIR'"
+            )
+            db.commit()
+
+        _run_alembic(database_name, "upgrade", "head")
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            repaired = db.execute(
+                "SELECT long_option_market_value, short_option_market_value, "
+                "net_option_market_value, option_realtime_required_margin, "
+                "equity, available_cash, risk_available_cash, risk_state "
+                "FROM account WHERE account_id = 'A-OPTION-REPAIR'"
+            ).fetchone()
+            futures_account = db.execute(
+                "SELECT available_cash, equity FROM account "
+                "WHERE account_id = 'A-FUTURES-ONLY'"
+            ).fetchone()
+
+        assert repaired == (
+            Decimal("2000.000000"),
+            Decimal("3000.000000"),
+            Decimal("-1000.000000"),
+            Decimal("6000.000000"),
+            Decimal("99000.000000"),
+            Decimal("92000.000000"),
+            Decimal("91000.000000"),
+            "NORMAL",
+        )
+        assert futures_account == (
+            Decimal("50000.000000"),
+            Decimal("100000.000000"),
+        )

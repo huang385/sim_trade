@@ -16,6 +16,7 @@ from app.repositories.order_repository import OrderRepository
 from app.services.commodity_option_margin_calculator import (
     CommodityFuturesOptionMarginCalculator,
 )
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
 )
@@ -31,6 +32,8 @@ class OptionOrderMarginAdjustmentResult:
     required_margin: Decimal = Decimal("0.000000")
     added_margin: Decimal = Decimal("0.000000")
     account_id: str = ""
+    margin_risk_state: str = AccountRiskState.NORMAL.value
+    frozen_margin: Decimal = Decimal("0.000000")
 
 
 class OptionOrderMarginAdjustmentService:
@@ -176,7 +179,15 @@ class OptionOrderMarginAdjustmentService:
         )
         return result
 
-    def ensure_locked(self, db: Session, *, order, account, instrument):
+    def ensure_locked(
+        self,
+        db: Session,
+        *,
+        order,
+        account,
+        instrument,
+        final_check: bool = False,
+    ):
         """
         在调用方已经锁定Order和Account后执行最终检查，不自行提交事务。
         """
@@ -187,12 +198,27 @@ class OptionOrderMarginAdjustmentService:
                 getattr(order, "order_id", ""),
                 account_id=getattr(order, "account_id", ""),
             )
-        if (
-            getattr(account, "risk_state", AccountRiskState.NORMAL.value)
+        previous_order_risk = getattr(
+            order,
+            "margin_risk_state",
+            AccountRiskState.NORMAL.value,
+        )
+        if final_check and (
+            getattr(
+                account,
+                "risk_state",
+                AccountRiskState.NORMAL.value,
+            )
             != AccountRiskState.NORMAL.value
         ):
+            # 成交事务不负责恢复账户风险，也不能静默清除订单风险来源。
+            # 订单重估Worker会继续尝试补冻并可靠产生Account Dirty。
             return OptionOrderMarginAdjustmentResult(
-                "RISK_BLOCKED", order.order_id, account_id=order.account_id
+                "RISK_BLOCKED",
+                order.order_id,
+                account_id=order.account_id,
+                margin_risk_state=previous_order_risk,
+                frozen_margin=quantize_money(order.frozen_margin),
             )
         try:
             result = self._calculate_required(
@@ -200,18 +226,32 @@ class OptionOrderMarginAdjustmentService:
                 order=order,
                 instrument=instrument,
             )
-        except DataAccessError as exc:
-            if exc.error_code == "OPTION_MARGIN_PRICE_UNAVAILABLE":
-                # 活动订单行情缺失只阻止该订单本轮补冻和成交。账户级
-                # VALUATION_UNAVAILABLE由持仓全量估值链路维护；若在这里
-                # 覆盖账户状态，行情恢复后会因为前置风险拦截而无法再次
-                # 进入本服务，形成无法自愈的永久阻塞。
-                return OptionOrderMarginAdjustmentResult(
-                    "VALUATION_UNAVAILABLE",
-                    order.order_id,
-                    account_id=order.account_id,
+        except DataAccessError:
+            # 行情、规则或乘数任何一项不完整，都必须成为PostgreSQL中的
+            # 可恢复风险事实。下一轮行情仍可重新进入本服务自愈，不能因
+            # Account已经非NORMAL就在计算前永久拦截。
+            order.margin_risk_state = (
+                AccountRiskState.VALUATION_UNAVAILABLE.value
+            )
+            order.updated_at = utc_now()
+            account.risk_state = (
+                AccountRiskStateService.preserve_for_local_update(
+                    getattr(
+                        account,
+                        "risk_state",
+                        AccountRiskState.NORMAL.value,
+                    ),
+                    valuation_unavailable=True,
                 )
-            raise
+            )
+            account.updated_at = utc_now()
+            return OptionOrderMarginAdjustmentResult(
+                "VALUATION_UNAVAILABLE",
+                order.order_id,
+                account_id=order.account_id,
+                margin_risk_state=order.margin_risk_state,
+                frozen_margin=quantize_money(order.frozen_margin),
+            )
 
         required = quantize_money(result.total_margin)
         current = quantize_money(order.frozen_margin)
@@ -221,11 +261,19 @@ class OptionOrderMarginAdjustmentService:
         order.margin_calculation_version = result.calculation_version
         order.updated_at = utc_now()
         if required <= current:
+            order.margin_risk_state = AccountRiskState.NORMAL.value
             return OptionOrderMarginAdjustmentResult(
-                "SUFFICIENT",
+                (
+                    "RECOVERED"
+                    if previous_order_risk
+                    != AccountRiskState.NORMAL.value
+                    else "SUFFICIENT"
+                ),
                 order.order_id,
                 required,
                 account_id=order.account_id,
+                margin_risk_state=order.margin_risk_state,
+                frozen_margin=quantize_money(order.frozen_margin),
             )
 
         delta = quantize_money(required - current)
@@ -233,13 +281,25 @@ class OptionOrderMarginAdjustmentService:
             Decimal(account.available_cash) < delta
             or Decimal(account.risk_available_cash) < delta
         ):
-            account.risk_state = AccountRiskState.MARGIN_DEFICIT.value
+            order.margin_risk_state = AccountRiskState.MARGIN_DEFICIT.value
+            account.risk_state = (
+                AccountRiskStateService.preserve_for_local_update(
+                    getattr(
+                        account,
+                        "risk_state",
+                        AccountRiskState.NORMAL.value,
+                    ),
+                    margin_deficit=True,
+                )
+            )
             account.updated_at = utc_now()
             return OptionOrderMarginAdjustmentResult(
                 "MARGIN_DEFICIT",
                 order.order_id,
                 required,
                 account_id=order.account_id,
+                margin_risk_state=order.margin_risk_state,
+                frozen_margin=quantize_money(order.frozen_margin),
             )
 
         order.frozen_margin = required
@@ -248,9 +308,16 @@ class OptionOrderMarginAdjustmentService:
         account.risk_available_cash = quantize_money(
             account.risk_available_cash - delta
         )
+        order.margin_risk_state = AccountRiskState.NORMAL.value
         account.updated_at = utc_now()
         return OptionOrderMarginAdjustmentResult(
-            "ADDED", order.order_id, required, delta, order.account_id
+            "ADDED",
+            order.order_id,
+            required,
+            delta,
+            order.account_id,
+            order.margin_risk_state,
+            quantize_money(order.frozen_margin),
         )
 
     def adjust(self, db: Session, *, order_id: str):

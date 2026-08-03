@@ -140,6 +140,7 @@ def seed_close(
                 average_open_price=Decimal("3500"),
                 position_cost=Decimal(position_volume) * Decimal("35000"),
                 used_margin=open_margin,
+                multiplier_snapshot=Decimal("10"),
                 realized_pnl=Decimal("0"),
                 unrealized_pnl=Decimal("0"),
                 trading_day=TRADING_DAY,
@@ -164,6 +165,7 @@ def seed_close(
                 frozen_volume=order_volume,
                 open_margin=open_margin,
                 remaining_margin=open_margin,
+                multiplier_snapshot=Decimal("10"),
                 open_commission=Decimal("30"),
                 status="OPEN",
                 created_at=NOW,
@@ -216,6 +218,27 @@ def command(event_id, price, volume):
             engine_version="1.0",
         ),
     )
+
+
+def test_close_uses_detail_multiplier_snapshot_after_instrument_changes():
+    session_factory = factory()
+    seed_close(session_factory)
+    with session_factory() as db:
+        instrument = db.scalar(select(Instrument))
+        instrument.contract_multiplier = Decimal("99")
+        db.commit()
+
+    with session_factory() as db:
+        result = TradeSettlementService().settle(
+            db,
+            command("TICK-SNAPSHOT", "3522", 3),
+        )
+        assert result.action == "SETTLED"
+
+    with session_factory() as db:
+        trade = db.scalar(select(Trade))
+        assert trade.realized_pnl == Decimal("660.000000")
+        assert trade.turnover == Decimal("105660.000000")
 
 
 def configure_option_close(
@@ -410,6 +433,7 @@ def seed_cross_day_close(session_factory):
                 frozen_volume=5,
                 open_margin=Decimal("21000"),
                 remaining_margin=Decimal("21000"),
+                multiplier_snapshot=Decimal("10"),
                 open_commission=Decimal("15"),
                 status="OPEN",
                 created_at=NOW,
@@ -431,6 +455,7 @@ def seed_cross_day_close(session_factory):
                 frozen_volume=5,
                 open_margin=Decimal("21000"),
                 remaining_margin=Decimal("21000"),
+                multiplier_snapshot=Decimal("10"),
                 open_commission=Decimal("15"),
                 status="OPEN",
                 created_at=NOW,
@@ -556,6 +581,7 @@ def split_tail_position_into_two_details(session_factory):
                     frozen_volume=1,
                     open_margin=Decimal("4200"),
                     remaining_margin=Decimal("4200"),
+                    multiplier_snapshot=Decimal("10"),
                     open_commission=Decimal("15"),
                     status="OPEN",
                     created_at=NOW,
@@ -742,6 +768,7 @@ def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():
                     frozen_volume=2,
                     open_margin=Decimal("8400"),
                     remaining_margin=Decimal("8400"),
+                    multiplier_snapshot=Decimal("10"),
                     open_commission=Decimal("6"),
                     status="OPEN",
                     created_at=NOW,
@@ -763,6 +790,7 @@ def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():
                     frozen_volume=2,
                     open_margin=Decimal("33600"),
                     remaining_margin=Decimal("33600"),
+                    multiplier_snapshot=Decimal("10"),
                     open_commission=Decimal("24"),
                     status="OPEN",
                     created_at=NOW,

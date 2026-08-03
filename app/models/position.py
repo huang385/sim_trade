@@ -169,7 +169,7 @@ class Position(Base):
         DateTime(timezone=True), nullable=True
     )
     multiplier_snapshot: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), nullable=False, default=Decimal("1")
+        Numeric(24, 6), nullable=False
     )
 
     # 基于原始开仓价累计确认的已实现盈亏

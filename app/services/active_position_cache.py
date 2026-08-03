@@ -218,6 +218,8 @@ class ActivePositionCache:
                     "position": position,
                     "instrument": instrument,
                     "details": [],
+                    "detail_multipliers": [],
+                    "detail_rule_snapshots": [],
                     "underlying": underlying,
                 },
             )
@@ -227,6 +229,16 @@ class ActivePositionCache:
                     open_price=Decimal(detail.open_price),
                     pnl_base_price=Decimal(detail.pnl_base_price),
                     remaining_volume=detail.remaining_volume,
+                )
+            )
+            item["detail_multipliers"].append(
+                Decimal(detail.multiplier_snapshot)
+            )
+            item["detail_rule_snapshots"].append(
+                (
+                    getattr(detail, "margin_rule_id", None),
+                    getattr(detail, "margin_rule_version", None),
+                    getattr(detail, "margin_rule_snapshot", None) or {},
                 )
             )
             accounts[account.account_id] = (
@@ -243,6 +255,25 @@ class ActivePositionCache:
             raw_rule_snapshot = (
                 getattr(position, "margin_rule_snapshot", None) or {}
             )
+            position_multiplier = Decimal(position.multiplier_snapshot)
+            if position_multiplier <= 0 or any(
+                detail_multiplier != position_multiplier
+                for detail_multiplier in item["detail_multipliers"]
+            ):
+                raise ValueError("持仓与明细乘数快照不一致")
+            if getattr(position, "instrument_type", "FUTURES") in {
+                "FUTURES_OPTION",
+                "INDEX_OPTION",
+            } and any(
+                detail_rule
+                != (
+                    getattr(position, "margin_rule_id", None),
+                    getattr(position, "margin_rule_version", None),
+                    raw_rule_snapshot,
+                )
+                for detail_rule in item["detail_rule_snapshots"]
+            ):
+                raise ValueError("期权持仓与明细保证金规则快照不一致")
             snapshot = PositionPnlSnapshot(
                 position_id=position.position_id,
                 account_id=position.account_id,
@@ -250,9 +281,7 @@ class ActivePositionCache:
                 exchange_id=position.exchange_id,
                 symbol=position.symbol,
                 direction=position.direction,
-                contract_multiplier=Decimal(
-                    instrument.contract_multiplier
-                ),
+                contract_multiplier=position_multiplier,
                 persisted_unrealized_pnl=Decimal(
                     position.unrealized_pnl
                 ),

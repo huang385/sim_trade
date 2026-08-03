@@ -89,7 +89,8 @@ def test_option_open_settlement_uses_premium_cash_flow(
     )
     trade_repository = Mock()
     position_repository = Mock()
-    instrument = SimpleNamespace(contract_multiplier=Decimal("15"))
+    # 参考数据已变化，历史订单仍必须使用接单时保存的15倍快照。
+    instrument = SimpleNamespace(contract_multiplier=Decimal("99"))
     command = SimpleNamespace(
         market_event_id="M1",
         market_stream_message_id="1-0",

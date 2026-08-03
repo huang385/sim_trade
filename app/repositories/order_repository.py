@@ -216,6 +216,35 @@ class OrderRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_active_option_sell_open_by_account(
+        db: Session,
+        account_id: str,
+    ) -> Sequence[Order]:
+        """
+        查询账户全部活动商品期权卖出开仓订单。
+
+        调用方已经持有 Account 行锁。这里故意不再取得 Order 行锁：订单
+        调整、成交和撤单统一采用 Order→Account 顺序，如果反向锁定会引入
+        死锁。并发订单事务提交后会再次产生 Account Dirty，完整估值将重试。
+        """
+
+        statement = select(Order).where(
+            Order.account_id == account_id,
+            Order.instrument_type == "FUTURES_OPTION",
+            Order.direction == "SELL",
+            Order.offset_flag == "OPEN",
+            Order.order_type == OrderType.LIMIT.value,
+            Order.status.in_(
+                (
+                    OrderStatus.ACCEPTED.value,
+                    OrderStatus.PARTIALLY_FILLED.value,
+                )
+            ),
+            Order.remaining_volume > 0,
+        )
+        return db.scalars(statement.order_by(Order.id)).all()
+
+    @staticmethod
     def create(
         db: Session,
         *,

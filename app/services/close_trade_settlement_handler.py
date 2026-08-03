@@ -35,6 +35,7 @@ from app.services.fee_calculator import (
 )
 from app.services.margin_release_calculator import MarginReleaseCalculator
 from app.services.account_valuation_calculator import AccountValuationCalculator
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.pnl_calculator import PnlCalculator
 from app.services.realized_pnl_calculator import RealizedPnlCalculator
 
@@ -417,6 +418,16 @@ class CloseTradeSettlementHandler:
             if allocation.remaining_frozen_volume <= 0:
                 continue
             detail = detail_map[allocation.position_detail_id]
+            detail_multiplier = Decimal(detail.multiplier_snapshot)
+            if (
+                detail_multiplier <= 0
+                or detail_multiplier
+                != Decimal(position.multiplier_snapshot)
+            ):
+                raise DataAccessError(
+                    "平仓持仓与明细乘数快照不一致",
+                    error_code="CLOSE_MULTIPLIER_SNAPSHOT_INCONSISTENT",
+                )
             consumed = min(
                 allocation.remaining_frozen_volume,
                 remaining_to_consume,
@@ -442,7 +453,7 @@ class CloseTradeSettlementHandler:
                 open_price=detail.open_price,
                 close_price=fill_price,
                 volume=consumed,
-                contract_multiplier=Decimal(instrument.contract_multiplier),
+                contract_multiplier=detail_multiplier,
             )
             daily_close_pnl = (
                 self.daily_pnl_calculator.calculate_close(
@@ -451,9 +462,7 @@ class CloseTradeSettlementHandler:
                     open_price=detail.open_price,
                     pnl_base_price=detail.pnl_base_price,
                     volume=consumed,
-                    contract_multiplier=Decimal(
-                        instrument.contract_multiplier
-                    ),
+                    contract_multiplier=detail_multiplier,
                 ).daily_close_pnl
             )
             released_frozen_commission = (
@@ -683,9 +692,15 @@ class CloseTradeSettlementHandler:
             )
 
         turnover = quantize_money(
-            fill_price
-            * Decimal(fill_volume)
-            * Decimal(instrument.contract_multiplier)
+            sum(
+                (
+                    fill_price
+                    * Decimal(item.volume)
+                    * Decimal(item.detail.multiplier_snapshot)
+                    for item in consumptions
+                ),
+                Decimal("0"),
+            )
         )
         trade = Trade(
             trade_id=trade_id,
@@ -860,15 +875,18 @@ class CloseTradeSettlementHandler:
             account.net_option_market_value = (
                 valuation.net_option_market_value
             )
-            if (
-                account.risk_state
-                != AccountRiskState.VALUATION_UNAVAILABLE.value
-            ):
-                account.risk_state = (
-                    AccountRiskState.MARGIN_DEFICIT.value
-                    if account.risk_available_cash < Decimal("0")
-                    else AccountRiskState.NORMAL.value
+            account.risk_state = (
+                AccountRiskStateService.preserve_for_local_update(
+                    getattr(
+                        account,
+                        "risk_state",
+                        AccountRiskState.NORMAL.value,
+                    ),
+                    margin_deficit=(
+                        account.risk_available_cash < Decimal("0")
+                    ),
                 )
+            )
         else:
             account.cash_balance = quantize_money(
                 account.cash_balance + realized_pnl - actual_commission
@@ -955,7 +973,7 @@ class CloseTradeSettlementHandler:
                 (
                     item.open_price
                     * Decimal(item.remaining_volume)
-                    * Decimal(instrument.contract_multiplier)
+                    * Decimal(item.multiplier_snapshot)
                     for item in open_details
                 ),
                 Decimal("0"),

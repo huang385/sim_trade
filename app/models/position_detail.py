@@ -171,7 +171,7 @@ class PositionDetail(Base):
         DateTime(timezone=True), nullable=True
     )
     multiplier_snapshot: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), nullable=False, default=Decimal("1")
+        Numeric(24, 6), nullable=False
     )
 
     # 该笔成交实际确认的开仓手续费

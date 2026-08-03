@@ -143,6 +143,7 @@ class OrderResponse(BaseModel):
     margin_underlying_price: Decimal | None = None
     margin_option_price: Decimal | None = None
     margin_calculation_version: str | None = None
+    margin_risk_state: str = "NORMAL"
     fee_rule_id: int | None = None
     fee_rule_version: str | None = None
 

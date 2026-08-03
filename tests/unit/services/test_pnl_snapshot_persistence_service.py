@@ -37,6 +37,7 @@ def make_position(
         open_price=Decimal(open_price),
         pnl_base_price=Decimal(open_price),
         remaining_volume=1,
+        multiplier_snapshot=Decimal("1"),
     )
     return position, detail
 
@@ -66,6 +67,51 @@ def make_account(account_id: str = "A001"):
         risk_ratio=Decimal("0"),
         updated_at=None,
     )
+
+
+def build_account_only_persistence(*, order_risk_state: str):
+    position_repository = Mock()
+    position_repository.list_active_by_account_for_update.return_value = []
+    position_repository.list_open_details_by_position_ids_for_update.return_value = []
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = []
+    instrument_repository.list_by_ids.return_value = []
+    order_repository = Mock()
+    order_repository.list_active_option_sell_open_by_account.return_value = [
+        SimpleNamespace(margin_risk_state=order_risk_state)
+    ]
+    return PnlSnapshotPersistenceService(
+        session_factory=Mock(),
+        pnl_store=Mock(),
+        market_tick_store=Mock(),
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+        order_repository=order_repository,
+    )
+
+
+def test_active_order_margin_deficit_survives_complete_position_valuation():
+    account = make_account()
+    service = build_account_only_persistence(
+        order_risk_state="MARGIN_DEFICIT"
+    )
+
+    complete = service._recalculate_locked_account(Mock(), account)
+
+    assert complete is True
+    assert account.risk_state == "MARGIN_DEFICIT"
+
+
+def test_active_order_unavailable_keeps_account_dirty_and_risk_state():
+    account = make_account()
+    service = build_account_only_persistence(
+        order_risk_state="VALUATION_UNAVAILABLE"
+    )
+
+    complete = service._recalculate_locked_account(Mock(), account)
+
+    assert complete is False
+    assert account.risk_state == "VALUATION_UNAVAILABLE"
 
 
 def test_same_account_positions_are_loaded_and_persisted_in_batches():
@@ -540,6 +586,10 @@ def test_option_amounts_are_recalculated_from_database_facts_not_redis():
         pnl_base_price=Decimal("100"),
         remaining_volume=2,
         realtime_required_margin=Decimal("10000"),
+        multiplier_snapshot=Decimal("15"),
+        margin_rule_id=7,
+        margin_rule_version="V1",
+        margin_rule_snapshot=position.margin_rule_snapshot,
         margin_price_mode=None,
         margin_option_price=None,
         margin_underlying_price=None,

@@ -232,15 +232,25 @@ def test_realtime_tick_redis_api_and_postgres_persistence(
             == "REDIS_REALTIME"
         )
 
-        result = PnlSnapshotPersistenceService(
+        persistence_service = PnlSnapshotPersistenceService(
             session_factory=SessionLocal,
             pnl_store=store,
             market_tick_store=MarketTickStore(redis_client),
-        ).persist_batch(500)
-        # Redis Dirty集合是系统级共享集合；本机若已有其他活动持仓，冷启动
-        # 完整对账可能让同一批同时持久化多条。下面继续精确校验本测试持仓。
-        assert result.positions_persisted >= 1
-        assert result.accounts_persisted >= 1
+        )
+        # Redis Dirty是系统共享集合，前序真实集成测试可能故意保留无法处理
+        # 的坏成员。轮转SSCAN允许后续批次越过它们，因此按生产方式继续
+        # 领取，直到本测试目标完成，而不是假定目标必在第一次扫描结果中。
+        for _attempt in range(20):
+            persistence_service.persist_batch(500)
+            if not redis_client.sismember(
+                PNL_DIRTY_POSITIONS_KEY,
+                position_id,
+            ):
+                break
+        assert not redis_client.sismember(
+            PNL_DIRTY_POSITIONS_KEY,
+            position_id,
+        )
 
         with SessionLocal() as db:
             position = db.scalar(

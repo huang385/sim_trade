@@ -1,4 +1,5 @@
 from app.services.account_service import AccountService
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.fee_calculator import FeeCalculator
 from app.services.fee_rule_service import FeeRuleService
 from app.services.instrument_service import InstrumentService
@@ -91,6 +92,7 @@ from app.services.option_trading_permission_service import (
 
 __all__ = [
     "AccountService",
+    "AccountRiskStateService",
     "InstrumentService",
     "MarginRuleService",
     "FeeRuleService",

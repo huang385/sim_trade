@@ -405,6 +405,9 @@ class OrderCancellationService:
             order.cancelled_volume += cancel_volume
             order.remaining_volume = 0
             order.frozen_margin = Decimal("0.000000")
+            # 撤单已经移除活动订单风险来源；账户能否恢复NORMAL仍由后续
+            # Account Dirty触发的完整账户估值决定，不能在本事务直接改账户。
+            order.margin_risk_state = "NORMAL"
             order.frozen_cash = Decimal("0.000000")
             order.frozen_commission = Decimal("0.000000")
             order.cancelled_at = cancelled_at

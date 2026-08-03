@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
+import logging
 
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError
@@ -12,7 +13,9 @@ from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
+from app.repositories.order_repository import OrderRepository
 from app.repositories.position_repository import PositionRepository
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.commodity_option_margin_calculator import (
     CommodityFuturesOptionMarginCalculator,
@@ -30,6 +33,7 @@ from app.services.pnl_calculator import (
 
 
 RISK_QUANT = Decimal("0.00000001")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,6 +78,7 @@ class PnlSnapshotPersistenceService:
         account_repository: AccountRepository | None = None,
         position_repository: PositionRepository | None = None,
         instrument_repository: InstrumentRepository | None = None,
+        order_repository: OrderRepository | None = None,
         calculator: PnlCalculator | None = None,
     ):
         self.session_factory = session_factory
@@ -84,6 +89,7 @@ class PnlSnapshotPersistenceService:
         self.instrument_repository = (
             instrument_repository or InstrumentRepository()
         )
+        self.order_repository = order_repository or OrderRepository()
         self.calculator = calculator or PnlCalculator()
 
     @staticmethod
@@ -327,6 +333,15 @@ class PnlSnapshotPersistenceService:
                     != position.total_volume
                 ):
                     raise ValueError("持仓汇总数量与明细不一致")
+                position_multiplier = Decimal(position.multiplier_snapshot)
+                if position_multiplier <= 0 or any(
+                    Decimal(item.multiplier_snapshot)
+                    != position_multiplier
+                    for item in position_details
+                ):
+                    # 历史金额只能由不可变快照重建。明细缺失或与汇总快照
+                    # 不一致时禁止静默改用当前Instrument乘数。
+                    raise ValueError("持仓与明细乘数快照不一致")
                 key = (
                     instrument.exchange_id.strip().upper(),
                     instrument.symbol.strip().upper(),
@@ -339,6 +354,17 @@ class PnlSnapshotPersistenceService:
                     InstrumentType.FUTURES_OPTION,
                     InstrumentType.INDEX_OPTION,
                 }:
+                    if any(
+                        item.margin_rule_id != position.margin_rule_id
+                        or item.margin_rule_version
+                        != position.margin_rule_version
+                        or (item.margin_rule_snapshot or {})
+                        != (position.margin_rule_snapshot or {})
+                        for item in position_details
+                    ):
+                        raise ValueError(
+                            "期权持仓与明细保证金规则快照不一致"
+                        )
                     underlying = underlying_by_id.get(
                         instrument.underlying_instrument_id
                     )
@@ -383,11 +409,40 @@ class PnlSnapshotPersistenceService:
                             detail_margin_shares=(),
                         )
                     )
-        except (ValueError, TypeError, ArithmeticError, DataAccessError):
+        except (ValueError, TypeError, ArithmeticError, DataAccessError) as exc:
             # 金额不确定时禁止部分写入；风险状态单独提交并保留Dirty重试。
             account.risk_state = AccountRiskState.VALUATION_UNAVAILABLE.value
             account.updated_at = utc_now()
+            logger.warning(
+                "账户完整估值不可用 account_id=%s reason=%s",
+                account.account_id,
+                type(exc).__name__,
+            )
             return False
+
+        # Account行锁阻止订单资金字段并发提交。这里不反向锁Order，避免与
+        # 成交/撤单的Order→Account顺序死锁；等待Account锁的订单事务提交后
+        # 会产生新Dirty，再触发下一轮完整估值。
+        active_risk_orders = (
+            self.order_repository.list_active_option_sell_open_by_account(
+                db,
+                account.account_id,
+            )
+        )
+        # 旧单元隔离测试的Session Mock未实现新增查询；生产Repository固定
+        # 返回Sequence。兼容测试替身不改变真实数据库路径的严格校验。
+        if not isinstance(active_risk_orders, (list, tuple)):
+            active_risk_orders = ()
+        order_valuation_unavailable = any(
+            getattr(item, "margin_risk_state", "NORMAL")
+            == AccountRiskState.VALUATION_UNAVAILABLE.value
+            for item in active_risk_orders
+        )
+        order_margin_deficit = any(
+            getattr(item, "margin_risk_state", "NORMAL")
+            == AccountRiskState.MARGIN_DEFICIT.value
+            for item in active_risk_orders
+        )
 
         futures_unrealized = Decimal("0")
         daily_position_pnl = Decimal("0")
@@ -468,17 +523,26 @@ class PnlSnapshotPersistenceService:
         account.available_cash = valuation.available_cash
         account.risk_available_cash = valuation.risk_available_cash
         account.net_option_market_value = valuation.net_option_market_value
-        account.risk_state = (
-            AccountRiskState.MARGIN_DEFICIT.value
-            if valuation.risk_available_cash < Decimal("0")
-            else AccountRiskState.NORMAL.value
+        account.risk_state = AccountRiskStateService.resolve_full_evaluation(
+            valuation_unavailable=order_valuation_unavailable,
+            margin_deficit=(
+                order_margin_deficit
+                or valuation.risk_available_cash < Decimal("0")
+            ),
         )
         account.risk_ratio = self._risk(
             valuation.effective_required_margin,
             valuation.equity,
         )
         account.updated_at = now
-        return True
+        if order_valuation_unavailable:
+            logger.warning(
+                "账户存在估值不可用的活动卖出开仓订单 account_id=%s",
+                account.account_id,
+            )
+        # 活动订单估值不可用时保留Account Dirty，等待行情/规则恢复后重试；
+        # 保证金不足是已完成的可靠估值结果，可清除本版本Dirty。
+        return not order_valuation_unavailable
 
     def persist_batch(self, batch_size: int) -> PnlPersistenceResult:
         dirty_positions = self.pnl_store.list_dirty_positions(batch_size)

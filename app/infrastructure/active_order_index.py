@@ -104,6 +104,7 @@ ACTIVE_ORDER_FIELDS = (
     "frozen_cash",
     "frozen_commission",
     "frozen_position_volume",
+    "margin_risk_state",
     "status",
     "trading_day",
     "accepted_at",
@@ -304,6 +305,20 @@ class ActiveOrderIndex:
         """读取单笔活动订单详情；不存在时返回空字典。"""
 
         return self.redis_client.hgetall(active_order_key(order_id))
+
+    def update_margin_risk_snapshot(
+        self,
+        *,
+        order_id: str,
+        margin_risk_state: str,
+        frozen_margin: Decimal | None = None,
+    ) -> None:
+        """更新活动索引中的派生风险快照；PostgreSQL仍是最终事实来源。"""
+
+        mapping = {"margin_risk_state": margin_risk_state}
+        if frozen_margin is not None:
+            mapping["frozen_margin"] = serialize_redis_value(frozen_margin)
+        self.redis_client.hset(active_order_key(order_id), mapping=mapping)
 
     def list_instrument_order_ids(
         self,

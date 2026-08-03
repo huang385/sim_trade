@@ -27,6 +27,7 @@ def make_order(**overrides):
         "offset_flag": "OPEN",
         "order_type": "LIMIT",
         "frozen_margin": Decimal("1000"),
+        "margin_risk_state": "NORMAL",
         "margin_price_mode": "ORDER_FREEZE",
         "margin_underlying_price": Decimal("4000"),
         "margin_option_price": Decimal("100"),
@@ -120,9 +121,36 @@ def test_margin_addition_failure_marks_deficit_without_partial_freeze():
 
     assert result.action == "MARGIN_DEFICIT"
     assert account.risk_state == "MARGIN_DEFICIT"
+    assert order.margin_risk_state == "MARGIN_DEFICIT"
     assert order.frozen_margin == Decimal("1000")
     assert account.frozen_margin == Decimal("1000")
     assert account.available_cash == Decimal("400")
+
+
+def test_successful_retry_clears_order_source_but_not_account_directly():
+    """局部订单恢复后只清自身来源，账户等待完整估值恢复。"""
+
+    order = make_order(
+        frozen_margin=Decimal("1500"),
+        margin_risk_state="MARGIN_DEFICIT",
+    )
+    account = make_account(
+        risk_state="MARGIN_DEFICIT",
+        frozen_margin=Decimal("1500"),
+    )
+
+    result = make_service("1500").ensure_locked(
+        Mock(),
+        order=order,
+        account=account,
+        instrument=SimpleNamespace(),
+    )
+
+    assert result.action == "RECOVERED"
+    assert order.margin_risk_state == "NORMAL"
+    assert account.risk_state == "MARGIN_DEFICIT"
+    assert account.frozen_margin == Decimal("1500")
+    assert account.available_cash == Decimal("10000")
 
 
 def test_missing_market_marks_valuation_unavailable_without_freeze():
@@ -142,9 +170,10 @@ def test_missing_market_marks_valuation_unavailable_without_freeze():
     )
 
     assert result.action == "VALUATION_UNAVAILABLE"
-    # 订单行情缺失只阻止本轮补冻；完整账户风险状态由持仓估值链路维护，
-    # 因而行情恢复后本订单仍可重新进入保证金校验并自动恢复处理。
-    assert account.risk_state == "NORMAL"
+    # 缺失行情成为可从PostgreSQL重建的订单风险来源，不能被无关持仓
+    # 的成功估值覆盖；行情恢复后本订单仍可重新进入校验并自愈。
+    assert order.margin_risk_state == "VALUATION_UNAVAILABLE"
+    assert account.risk_state == "VALUATION_UNAVAILABLE"
     assert order.frozen_margin == Decimal("1000")
 
 

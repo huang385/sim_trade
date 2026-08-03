@@ -32,6 +32,7 @@ from app.services.pnl_calculator import (
     PositionPnlSnapshot,
 )
 from app.services.account_valuation_calculator import AccountValuationCalculator
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.commodity_option_margin_calculator import (
     CommodityFuturesOptionMarginCalculator,
 )
@@ -831,14 +832,21 @@ class RealtimePnlService:
                 frozen_commission=account.frozen_commission,
                 option_collateral_ratio=settings.option_collateral_ratio,
             )
-            risk_state = (
-                AccountRiskState.VALUATION_UNAVAILABLE.value
-                if account_id in valuation_unavailable_accounts
-                else (
-                    AccountRiskState.MARGIN_DEFICIT.value
-                    if valuation.risk_available_cash < Decimal("0")
-                    else AccountRiskState.NORMAL.value
-                )
+            # Redis实时链路属于局部派生估值，只能提高或保持风险。只有
+            # PostgreSQL账户级完整估值核对全部持仓和活动订单后才能恢复
+            # NORMAL，防止某个成功持仓覆盖另一个缺行情持仓或订单缺口。
+            risk_state = AccountRiskStateService.preserve_for_local_update(
+                getattr(
+                    account,
+                    "risk_state",
+                    AccountRiskState.NORMAL.value,
+                ),
+                valuation_unavailable=(
+                    account_id in valuation_unavailable_accounts
+                ),
+                margin_deficit=(
+                    valuation.risk_available_cash < Decimal("0")
+                ),
             )
             account_models.append(
                 AccountRealtimePnl(

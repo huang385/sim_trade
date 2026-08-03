@@ -17,6 +17,7 @@ from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.position_repository import PositionRepository
 from app.services.account_valuation_calculator import AccountValuationCalculator
+from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.commodity_option_margin_calculator import (
     CommodityFuturesOptionMarginCalculator,
 )
@@ -111,6 +112,16 @@ class OptionMarginAdjustmentService:
             details = self.position_repository.list_open_details_for_update(
                 db, position_id=position.position_id
             )
+            position_multiplier = Decimal(position.multiplier_snapshot)
+            if position_multiplier <= 0 or any(
+                Decimal(item.multiplier_snapshot) != position_multiplier
+                for item in details
+                if item.remaining_volume > 0
+            ):
+                raise DataAccessError(
+                    "期权持仓与明细乘数快照不一致",
+                    error_code="OPTION_MARGIN_MULTIPLIER_INCONSISTENT",
+                )
             instrument = self.instrument_repository.get_by_order_book_id(
                 db, position.order_book_id
             )
@@ -175,9 +186,7 @@ class OptionMarginAdjustmentService:
                     strike_price=Decimal(instrument.strike_price),
                     option_price=option_tick.last_price,
                     underlying_price=underlying_tick.last_price,
-                    option_multiplier=Decimal(
-                        instrument.contract_multiplier
-                    ),
+                    option_multiplier=position_multiplier,
                     underlying_multiplier=underlying_multiplier,
                     volume=position.total_volume,
                     price_mode=MarginPriceMode.SETTLEMENT,
@@ -205,6 +214,17 @@ class OptionMarginAdjustmentService:
             active_details = [
                 item for item in details if item.remaining_volume > 0
             ]
+            if any(
+                item.margin_rule_id != position.margin_rule_id
+                or item.margin_rule_version != position.margin_rule_version
+                or (item.margin_rule_snapshot or {})
+                != (position.margin_rule_snapshot or {})
+                for item in active_details
+            ):
+                raise DataAccessError(
+                    "期权持仓与明细保证金规则快照不一致",
+                    error_code="OPTION_MARGIN_RULE_INCONSISTENT",
+                )
             total_volume = sum(
                 item.remaining_volume for item in active_details
             )
@@ -267,7 +287,16 @@ class OptionMarginAdjustmentService:
                 account.net_option_market_value = (
                     proposed_valuation.net_option_market_value
                 )
-                account.risk_state = AccountRiskState.MARGIN_DEFICIT.value
+                account.risk_state = (
+                    AccountRiskStateService.preserve_for_local_update(
+                        getattr(
+                            account,
+                            "risk_state",
+                            AccountRiskState.NORMAL.value,
+                        ),
+                        margin_deficit=True,
+                    )
+                )
                 position.margin_price_mode = MarginPriceMode.SETTLEMENT.value
                 position.margin_underlying_price = underlying_tick.last_price
                 position.margin_option_price = option_tick.last_price
@@ -334,9 +363,16 @@ class OptionMarginAdjustmentService:
             account.risk_available_cash = valuation.risk_available_cash
             account.equity = valuation.equity
             account.risk_state = (
-                AccountRiskState.MARGIN_DEFICIT.value
-                if valuation.risk_available_cash < 0
-                else AccountRiskState.NORMAL.value
+                AccountRiskStateService.preserve_for_local_update(
+                    getattr(
+                        account,
+                        "risk_state",
+                        AccountRiskState.NORMAL.value,
+                    ),
+                    margin_deficit=(
+                        valuation.risk_available_cash < Decimal("0")
+                    ),
+                )
             )
             position.margin_price_mode = MarginPriceMode.SETTLEMENT.value
             position.margin_underlying_price = underlying_tick.last_price

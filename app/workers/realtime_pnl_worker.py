@@ -661,19 +661,38 @@ class RealtimePnlWorker:
                             in {
                                 "ADDED",
                                 "MARGIN_DEFICIT",
+                                "VALUATION_UNAVAILABLE",
+                                "RECOVERED",
+                                "SUFFICIENT",
                             }
                         ):
                             self.pnl_store.mark_account_fact_dirty_once(
                                 event_id=(
                                     "OPTION_ORDER_MARGIN:"
                                     f"{order_adjustment.order_id}:"
-                                    f"{order_adjustment.action}:"
-                                    f"{order_adjustment.required_margin}"
+                                    f"{order_adjustment.action}"
+                                    + (
+                                        ""
+                                        if order_adjustment.action
+                                        == "SUFFICIENT"
+                                        else (
+                                            ":"
+                                            f"{order_adjustment.required_margin}"
+                                        )
+                                    )
                                 ),
                                 account_id=order_adjustment.account_id,
                                 processed_ttl_seconds=(
                                     settings.order_event_processed_ttl_seconds
                                 ),
+                            )
+                        if order_adjustment.account_id:
+                            self.active_order_index.update_margin_risk_snapshot(
+                                order_id=order_adjustment.order_id,
+                                margin_risk_state=(
+                                    order_adjustment.margin_risk_state
+                                ),
+                                frozen_margin=order_adjustment.frozen_margin,
                             )
                         processed_order_ids.add(order_id)
                     except Exception:
