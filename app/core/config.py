@@ -166,6 +166,44 @@ class Settings(BaseSettings):
     pnl_trade_dead_letter_stream: str = "stream:orders:pnl:dead-letter"
     pnl_trade_retry_interval_seconds: float = 1.0
 
+    # WebSocket实时推送使用独立事件流。订单Outbox由投影Worker转换后写入，
+    # PnL快照则与该事件流在同一个Redis脚本中原子更新。
+    realtime_event_stream_name: str = "stream:realtime-events"
+    realtime_event_stream_maxlen: int = 1_000_000
+    realtime_projection_consumer_group: str = "group:realtime-projection"
+    realtime_projection_consumer_name: str | None = None
+    realtime_projection_batch_size: int = 100
+    realtime_projection_block_ms: int = 5000
+    realtime_projection_pending_idle_ms: int = 60000
+    realtime_projection_max_retries: int = 10
+    realtime_projection_failure_ttl_seconds: int = 604800
+    realtime_projection_dead_letter_stream: str = (
+        "stream:orders:realtime:dead-letter"
+    )
+
+    # 第一版Gateway固定单实例。独立Consumer Group只服务这一个活动实例，
+    # 租约用于阻止误启动第二个实例造成连接与事件分片不一致。
+    ws_gateway_consumer_group: str = "group:ws-gateway"
+    ws_gateway_consumer_name: str | None = None
+    ws_gateway_batch_size: int = 100
+    ws_gateway_block_ms: int = 1000
+    ws_gateway_pending_idle_ms: int = 60000
+    ws_gateway_dead_letter_stream: str = (
+        "stream:realtime-events:dead-letter"
+    )
+    ws_ticket_expire_seconds: int = 30
+    ws_heartbeat_interval_seconds: int = 20
+    ws_heartbeat_timeout_seconds: int = 60
+    ws_auth_recheck_interval_seconds: int = 60
+    ws_send_queue_size: int = 500
+    ws_snapshot_buffer_size: int = 1000
+    ws_max_subscriptions_per_connection: int = 20
+    ws_max_connections_per_user: int = 5
+    ws_gateway_lease_ttl_seconds: int = 30
+    ws_gateway_lease_renew_seconds: int = 10
+    ws_gateway_host: str = "0.0.0.0"
+    ws_gateway_port: int = 8001
+
     @property
     def database_url(self) -> str:
         return (

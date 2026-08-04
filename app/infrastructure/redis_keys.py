@@ -42,6 +42,42 @@ PNL_CONTRACT_INDEX_KEYS_KEY = "pnl:index_keys:contracts"
 PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
 
+# WebSocket实时投影、单实例租约和短期认证票据。
+REALTIME_EVENT_STREAM = settings.realtime_event_stream_name
+REALTIME_PROJECTION_CONSUMER_GROUP = (
+    settings.realtime_projection_consumer_group
+)
+REALTIME_PROJECTION_DEAD_LETTER_STREAM = (
+    settings.realtime_projection_dead_letter_stream
+)
+WS_GATEWAY_CONSUMER_GROUP = settings.ws_gateway_consumer_group
+WS_GATEWAY_DEAD_LETTER_STREAM = settings.ws_gateway_dead_letter_stream
+WS_GATEWAY_LEASE_KEY = "ws:gateway:lease"
+
+
+def websocket_ticket_key(ticket_hash: str) -> str:
+    """返回只保存Ticket摘要的短期Redis键。"""
+
+    return f"ws:ticket:{ticket_hash}"
+
+
+def projected_realtime_event_key(event_id: str) -> str:
+    """返回订单事件投影幂等键。"""
+
+    return f"ws:projection:processed:{event_id}"
+
+
+def realtime_projection_failure_key(message_id: str) -> str:
+    """返回实时投影失败计数键。"""
+
+    return f"ws:projection:failure:{message_id}"
+
+
+def websocket_delivery_failure_key(message_id: str) -> str:
+    """返回Gateway事件路由失败计数键。"""
+
+    return f"ws:gateway:failure:{message_id}"
+
 
 def active_order_key(order_id: str) -> str:
     """返回单笔活动订单详情 Hash 的键名。"""

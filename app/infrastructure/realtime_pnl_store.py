@@ -6,6 +6,8 @@ from typing import Iterable
 from redis import Redis
 from redis.exceptions import WatchError
 
+from app.core.config import settings
+
 from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
     PNL_CONTRACT_INDEX_KEYS_KEY,
@@ -23,6 +25,7 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_CACHE_VERSION_KEY,
     PNL_WORKER_LEASE_KEY,
+    REALTIME_EVENT_STREAM,
     parse_pnl_dirty_contract_member,
     pnl_account_key,
     pnl_account_positions_key,
@@ -137,6 +140,15 @@ for _, operation in ipairs(operations) do
         if redis.call('SCARD', key) == 0 then
             redis.call('SREM', operation[4], key)
         end
+    elseif command == 'XADD_REALTIME_EVENT' then
+        redis.call(
+            'XADD', key, 'MAXLEN', '~', operation[8], '*',
+            'event_id', operation[3],
+            'event_type', operation[4],
+            'account_id', operation[5],
+            'entity_id', operation[6],
+            'payload', operation[7]
+        )
     end
 end
 return 1
@@ -496,6 +508,39 @@ class RealtimePnlStore:
                     dirty_version,
                 ]
             )
+            event_type = (
+                "OPTION_VALUATION_UPDATED"
+                if item.instrument_type in {"FUTURES_OPTION", "INDEX_OPTION"}
+                else "PNL_UPDATED"
+            )
+            event_id = (
+                f"PNL:{dirty_version}:{item.position_id}:"
+                f"{item.updated_at.isoformat()}"
+            )
+            operations.append(
+                [
+                    "XADD_REALTIME_EVENT",
+                    REALTIME_EVENT_STREAM,
+                    event_id,
+                    event_type,
+                    item.account_id,
+                    item.position_id,
+                    json.dumps(
+                        {
+                            "event_id": event_id,
+                            "event_type": event_type,
+                            "account_id": item.account_id,
+                            "entity_id": item.position_id,
+                            "occurred_at": item.updated_at.isoformat(),
+                            "version": dirty_version,
+                            "payload": _mapping(item),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    str(settings.realtime_event_stream_maxlen),
+                ]
+            )
 
         for item in accounts:
             hash_operation = ["HSET", pnl_account_key(item.account_id)]
@@ -511,6 +556,69 @@ class RealtimePnlStore:
                     PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
                     item.account_id,
                     dirty_version,
+                ]
+            )
+            account_event_id = (
+                f"ACCOUNT:{dirty_version}:{item.account_id}:"
+                f"{item.updated_at.isoformat()}"
+            )
+            account_payload = _mapping(item)
+            operations.append(
+                [
+                    "XADD_REALTIME_EVENT",
+                    REALTIME_EVENT_STREAM,
+                    account_event_id,
+                    "ACCOUNT_UPDATED",
+                    item.account_id,
+                    item.account_id,
+                    json.dumps(
+                        {
+                            "event_id": account_event_id,
+                            "event_type": "ACCOUNT_UPDATED",
+                            "account_id": item.account_id,
+                            "entity_id": item.account_id,
+                            "occurred_at": item.updated_at.isoformat(),
+                            "version": dirty_version,
+                            "payload": account_payload,
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    str(settings.realtime_event_stream_maxlen),
+                ]
+            )
+            risk_event_id = (
+                f"RISK:{dirty_version}:{item.account_id}:"
+                f"{item.updated_at.isoformat()}"
+            )
+            operations.append(
+                [
+                    "XADD_REALTIME_EVENT",
+                    REALTIME_EVENT_STREAM,
+                    risk_event_id,
+                    "RISK_STATE_CHANGED",
+                    item.account_id,
+                    item.account_id,
+                    json.dumps(
+                        {
+                            "event_id": risk_event_id,
+                            "event_type": "RISK_STATE_CHANGED",
+                            "account_id": item.account_id,
+                            "entity_id": item.account_id,
+                            "occurred_at": item.updated_at.isoformat(),
+                            "version": dirty_version,
+                            "payload": {
+                                "risk_state": item.risk_state,
+                                "risk_ratio": account_payload["risk_ratio"],
+                                "risk_available_cash": account_payload[
+                                    "risk_available_cash"
+                                ],
+                            },
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    str(settings.realtime_event_stream_maxlen),
                 ]
             )
 
@@ -654,6 +762,29 @@ class RealtimePnlStore:
         for account_id in ids:
             pipeline.hgetall(pnl_account_key(account_id))
         return dict(zip(ids, pipeline.execute(), strict=True))
+
+    def get_accounts_with_positions(
+        self,
+        *,
+        account_ids: Iterable[str],
+        position_ids: Iterable[str],
+    ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+        """一个Pipeline批量读取多账户及其全部持仓实时快照。"""
+
+        accounts = list(dict.fromkeys(account_ids))
+        positions = list(dict.fromkeys(position_ids))
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for account_id in accounts:
+            pipeline.hgetall(pnl_account_key(account_id))
+        for position_id in positions:
+            pipeline.hgetall(pnl_position_key(position_id))
+        rows = pipeline.execute()
+        account_rows = rows[: len(accounts)]
+        position_rows = rows[len(accounts) :]
+        return (
+            dict(zip(accounts, account_rows, strict=True)),
+            dict(zip(positions, position_rows, strict=True)),
+        )
 
     def get_account_with_positions(
         self,

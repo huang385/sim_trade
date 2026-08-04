@@ -33,6 +33,7 @@ class OrderStreamConsumer:
         failure_key_factory: Callable[[str], str] = (
             order_event_failure_key
         ),
+        group_start_id: str = "0-0",
     ):
         self.redis_client = redis_client
         self.stream_name = stream_name
@@ -41,20 +42,21 @@ class OrderStreamConsumer:
         self.dead_letter_stream = dead_letter_stream
         self.failure_ttl_seconds = failure_ttl_seconds
         self.failure_key_factory = failure_key_factory
+        self.group_start_id = group_start_id
 
     def ensure_group(self) -> None:
         """
-        使用 `0-0 MKSTREAM` 创建消费组，已存在时安全忽略 BUSYGROUP。
+        使用配置的起始游标创建消费组，已存在时安全忽略 BUSYGROUP。
 
-        0-0保证首次启动Consumer时能够读取Stream中已经存在的订单事件；
-        BUSYGROUP分支不会重置已有消费组的当前位置。
+        通用订单消费者默认0-0以读取历史事件；只需新事件的投影消费者可
+        使用$。BUSYGROUP分支不会重置已有消费组的位置。
         """
 
         try:
             self.redis_client.xgroup_create(
                 self.stream_name,
                 self.group_name,
-                id="0-0",
+                id=self.group_start_id,
                 mkstream=True,
             )
         except ResponseError as exc:

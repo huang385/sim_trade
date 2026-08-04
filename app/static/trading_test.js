@@ -12,6 +12,16 @@ const state = {
     refreshing: false,
     refreshTimer: null,
     slowRefreshTimer: null,
+    websocket: null,
+    websocketConnected: false,
+    websocketReconnectTimer: null,
+    websocketReconnectAttempt: 0,
+    websocketManualClose: false,
+    account: null,
+    pnl: null,
+    orders: [],
+    trades: [],
+    websocketSubscribedAccounts: new Set(),
 };
 
 const elements = {
@@ -197,6 +207,7 @@ async function refreshAccessToken() {
 }
 
 function showLogin() {
+    closeRealtimeSocket(true);
     state.accessToken = null;
     state.currentUser = null;
     state.accountId = "";
@@ -225,6 +236,7 @@ async function loadAuthorizedAccounts() {
         state.accountId = accounts[0].account_id;
         elements.orderAccountId.value = state.accountId;
         await Promise.all([refreshRealtime(), refreshOrdersAndTrades()]);
+        await connectRealtimeSocket();
         restartTimers();
     } else {
         setConnection(false, "当前用户没有可访问的交易账户");
@@ -258,6 +270,7 @@ async function login(event) {
 }
 
 async function logout() {
+    closeRealtimeSocket(true);
     try {
         await apiFetch(
             "/api/auth/logout",
@@ -266,6 +279,201 @@ async function logout() {
         );
     } finally {
         showLogin();
+    }
+}
+
+function closeRealtimeSocket(manual = false) {
+    state.websocketManualClose = manual;
+    window.clearTimeout(state.websocketReconnectTimer);
+    state.websocketReconnectTimer = null;
+    const socket = state.websocket;
+    state.websocket = null;
+    if (socket) {
+        socket.close(1000, "页面主动关闭");
+    }
+    state.websocketConnected = false;
+    state.websocketSubscribedAccounts.clear();
+}
+
+function websocketUrl(ticket) {
+    const scheme = window.location.protocol === "https:" ? "wss" : "ws";
+    // 第一版Gateway按独立进程部署在8001端口；正式反向代理可把这里改为同源。
+    return `${scheme}://${window.location.hostname}:8001/ws/trading?ticket=${encodeURIComponent(ticket)}`;
+}
+
+function selectedAccountIds() {
+    const selected = Array.from(elements.accountId.selectedOptions || [])
+        .map((option) => option.value.trim())
+        .filter(Boolean);
+    return selected.length ? selected : (state.accountId ? [state.accountId] : []);
+}
+
+function subscribeCurrentAccount() {
+    if (!state.websocketConnected || !state.accountId) return;
+    const accountIds = selectedAccountIds();
+    const removed = Array.from(state.websocketSubscribedAccounts).filter(
+        (accountId) => !accountIds.includes(accountId),
+    );
+    if (removed.length) {
+        state.websocket.send(JSON.stringify({
+            action: "unsubscribe",
+            account_ids: removed,
+        }));
+    }
+    state.websocket.send(JSON.stringify({
+        action: "subscribe",
+        account_ids: accountIds,
+    }));
+    state.websocketSubscribedAccounts = new Set(accountIds);
+}
+
+function applyWebSocketSnapshot(payload) {
+    const snapshot = (payload.accounts || []).find(
+        (item) => item.account?.account_id === state.accountId,
+    );
+    if (!snapshot) return;
+    state.account = snapshot.account;
+    state.pnl = snapshot.pnl;
+    state.positions = snapshot.positions || [];
+    state.orders = snapshot.active_orders || [];
+    state.trades = snapshot.today_trades || [];
+    renderAccount(state.account, state.pnl);
+    renderPositions(state.positions);
+    renderOrders(state.orders);
+    renderTrades(state.trades);
+    elements.lastRefresh.textContent = `推送 ${formatTime(payload.generated_at)}`;
+}
+
+function upsertById(rows, payload, idField) {
+    const index = rows.findIndex((row) => row[idField] === payload[idField]);
+    if (index >= 0) {
+        rows[index] = {...rows[index], ...payload};
+    } else {
+        rows.unshift(payload);
+    }
+}
+
+function applyRealtimeEvent(event) {
+    if (event.event_type === "HEARTBEAT") {
+        state.websocket?.send(JSON.stringify({action: "pong"}));
+        return;
+    }
+    if (event.event_type === "AUTH_EXPIRED") {
+        refreshAccessToken().then((ok) => ok && connectRealtimeSocket());
+        return;
+    }
+    if (event.event_type === "RESYNC_REQUIRED") {
+        closeRealtimeSocket(false);
+        scheduleWebSocketReconnect();
+        return;
+    }
+    if (event.event_type === "ERROR") {
+        showToast(`实时推送：${event.payload?.message || "请求失败"}`, "error");
+        return;
+    }
+    if (event.event_type === "SNAPSHOT") {
+        applyWebSocketSnapshot(event.payload || {});
+        return;
+    }
+    if (event.account_id !== state.accountId) return;
+    if (["ORDER_CREATED", "ORDER_UPDATED", "ORDER_CANCELLED"].includes(event.event_type)) {
+        upsertById(state.orders, event.payload, "order_id");
+        state.orders = state.orders.filter((order) => ACTIVE_ORDER_STATUSES.has(order.status));
+        renderOrders(state.orders);
+        return;
+    }
+    if (event.event_type === "TRADE_CREATED") {
+        upsertById(state.trades, event.payload, "trade_id");
+        renderTrades(state.trades);
+        // 新成交可能新增或关闭持仓，重新订阅会通过同一WebSocket取得完整快照。
+        subscribeCurrentAccount();
+        return;
+    }
+    if (event.event_type === "ACCOUNT_UPDATED" && state.account && state.pnl) {
+        const values = event.payload || {};
+        state.pnl = {
+            ...state.pnl,
+            unrealized_pnl: values.cumulative_unrealized_pnl,
+            daily_position_pnl: values.daily_position_pnl,
+            daily_close_pnl: values.daily_close_pnl,
+            daily_commission: values.daily_commission,
+            daily_pnl: values.daily_pnl,
+            equity: values.equity,
+            available_cash: values.available_cash,
+            risk_ratio: values.risk_ratio,
+            updated_at: values.updated_at,
+            data_source: "REDIS_REALTIME",
+        };
+        renderAccount(state.account, state.pnl);
+        return;
+    }
+    if (["PNL_UPDATED", "OPTION_VALUATION_UPDATED"].includes(event.event_type)) {
+        const row = state.positions.find(
+            (item) => item.position.position_id === event.entity_id,
+        );
+        if (!row) {
+            subscribeCurrentAccount();
+            return;
+        }
+        const values = event.payload || {};
+        row.pnl = {
+            ...row.pnl,
+            mark_price: values.mark_price,
+            unrealized_pnl: values.cumulative_unrealized_pnl,
+            daily_position_pnl: values.daily_position_pnl,
+            event_time: values.event_time,
+            updated_at: values.updated_at,
+            data_source: "REDIS_REALTIME",
+        };
+        renderPositions(state.positions);
+    }
+}
+
+function scheduleWebSocketReconnect() {
+    if (state.websocketManualClose || !state.accessToken) return;
+    window.clearTimeout(state.websocketReconnectTimer);
+    const delay = Math.min(1000 * (2 ** state.websocketReconnectAttempt), 30000);
+    state.websocketReconnectAttempt += 1;
+    setConnection(false, `实时推送重连中（${Math.round(delay / 1000)}秒）`);
+    state.websocketReconnectTimer = window.setTimeout(connectRealtimeSocket, delay);
+}
+
+async function connectRealtimeSocket() {
+    if (!state.accessToken || !state.accountId) return;
+    closeRealtimeSocket(false);
+    state.websocketManualClose = false;
+    setConnection(false, "实时推送连接中");
+    try {
+        const result = await apiFetch("/api/ws/ticket", {method: "POST"});
+        const socket = new WebSocket(websocketUrl(result.ticket));
+        state.websocket = socket;
+        socket.addEventListener("open", () => {
+            state.websocketConnected = true;
+            state.websocketReconnectAttempt = 0;
+            setConnection(true, "WebSocket实时推送已连接");
+            subscribeCurrentAccount();
+            restartTimers();
+        });
+        socket.addEventListener("message", (message) => {
+            try {
+                applyRealtimeEvent(JSON.parse(message.data));
+            } catch (_error) {
+                showToast("收到无法解析的实时事件", "error");
+            }
+        });
+        socket.addEventListener("close", () => {
+            if (state.websocket !== socket) return;
+            state.websocketConnected = false;
+            state.websocket = null;
+            restartTimers();
+            scheduleWebSocketReconnect();
+        });
+        socket.addEventListener("error", () => {
+            setConnection(false, "WebSocket实时推送连接失败");
+        });
+    } catch (error) {
+        setConnection(false, `实时推送失败：${error.message}`);
+        scheduleWebSocketReconnect();
     }
 }
 
@@ -543,6 +751,8 @@ async function refreshRealtime() {
         const positionPnl = snapshot.positions;
 
         state.positions = positionPnl;
+        state.account = snapshot.account;
+        state.pnl = snapshot.pnl;
         renderAccount(snapshot.account, snapshot.pnl);
         renderPositions(positionPnl);
         setConnection(true, "后端与实时快照已连接");
@@ -563,8 +773,10 @@ async function refreshOrdersAndTrades() {
             apiFetch(`/api/orders/page?account_id=${accountPath}&limit=100`),
             apiFetch(`/api/trades/page?account_id=${accountPath}&limit=100`),
         ]);
-        renderOrders(orderPage.items);
-        renderTrades(tradePage.items);
+        state.orders = orderPage.items;
+        state.trades = tradePage.items;
+        renderOrders(state.orders);
+        renderTrades(state.trades);
     } catch (error) {
         setConnection(false, error.message);
     }
@@ -576,7 +788,8 @@ function restartTimers() {
     state.refreshTimer = null;
     state.slowRefreshTimer = null;
 
-    if (elements.autoRefresh.checked) {
+    // WebSocket在线时只使用推送；断线期间保留原HTTP轮询作为开发联调兜底。
+    if (elements.autoRefresh.checked && !state.websocketConnected) {
         state.refreshTimer = window.setInterval(refreshRealtime, REFRESH_INTERVAL_MS);
         state.slowRefreshTimer = window.setInterval(
             refreshOrdersAndTrades,
@@ -594,6 +807,7 @@ async function loadAccount() {
     state.accountId = accountId;
     elements.orderAccountId.value = accountId;
     await Promise.all([refreshRealtime(), refreshOrdersAndTrades()]);
+    subscribeCurrentAccount();
     restartTimers();
 }
 
