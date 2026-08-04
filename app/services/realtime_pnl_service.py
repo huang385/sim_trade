@@ -132,7 +132,7 @@ class RealtimePnlService:
         if not isinstance(payload, dict):
             raise PnlEventValidationError("行情payload必须是对象")
         if (
-            payload.get("source") != "YML_FEEDHUB"
+            payload.get("source") != "YMM_LIVE_DATA"
             or payload.get("ingest_type") != "LIVE_CALLBACK"
         ):
             return None

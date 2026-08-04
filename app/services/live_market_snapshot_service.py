@@ -5,7 +5,7 @@ from redis import Redis
 from app.common.code_utils import normalize_code
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.redis_keys import (
-    YML_FEEDHUB_STATUS_KEY,
+    YMM_LIVE_DATA_STATUS_KEY,
     market_latest_key,
 )
 from app.schemas.market_tick_schema import MarketTickIngestType
@@ -50,7 +50,7 @@ class LiveMarketSnapshotService:
         normalized_exchange = normalize_code(exchange_id)
         normalized_symbol = normalize_code(symbol)
         pipeline = self.redis_client.pipeline(transaction=False)
-        pipeline.hgetall(YML_FEEDHUB_STATUS_KEY)
+        pipeline.hgetall(YMM_LIVE_DATA_STATUS_KEY)
         pipeline.hgetall(
             market_latest_key(
                 normalized_exchange,
@@ -75,7 +75,7 @@ class LiveMarketSnapshotService:
         ):
             return None
         if (
-            latest.get("source") != "YML_FEEDHUB"
+            latest.get("source") != "YMM_LIVE_DATA"
             or latest.get("ingest_type")
             != MarketTickIngestType.LIVE_CALLBACK.value
         ):

@@ -172,7 +172,7 @@ class FakeStore:
 def make_fields(*, last_price="3520", ingest_type="LIVE_CALLBACK"):
     payload = {
         "source_event_id": "TICK-1",
-        "source": "YML_FEEDHUB",
+        "source": "YMM_LIVE_DATA",
         "ingest_type": ingest_type,
         "order_book_id": "RB2610",
         "exchange_id": "SHFE",

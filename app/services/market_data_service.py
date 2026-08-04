@@ -161,7 +161,9 @@ class MarketDataService:
         subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         self.validation_service.validate_envelope(data=data, raw=raw)
-        order_book_id = normalize_code(str(data.get("code") or ""))
+        order_book_id = normalize_code(
+            str(data.get("order_book_id") or "")
+        )
         cache_hit, instrument = self._get_cached_instrument(order_book_id)
         if not cache_hit:
             instrument = self._load_instrument(db, order_book_id)
@@ -185,7 +187,9 @@ class MarketDataService:
         """Tick 线程入口：缓存命中时完全不创建数据库 Session。"""
 
         self.validation_service.validate_envelope(data=data, raw=raw)
-        order_book_id = normalize_code(str(data.get("code") or ""))
+        order_book_id = normalize_code(
+            str(data.get("order_book_id") or "")
+        )
         cache_hit, instrument = self._get_cached_instrument(order_book_id)
         if not cache_hit:
             with session_factory() as db:

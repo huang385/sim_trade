@@ -21,6 +21,8 @@ from app.infrastructure.market_data.market_tick_store import (
 from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
     create_remote_sdk_client,
+    load_remote_sdk_client_class,
+    remote_sdk_client_kwargs,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.instrument_market_data_mapping_repository import (
@@ -137,6 +139,13 @@ class MarketDataSubscriberWorker:
         self._shutdown_complete = False
         self._status = MarketDataSourceStatus.IDLE
         self._desired_codes: frozenset[str] = frozenset()
+        self._code_mapping = MarketDataCodeMappingSnapshot.identity([])
+        self._callback_generation = 0
+        # 订阅集合可在同一SDK连接内动态变更，因此业务代次会变化；连接代次只在
+        # SDK客户端重建时变化，用于拒绝已经关闭的旧连接晚到回调。
+        self._callback_connection_generation = 0
+        self._source_issue: str = ""
+        self._terminal_source_error = False
         self._reconnect_delay = reconnect_initial_seconds
         self._next_reconnect_at = 0.0
         self._retry_generation: int | None = None
@@ -182,22 +191,41 @@ class MarketDataSubscriberWorker:
             if not self._accepting_ticks:
                 return
         self._increment("received_count")
-        if raw.get("type") != "tick":
+        if (
+            data.get("action") != "feed"
+            or not str(data.get("channel") or "").startswith("tick_")
+        ):
             return
         with self._state_lock:
             self.last_tick_at = utc_now()
         try:
             normalized_data = dict(data)
-            if code_mapping is not None:
-                normalized_data["code"] = code_mapping.to_internal(
-                    str(data.get("code") or "")
+            normalized_data["local_recv_time"] = utc_now()
+            with self._state_lock:
+                active_mapping = code_mapping or self._code_mapping
+                active_generation = (
+                    generation
+                    if generation is not None
+                    else self._callback_generation
                 )
+            source_code = str(data.get("order_book_id") or "")
+            if not active_mapping.source_codes and source_code.strip():
+                active_mapping = MarketDataCodeMappingSnapshot.identity(
+                    [source_code]
+                )
+            # 退订与回调可能短暂交错，当前代次已经不包含的旧频道不能
+            # 污染新的subscription_generation。
+            if source_code.strip().upper() not in active_mapping.source_codes:
+                return
+            normalized_data["order_book_id"] = active_mapping.to_internal(
+                source_code
+            )
             self.tick_queue.put_nowait(
                 QueuedTick(
                     data=normalized_data,
                     raw=dict(raw),
                     ingest_type=MarketTickIngestType.LIVE_CALLBACK,
-                    subscription_generation=generation,
+                    subscription_generation=active_generation,
                 )
             )
             self._increment("enqueued_count")
@@ -276,13 +304,50 @@ class MarketDataSubscriberWorker:
             self._schedule_failed_subscription_retry(state.generation)
 
     def on_message(self, message: dict[str, Any]) -> None:
-        """INGESTION_STOPPED 属于正常采集状态，不作为订阅故障。"""
+        """把SDK状态变化收敛成Worker状态，不启动第二套网络重连循环。"""
 
-        if (
-            message.get("type") == "status"
-            and message.get("code") == "INGESTION_STOPPED"
-        ):
-            logger.info("行情采集当前停止 code=INGESTION_STOPPED")
+        if message.get("type") != "status":
+            return
+        component = str(message.get("component") or "unknown")
+        state = str(message.get("state") or "unknown")
+        issue = f"{component}_{state}".upper()
+        details = message.get("details") or {}
+        terminal = state == "replaced" or (
+            component == "session"
+            and state == "disconnected"
+            and details.get("reason") == "token_revoked"
+        )
+        broken = state in {
+            "disconnected",
+            "reconnecting",
+            "partial",
+            "quota_exceeded",
+            "degraded",
+            "slow_consumer",
+            "error",
+            "replaced",
+        }
+        with self._state_lock:
+            if terminal:
+                self._terminal_source_error = True
+                self._source_issue = issue
+                self.last_error = issue
+            elif broken:
+                self._source_issue = issue
+                self._status = (
+                    MarketDataSourceStatus.DISCONNECTED
+                    if state in {"disconnected", "reconnecting"}
+                    else MarketDataSourceStatus.DEGRADED
+                )
+            elif state == "recovered":
+                # slow_consumer表示存在不可补发缺口，不能因为recovered
+                # 自动恢复为完整行情，会话保持DEGRADED直到人工重启。
+                if not self._source_issue.endswith("_SLOW_CONSUMER"):
+                    self._source_issue = ""
+                    self.last_error = ""
+        if terminal:
+            logger.error("行情SDK会话不可恢复 code=%s", issue)
+            self.request_stop()
 
     def on_error(self, error: dict[str, Any]) -> None:
         """只保存安全错误代码，避免完整错误结构意外携带连接凭证。"""
@@ -339,8 +404,12 @@ class MarketDataSubscriberWorker:
         self._consumer_thread.start()
 
     def _stop_subscription(self, *, wait_until_stopped: bool = False) -> None:
-        subscription = self._subscription
-        self._subscription = None
+        with self._state_lock:
+            subscription = self._subscription
+            self._subscription = None
+            # 先让旧连接回调失效，再调用SDK关闭。这样即使关闭期间仍有一条
+            # 回调正在排队，也不会被标记成后续连接的订阅代次。
+            self._callback_connection_generation += 1
         if subscription is None:
             return
         try:
@@ -365,21 +434,41 @@ class MarketDataSubscriberWorker:
         with self.session_factory() as db:
             self.market_data_service.refresh_instrument_cache(db, codes)
             code_mapping = self.code_mapping_service.build_snapshot(db, codes)
+        with self._state_lock:
+            self._code_mapping = code_mapping
+            self._callback_generation = generation
+            self._callback_connection_generation += 1
+            connection_generation = self._callback_connection_generation
+
+        def is_current_connection() -> bool:
+            with self._state_lock:
+                return (
+                    connection_generation
+                    == self._callback_connection_generation
+                )
+
+        def on_current_quote(data: dict[str, Any], raw: dict[str, Any]) -> None:
+            if is_current_connection():
+                self.on_quote(data, raw)
+
+        def on_current_message(message: dict[str, Any]) -> None:
+            if is_current_connection():
+                self.on_message(message)
+
+        def on_current_error(error: dict[str, Any]) -> None:
+            if is_current_connection():
+                self.on_error(error)
+
         subscription = self.feed_client.start_tick_callbacks(
             code_mapping.source_codes,
-            on_quote=lambda data, raw: self.on_quote(
-                data,
-                raw,
-                generation=generation,
-                code_mapping=code_mapping,
-            ),
+            on_quote=on_current_quote,
             on_subscribe=lambda report: self.on_subscribe(
                 report,
-                generation=generation,
-                code_mapping=code_mapping,
+                generation=self._callback_generation,
+                code_mapping=self._code_mapping,
             ),
-            on_message=self.on_message,
-            on_error=self.on_error,
+            on_message=on_current_message,
+            on_error=on_current_error,
         )
         self._subscription = subscription
         if self._ever_started:
@@ -387,6 +476,26 @@ class MarketDataSubscriberWorker:
         self._ever_started = True
         with self._state_lock:
             self.last_reconnect_at = utc_now()
+
+    def _replace_subscription(self, codes: frozenset[str]) -> None:
+        """在同一SDK连接上批量增订/退订，并切换回调代次和代码映射。"""
+
+        generation = self.subscription_service.mark_requested(codes)
+        with self.session_factory() as db:
+            self.market_data_service.refresh_instrument_cache(db, codes)
+            code_mapping = self.code_mapping_service.build_snapshot(db, codes)
+        with self._state_lock:
+            self._code_mapping = code_mapping
+            self._callback_generation = generation
+            self._status = MarketDataSourceStatus.CONNECTING
+        report = self.feed_client.replace_tick_subscriptions(
+            code_mapping.source_codes
+        )
+        self.on_subscribe(
+            report,
+            generation=generation,
+            code_mapping=code_mapping,
+        )
 
     def _mark_disconnected(self, now: float) -> None:
         self._stop_subscription()
@@ -412,6 +521,9 @@ class MarketDataSubscriberWorker:
             self._start_subscription(codes)
         except Exception as exc:
             with self._state_lock:
+                # start_tick_callbacks可能已经短暂启动过SDK线程；即使适配器关闭
+                # 超时，失败连接的晚到回调也必须立即失效。
+                self._callback_connection_generation += 1
                 self.last_error = type(exc).__name__
                 self.last_disconnect_at = utc_now()
                 self._status = MarketDataSourceStatus.DISCONNECTED
@@ -445,6 +557,12 @@ class MarketDataSubscriberWorker:
             return MarketDataSourceStatus.IDLE
         if disconnected_waiting:
             return MarketDataSourceStatus.DISCONNECTED
+        if self._source_issue:
+            if self._source_issue.endswith(
+                ("_DISCONNECTED", "_RECONNECTING")
+            ):
+                return MarketDataSourceStatus.DISCONNECTED
+            return MarketDataSourceStatus.DEGRADED
         if state.failed_codes or self._recent_queue_drops(now):
             return MarketDataSourceStatus.DEGRADED
         if (
@@ -465,7 +583,7 @@ class MarketDataSubscriberWorker:
             values = asdict(stats)
             values.update(
                 {
-                    "source": "YML_FEEDHUB",
+                    "source": "YMM_LIVE_DATA",
                     "status": status.value,
                     "subscription_generation": state.generation,
                     "requested_codes": ",".join(sorted(state.requested_codes)),
@@ -501,8 +619,8 @@ class MarketDataSubscriberWorker:
         self._desired_codes = desired_codes
         change = self.subscription_service.observe(desired_codes, now=now)
         if change is not None:
-            self._stop_subscription()
             if not change.codes:
+                self._stop_subscription()
                 self.subscription_service.clear()
                 with self._state_lock:
                     self._reconnect_delay = self.reconnect_initial_seconds
@@ -512,18 +630,39 @@ class MarketDataSubscriberWorker:
                     self.last_error = ""
                     self._status = MarketDataSourceStatus.IDLE
             else:
-                # 目标集合变化开始一轮新的退避周期。
+                # 官方SDK支持批量subscribe/unsubscribe。连接健康时增量调整
+                # 频道；只有两个消费者线程已经退出才重建客户端。
                 with self._state_lock:
                     self._reconnect_delay = self.reconnect_initial_seconds
                     self._next_reconnect_at = now
                     self._retry_generation = None
-                self._try_start(change.codes, now)
+                if (
+                    self._subscription is not None
+                    and self._subscription.is_alive()
+                ):
+                    try:
+                        self._replace_subscription(change.codes)
+                    except Exception as exc:
+                        with self._state_lock:
+                            self.last_error = type(exc).__name__
+                        self._mark_disconnected(now)
+                        logger.warning(
+                            "行情频道变更失败 error_type=%s",
+                            type(exc).__name__,
+                        )
+                else:
+                    self._try_start(change.codes, now)
         else:
             state = self.subscription_service.state_snapshot()
             if state.failed_codes and now >= self._next_reconnect_at:
-                # SDK 不支持可靠追加订阅，因此退避到期后重建完整目标集合。
-                self._stop_subscription()
-                self._try_start(state.requested_codes, now)
+                try:
+                    self._replace_subscription(state.requested_codes)
+                except Exception as exc:
+                    self._mark_disconnected(now)
+                    logger.warning(
+                        "行情失败频道重试异常 error_type=%s",
+                        type(exc).__name__,
+                    )
             elif self._subscription is None and state.requested_codes:
                 self._try_start(state.requested_codes, now)
 
@@ -591,6 +730,9 @@ class MarketDataSubscriberWorker:
 def build_worker() -> MarketDataSubscriberWorker:
     """使用生产配置组装 Worker，本函数不记录用户名、Token 或完整地址。"""
 
+    # 配置缺失应在进程启动阶段明确失败，不能静默保持IDLE或回退旧行情源。
+    remote_sdk_client_kwargs(settings)
+    load_remote_sdk_client_class()
     tick_store = MarketTickStore(
         redis_client,
         stream_name=settings.market_tick_stream_name,
@@ -615,7 +757,9 @@ def build_worker() -> MarketDataSubscriberWorker:
     )
     return MarketDataSubscriberWorker(
         session_factory=SessionLocal,
-        feed_client=RemoteFeedClient(create_remote_sdk_client(settings)),
+        feed_client=RemoteFeedClient(
+            lambda: create_remote_sdk_client(settings)
+        ),
         market_data_service=market_data_service,
         code_mapping_service=code_mapping_service,
         subscription_service=subscription_service,

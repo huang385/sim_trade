@@ -1,4 +1,4 @@
-"""优美利FeedHub行情基础设施适配器。"""
+"""YMM Live Data行情基础设施适配器。"""
 
 from app.infrastructure.market_data.market_tick_store import (
     MarketTickStore,

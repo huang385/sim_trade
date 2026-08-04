@@ -8,7 +8,7 @@ from redis import Redis
 
 from app.infrastructure.redis_keys import (
     MARKET_TICK_STREAM,
-    YML_FEEDHUB_STATUS_KEY,
+    YMM_LIVE_DATA_STATUS_KEY,
     market_latest_key,
 )
 from app.schemas.market_tick_schema import MarketTick
@@ -205,8 +205,11 @@ class MarketTickStore:
                 # 旧版本累计字段不会被 HSET 自动删除；新 Worker 首次写状态时
                 # 清理一次，避免运维人员误以为新逻辑仍在执行新旧行情过滤。
                 self.redis_client.hdel(
-                    YML_FEEDHUB_STATUS_KEY,
+                    YMM_LIVE_DATA_STATUS_KEY,
                     *self.OBSOLETE_SOURCE_STATUS_FIELDS,
                 )
-            self.redis_client.hset(YML_FEEDHUB_STATUS_KEY, mapping=mapping)
+            self.redis_client.hset(
+                YMM_LIVE_DATA_STATUS_KEY,
+                mapping=mapping,
+            )
             self._source_status_fields_cleaned = True

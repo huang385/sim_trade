@@ -66,6 +66,13 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
             event_time=datetime(2026, 7, 22, 9, 32, 9),
             sequence_id=1,
         ),
+        # 接收端不根据时间或序号过滤；源端推送的合法Tick全部进入Stream。
+        make_tick(
+            exchange_id=exchange_id,
+            symbol=symbol,
+            event_time=datetime(2026, 7, 22, 9, 31, 0),
+            sequence_id=0,
+        ),
     ]
     latest_key = market_latest_key(exchange_id, symbol)
     cleanup_keys = [latest_key, stream_name]
@@ -80,13 +87,13 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
             ) == MarketTickStoreResult.PUBLISHED
 
         latest = store.get_latest(exchange_id, symbol)
-        assert latest["sequence_id"] == "1"
-        assert latest["event_time"] == "2026-07-22T09:32:09+08:00"
+        assert latest["sequence_id"] == "0"
+        assert latest["event_time"] == "2026-07-22T09:31:00+08:00"
         assert latest["bid_volume_1"] == "1"
         assert latest["ask_volume_1"] == "2"
 
         messages = redis_client.xrange(stream_name)
-        assert len(messages) == 4
+        assert len(messages) == 5
         # 最新Hash保留真实Stream编号，供订单到达即时撮合继续复用同一
         # 行情事件和成交幂等键。
         assert latest["stream_message_id"] == messages[-1][0]

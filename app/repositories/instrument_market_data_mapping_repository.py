@@ -45,7 +45,7 @@ class InstrumentMarketDataMappingRepository:
         批量读取内部合约及其在指定行情源中的启用映射。
 
         使用左连接兼容内外代码相同的普通期货，也允许期权在尚未人工维护
-        映射时使用FeedHub标准代码生成规则。订阅重建时只执行一次该查询，
+        映射时使用YMM Live Data标准代码生成规则。订阅变更时只执行一次该查询，
         实时Tick回调不会访问PostgreSQL。
         """
 

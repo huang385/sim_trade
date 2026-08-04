@@ -10,44 +10,65 @@ from app.services.market_tick_normalizer import (
     MarketTickNormalizer,
 )
 from app.services.market_tick_validation_service import (
+    MarketTickValidationError,
     MarketTickValidationService,
 )
 
 
 def make_data(**overrides):
+    channel_overridden = "channel" in overrides
     data = {
-        "code": "AG2609",
-        "exchange": "SHFE",
-        "trading_day": pd.Timestamp("2026-07-22"),
-        "last_price": 14600.0,
-        "pre_close": 14396.0,
+        "action": "feed",
+        "channel": "tick_AG2609",
+        "order_book_id": "AG2609",
+        "trading_date": pd.Timestamp("2026-07-22"),
+        "datetime": pd.Timestamp("2026-07-22 09:32:08"),
+        "last": 14600.0,
+        "prev_close": 14396.0,
         "open": 14460.0,
         "high": 14656.0,
         "low": 14238.0,
-        "cum_volume": 24479,
-        "cum_turnover": 5298353100.0,
+        "volume": 24479,
+        "total_turnover": 5298353100.0,
         "open_interest": 23054.0,
-        "bid_price_1": 14596.0,
-        "bid_volume_1": 1,
-        "ask_price_1": 14599.0,
-        "ask_volume_1": 2,
-        "raw_update_time": "09:32:08",
-        "raw_update_millisec": 0,
-        "event_time": pd.Timestamp("2026-07-22 09:32:08"),
+        "bid": [14596.0],
+        "bid_vol": [1],
+        "ask": [14599.0],
+        "ask_vol": [2],
         "local_recv_time": pd.Timestamp("2026-07-22 09:32:07.337"),
         "sequence_id": 833,
     }
+    aliases = {
+        "code": "order_book_id",
+        "trading_day": "trading_date",
+        "event_time": "datetime",
+        "last_price": "last",
+        "pre_close": "prev_close",
+        "cum_volume": "volume",
+        "cum_turnover": "total_turnover",
+    }
+    for old_name, new_name in aliases.items():
+        if old_name in overrides:
+            overrides[new_name] = overrides.pop(old_name)
+    top_fields = {
+        "bid_price_1": "bid",
+        "bid_volume_1": "bid_vol",
+        "ask_price_1": "ask",
+        "ask_volume_1": "ask_vol",
+    }
+    for old_name, new_name in top_fields.items():
+        if old_name in overrides:
+            overrides[new_name] = [overrides.pop(old_name)]
     data.update(overrides)
+    if not channel_overridden:
+        data["channel"] = f"tick_{data['order_book_id']}"
     return data
 
 
 def make_raw(data=None, **overrides):
     raw = {
-        "type": "tick",
-        "event": "update",
-        "channel": "tick.AG2609",
-        "data": data or make_data(),
-        "server_time": pd.Timestamp("2026-07-22 09:32:07.337"),
+        "action": "feed",
+        "channel": (data or make_data())["channel"],
     }
     raw.update(overrides)
     return raw
@@ -85,6 +106,7 @@ def test_real_tick_fields_are_mapped_without_float_decimal_round_trip():
     assert tick.cumulative_turnover == Decimal("5298353100.0")
     assert tick.bid_volume_1 == 1
     assert tick.ask_volume_1 == 2
+    assert tick.source == "YMM_LIVE_DATA"
 
 
 def test_pandas_timestamps_become_python_datetime_and_trading_date():
@@ -98,7 +120,7 @@ def test_pandas_timestamps_become_python_datetime_and_trading_date():
 
 def test_aware_utc_time_is_converted_to_asia_shanghai():
     tick = normalize(
-        make_data(event_time=datetime(2026, 7, 22, 1, 32, 8, tzinfo=timezone.utc))
+        make_data(datetime=datetime(2026, 7, 22, 1, 32, 8, tzinfo=timezone.utc))
     )
 
     assert tick.event_time.isoformat() == "2026-07-22T09:32:08+08:00"
@@ -107,8 +129,8 @@ def test_aware_utc_time_is_converted_to_asia_shanghai():
 def test_trading_day_comes_from_source_instead_of_event_time():
     tick = normalize(
         make_data(
-            trading_day="20260723",
-            event_time=datetime(2026, 7, 22, 21, 5),
+            trading_date="20260723",
+            datetime=datetime(2026, 7, 22, 21, 5),
         )
     )
 
@@ -134,6 +156,43 @@ def test_invalid_non_finite_price_is_rejected(value):
 
 def test_source_event_id_is_stable_for_same_identity_fields():
     assert normalize().source_event_id == normalize().source_event_id
+
+
+def test_source_event_id_prefers_official_id_and_missing_sequence_is_stable():
+    explicit = normalize(make_data(event_id="SOURCE-EVENT-1"))
+    without_sequence = make_data()
+    without_sequence.pop("sequence_id")
+    first = normalize(without_sequence)
+    second = normalize(dict(without_sequence))
+
+    assert explicit.source_event_id == "SOURCE-EVENT-1"
+    assert first.source_event_id == second.source_event_id
+    assert first.sequence_id == second.sequence_id
+
+
+def test_same_prices_with_distinct_source_identity_remain_distinct_ticks():
+    first = normalize(make_data(sequence_id=833))
+    second = normalize(make_data(sequence_id=834))
+
+    assert first.last_price == second.last_price
+    assert first.bid_price_1 == second.bid_price_1
+    assert first.source_event_id != second.source_event_id
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        make_data(action="bar"),
+        make_data(channel="bar_AG2609"),
+        make_data(order_book_id=""),
+    ],
+)
+def test_invalid_sdk_envelope_rejects_only_current_tick(data):
+    with pytest.raises(MarketTickValidationError):
+        MarketTickValidationService.validate_envelope(
+            data=data,
+            raw={},
+        )
 
 
 def test_crossed_top_of_book_is_trusted_to_upstream_source():

@@ -71,6 +71,12 @@ def make_worker(
     feed_client = Mock()
     feed_client.get_latest_ticks.return_value = {}
     feed_client.start_tick_callbacks.side_effect = lambda *args, **kwargs: FakeSubscription()
+    feed_client.replace_tick_subscriptions.side_effect = lambda codes: {
+        "contracts": {
+            code: {"exists": True, "is_live": True, "subscribed": True}
+            for code in codes
+        }
+    }
     market_data_service = Mock()
     code_mapping_service = Mock()
     code_mapping_service.build_snapshot.side_effect = (
@@ -237,7 +243,7 @@ def test_option_subscription_uses_source_code_and_callback_restores_internal_cod
     option_data = make_data(code="JD2609C4000")
     call.kwargs["on_quote"](option_data, make_raw())
     queued = worker.tick_queue.get_nowait()
-    assert queued.data["code"] == "JD2609-C-4000"
+    assert queued.data["order_book_id"] == "JD2609-C-4000"
 
 
 def test_code_mapping_is_built_once_per_subscription_not_per_tick():
@@ -265,7 +271,32 @@ def test_code_mapping_is_built_once_per_subscription_not_per_tick():
     worker.code_mapping_service.build_snapshot.assert_called_once()
 
 
-def test_added_and_removed_contract_rebuilds_subscription():
+def test_closed_sdk_connection_late_callback_cannot_enter_new_generation():
+    """旧SDK线程关闭边界的晚到回调不能污染新连接的行情队列。"""
+
+    worker, feed_client, *_ = make_worker()
+    callbacks = []
+
+    def capture_callbacks(*_args, **kwargs):
+        callbacks.append(kwargs["on_quote"])
+        return FakeSubscription()
+
+    feed_client.start_tick_callbacks.side_effect = capture_callbacks
+    worker._start_subscription(frozenset({"AG2609"}))
+    old_callback = callbacks[-1]
+    worker._stop_subscription()
+    worker._start_subscription(frozenset({"AG2609"}))
+    current_callback = callbacks[-1]
+
+    old_callback(make_data(sequence_id=100), make_raw())
+    current_callback(make_data(sequence_id=101), make_raw())
+
+    queued = worker.tick_queue.get_nowait()
+    assert queued.data["sequence_id"] == 101
+    assert worker.tick_queue.empty()
+
+
+def test_added_and_removed_contract_updates_existing_sdk_subscription():
     details = {"O1": {"order_book_id": "AG2609"}}
     worker, feed_client, _service, subscriptions, clock = make_worker(
         details=details
@@ -281,9 +312,12 @@ def test_added_and_removed_contract_rebuilds_subscription():
     clock.value = 7
     worker.run_once()
 
-    assert first_subscription.stop_called == 1
+    assert first_subscription.stop_called == 0
     assert subscriptions.current_codes == frozenset({"AG2609", "AU2608"})
-    assert feed_client.start_tick_callbacks.call_count == 2
+    assert feed_client.start_tick_callbacks.call_count == 1
+    feed_client.replace_tick_subscriptions.assert_called_once_with(
+        frozenset({"AG2609", "AU2608"})
+    )
 
     details.clear()
     clock.value = 8
@@ -292,6 +326,7 @@ def test_added_and_removed_contract_rebuilds_subscription():
     worker.run_once()
     assert subscriptions.current_codes == frozenset()
     assert worker._subscription is None
+    assert first_subscription.stop_called == 1
 
 
 def test_subscription_receipt_idle_is_not_error():
@@ -371,23 +406,10 @@ def test_partial_failure_is_degraded_and_retried_after_backoff():
     assert feed_client.start_tick_callbacks.call_count == 1
     clock.value = 4
     worker.run_once()
-    assert feed_client.start_tick_callbacks.call_count == 2
-
-    second_callback = feed_client.start_tick_callbacks.call_args.kwargs["on_subscribe"]
-    second_callback(
-        {
-            "contracts": {
-                "AG2609": {"exists": True, "is_live": True, "subscribed": True},
-                "AU2608": {"exists": True, "is_live": True, "subscribed": False},
-            }
-        }
+    feed_client.replace_tick_subscriptions.assert_called_once_with(
+        frozenset({"AG2609", "AU2608"})
     )
-    clock.value = 5.9
-    worker.run_once()
-    assert feed_client.start_tick_callbacks.call_count == 2
-    clock.value = 6
-    worker.run_once()
-    assert feed_client.start_tick_callbacks.call_count == 3
+    assert feed_client.start_tick_callbacks.call_count == 1
 
 
 def test_all_confirmed_subscription_is_running():
@@ -455,12 +477,62 @@ def test_temporary_redis_status_failure_does_not_break_next_worker_cycle():
     assert worker.tick_store.update_source_status.call_count == 2
 
 
-def test_ingestion_stopped_is_not_recorded_as_failure():
+def test_normal_component_status_is_not_recorded_as_failure():
     worker, *_ = make_worker()
 
-    worker.on_message({"type": "status", "code": "INGESTION_STOPPED"})
+    worker.on_message(
+        {"type": "status", "component": "storage", "state": "connected"}
+    )
 
     assert worker.last_error == ""
+
+
+def test_sdk_reconnect_status_does_not_start_competing_reconnect_loop():
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    subscription = FakeSubscription()
+    worker._subscription = subscription
+    worker._desired_codes = frozenset({"AG2609"})
+    subscriptions.mark_requested(frozenset({"AG2609"}))
+
+    worker.on_message(
+        {"type": "status", "component": "hub", "state": "reconnecting"}
+    )
+    assert worker._derive_status(0) == MarketDataSourceStatus.DISCONNECTED
+    assert subscription.stop_called == 0
+
+    worker.on_message(
+        {"type": "status", "component": "hub", "state": "recovered"}
+    )
+    assert worker._source_issue == ""
+
+
+def test_slow_consumer_gap_stays_degraded_after_recovery():
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    worker._desired_codes = frozenset({"AG2609"})
+    subscriptions.mark_requested(frozenset({"AG2609"}))
+    worker.on_message(
+        {
+            "type": "status",
+            "component": "session",
+            "state": "slow_consumer",
+        }
+    )
+    worker.on_message(
+        {"type": "status", "component": "session", "state": "recovered"}
+    )
+
+    assert worker._derive_status(0) == MarketDataSourceStatus.DEGRADED
+
+
+def test_replaced_sdk_session_requests_worker_stop():
+    worker, *_ = make_worker()
+
+    worker.on_message(
+        {"type": "status", "component": "session", "state": "replaced"}
+    )
+
+    assert worker.stop_event.is_set()
+    assert worker.last_error == "SESSION_REPLACED"
 
 
 def test_dead_subscription_reconnects_after_exponential_delay():

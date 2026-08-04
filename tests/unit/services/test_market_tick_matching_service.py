@@ -32,7 +32,7 @@ from app.services.trade_settlement_service import (
 def make_fields(*, ingest_type="LIVE_CALLBACK"):
     payload = {
         "source_event_id": "TICK-1",
-        "source": "YML_FEEDHUB",
+        "source": "YMM_LIVE_DATA",
         "ingest_type": ingest_type,
         "order_book_id": "AG2609",
         "exchange_id": "SHFE",

@@ -113,7 +113,7 @@ class PnlSnapshotPersistenceService:
             # 单元测试和历史Redis快照可能只保存经过上游校验的核心字段；
             # 仍要求来源、实时回调类型和有限正数价格全部满足。
             if (
-                values.get("source") != "YML_FEEDHUB"
+                values.get("source") != "YMM_LIVE_DATA"
                 or values.get("ingest_type") != "LIVE_CALLBACK"
             ):
                 return None

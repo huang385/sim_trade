@@ -20,7 +20,7 @@ def market_values(symbol: str, price: str) -> dict[str, str]:
         SimpleNamespace(
             model_dump=lambda **_kwargs: {
                 "source_event_id": f"TICK-{symbol}",
-                "source": "YML_FEEDHUB",
+                "source": "YMM_LIVE_DATA",
                 "ingest_type": "LIVE_CALLBACK",
                 "order_book_id": symbol,
                 "exchange_id": "SHFE",

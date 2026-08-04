@@ -14,14 +14,14 @@ class MarketTickValidationService:
 
     @staticmethod
     def validate_envelope(*, data: dict, raw: dict) -> None:
-        if raw.get("type") != "tick":
-            raise MarketTickValidationError("消息类型不是tick")
-        if raw.get("event") != "update":
-            raise MarketTickValidationError("tick事件不是update")
-        if not str(data.get("code") or "").strip():
-            raise MarketTickValidationError("行情code不能为空")
-        if not str(data.get("exchange") or "").strip():
-            raise MarketTickValidationError("行情exchange不能为空")
+        del raw
+        if data.get("action") != "feed":
+            raise MarketTickValidationError("行情action不是feed")
+        channel = str(data.get("channel") or "").strip()
+        if not channel.startswith("tick_"):
+            raise MarketTickValidationError("行情频道不是tick")
+        if not str(data.get("order_book_id") or "").strip():
+            raise MarketTickValidationError("行情order_book_id不能为空")
 
     @classmethod
     def validate(cls, *, tick: MarketTick, instrument) -> None:

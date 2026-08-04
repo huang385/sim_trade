@@ -19,7 +19,7 @@ class MarketTick(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     source_event_id: str
-    source: Literal["YML_FEEDHUB"] = "YML_FEEDHUB"
+    source: Literal["YMM_LIVE_DATA"] = "YMM_LIVE_DATA"
     ingest_type: MarketTickIngestType
 
     order_book_id: str

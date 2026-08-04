@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, select
 
+from app.common.exceptions import BusinessRuleError
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
@@ -20,6 +21,9 @@ from app.schemas.market_tick_schema import MarketTick
 from app.services.option_market_price_service import OptionMarginMarketPrices
 from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
+)
+from app.services.option_trading_permission_service import (
+    OptionTradingPermissionService,
 )
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
@@ -47,6 +51,15 @@ class _FixedOptionPrices:
             option_price=Decimal("100"),
             underlying_price=Decimal("3500"),
         )
+
+
+class _IndexOptionPermissionConfig:
+    """为集成测试显式开启买方权限，卖方开仓仍由正式服务固定拒绝。"""
+
+    option_trading_enabled = True
+    commodity_option_trading_enabled = True
+    index_option_buy_trading_enabled = True
+    index_option_short_trading_enabled = False
 
 
 def _settle(order_id: str, event_id: str, price: str, volume: int):
@@ -353,3 +366,220 @@ def test_commodity_option_four_directions_use_real_postgres(
                 integration_context.symbol,
             ),
         )
+
+
+def test_index_option_long_open_close_uses_real_postgres(integration_context):
+    """真实验证股指期权买方开平仓、权利金、手续费、持仓和卖方禁用边界。"""
+
+    suffix = uuid4().hex[:10].upper()
+    index_symbol = f"IDX{suffix}"
+    option_symbol = f"IO{suffix}-C-4000"
+    option_id = None
+    index_id = None
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        account.option_trading_enabled = True
+        account.risk_available_cash = account.available_cash
+        index = Instrument(
+            order_book_id=index_symbol,
+            symbol=index_symbol,
+            exchange_id="CFFEX",
+            instrument_name="集成测试标的指数",
+            product_id="CSI300",
+            market_type="INDEX",
+            instrument_type="INDEX",
+            contract_multiplier=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            min_volume=1,
+            max_volume=1,
+            is_active=True,
+            is_tradeable=False,
+            data_source="INTERNAL",
+        )
+        db.add(index)
+        db.flush()
+        index_id = index.id
+        option = Instrument(
+            order_book_id=option_symbol,
+            symbol=option_symbol,
+            exchange_id="CFFEX",
+            instrument_name="集成测试沪深300股指期权",
+            product_id="IO",
+            market_type="FUTURES",
+            instrument_type="INDEX_OPTION",
+            underlying_instrument_id=index.id,
+            option_type="CALL",
+            strike_price=Decimal("4000"),
+            exercise_style="EUROPEAN",
+            settlement_type="CASH",
+            contract_multiplier=Decimal("100"),
+            price_tick=Decimal("0.2"),
+            min_volume=1,
+            max_volume=100,
+            expire_date=integration_context.trading_day + timedelta(days=90),
+            is_active=True,
+            is_tradeable=True,
+            data_source="INTERNAL",
+        )
+        db.add(option)
+        db.flush()
+        option_id = option.id
+        for direction, offset_flag in (
+            ("BUY", "OPEN"),
+            ("SELL", "CLOSE_TODAY"),
+        ):
+            db.add(
+                FeeRuleItem(
+                    exchange_id="CFFEX",
+                    product_id="IO",
+                    instrument_id=option.id,
+                    instrument_type="INDEX_OPTION",
+                    direction=direction,
+                    offset_flag=offset_flag,
+                    commission_type="BY_VOLUME",
+                    commission_parameter=Decimal("15"),
+                    trading_day=integration_context.trading_day,
+                    rule_version=f"IT-{suffix}-{direction}-{offset_flag}",
+                    data_source="INTERNAL",
+                    is_active=True,
+                )
+            )
+        db.commit()
+
+    try:
+        order_service = make_order_service(integration_context)
+        order_service.option_permission_service = (
+            OptionTradingPermissionService(_IndexOptionPermissionConfig())
+        )
+
+        with SessionLocal() as db:
+            buy_open = order_service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"IDXOPT-OPEN-{suffix}",
+                    exchange_id="CFFEX",
+                    symbol=option_symbol,
+                    direction="BUY",
+                    offset_flag="OPEN",
+                    limit_price=Decimal("100"),
+                    volume=2,
+                ),
+            )
+        assert buy_open.status == "ACCEPTED"
+        assert buy_open.instrument_type == "INDEX_OPTION"
+        assert buy_open.frozen_cash == Decimal("20000.000000")
+        assert buy_open.frozen_margin == Decimal("0.000000")
+        assert buy_open.frozen_commission == Decimal("30.000000")
+        assert _settle(
+            buy_open.order_id,
+            f"IDXOPT-OPEN-{suffix}",
+            "98",
+            2,
+        ).action == "SETTLED"
+
+        with SessionLocal() as db:
+            trade = db.scalar(
+                select(Trade).where(Trade.order_id == buy_open.order_id)
+            )
+            position = db.scalar(
+                select(Position).where(
+                    Position.account_id == integration_context.account_id,
+                    Position.order_book_id == option_symbol,
+                    Position.direction == "LONG",
+                )
+            )
+            account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            assert trade.turnover == Decimal("19600.000000")
+            assert trade.premium_cash_flow == Decimal("-19600.000000")
+            assert trade.commission == Decimal("30.000000")
+            assert trade.margin == Decimal("0.000000")
+            assert position.total_volume == 2
+            assert position.average_open_price == Decimal("98.000000")
+            assert position.option_market_value == Decimal("19600.000000")
+            assert account.used_margin == Decimal("0.000000")
+            assert account.daily_commission == Decimal("30.000000")
+
+        with SessionLocal() as db:
+            sell_close = order_service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"IDXOPT-CLOSE-{suffix}",
+                    exchange_id="CFFEX",
+                    symbol=option_symbol,
+                    direction="SELL",
+                    offset_flag="CLOSE_TODAY",
+                    limit_price=Decimal("105"),
+                    volume=2,
+                ),
+            )
+        assert _settle(
+            sell_close.order_id,
+            f"IDXOPT-CLOSE-{suffix}",
+            "105",
+            2,
+        ).action == "SETTLED"
+
+        with SessionLocal() as db:
+            position = db.scalar(
+                select(Position).where(
+                    Position.account_id == integration_context.account_id,
+                    Position.order_book_id == option_symbol,
+                    Position.direction == "LONG",
+                )
+            )
+            account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            assert position.total_volume == 0
+            assert position.realized_pnl == Decimal("1400.000000")
+            assert account.daily_commission == Decimal("60.000000")
+            assert account.daily_close_pnl == Decimal("1400.000000")
+            assert account.daily_pnl == Decimal("1340.000000")
+
+        with SessionLocal() as db:
+            with pytest.raises(BusinessRuleError) as exc_info:
+                order_service.create_order(
+                    db,
+                    make_request(
+                        integration_context,
+                        client_order_id=f"IDXOPT-SHORT-{suffix}",
+                        exchange_id="CFFEX",
+                        symbol=option_symbol,
+                        direction="SELL",
+                        offset_flag="OPEN",
+                        limit_price=Decimal("100"),
+                        volume=1,
+                    ),
+                )
+        assert (
+            exc_info.value.error_code
+            == "INDEX_OPTION_SHORT_TRADING_UNAVAILABLE"
+        )
+    finally:
+        with SessionLocal() as db:
+            if option_id is not None:
+                db.execute(
+                    delete(FeeRuleItem).where(
+                        FeeRuleItem.instrument_id == option_id
+                    )
+                )
+                db.execute(
+                    delete(Instrument).where(Instrument.id == option_id)
+                )
+            if index_id is not None:
+                db.execute(
+                    delete(Instrument).where(Instrument.id == index_id)
+                )
+            db.commit()

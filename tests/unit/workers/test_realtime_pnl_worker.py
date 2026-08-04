@@ -19,7 +19,7 @@ def make_fields(symbol: str, price: str, sequence: int) -> dict[str, str]:
         "payload": json.dumps(
             {
                 "source_event_id": f"{symbol}-{sequence}",
-                "source": "YML_FEEDHUB",
+                "source": "YMM_LIVE_DATA",
                 "ingest_type": "LIVE_CALLBACK",
                 "order_book_id": symbol,
                 "exchange_id": "DCE",

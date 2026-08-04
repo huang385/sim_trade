@@ -101,6 +101,6 @@ def test_mapping_repository_is_queried_once_for_whole_subscription():
 
     repository.list_instruments_with_mapping.assert_called_once_with(
         db,
-        data_source="YML_FEEDHUB",
+        data_source="YMM_LIVE_DATA",
         order_book_ids={"JD2609-C-4000", "SI2704-P-8900"},
     )

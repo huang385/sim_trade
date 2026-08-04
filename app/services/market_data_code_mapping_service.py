@@ -22,7 +22,7 @@ class MarketDataCodeMappingSnapshot:
     """
     单次行情订阅使用的不可变双向代码映射。
 
-    internal_to_source用于向FeedHub发起订阅；source_to_internal用于把回调
+    internal_to_source用于向YMM Live Data发起订阅；source_to_internal用于把回调
     中的外部代码还原成订单、持仓和Redis统一使用的内部order_book_id。
     快照随订阅回调闭包保存，避免每条Tick查询数据库，也避免重连期间新旧
     映射互相污染。
@@ -59,7 +59,7 @@ class MarketDataCodeMappingSnapshot:
 class MarketDataCodeMappingService:
     """在内部合约代码与指定行情源代码之间建立订阅期内映射。"""
 
-    DATA_SOURCE = "YML_FEEDHUB"
+    DATA_SOURCE = "YMM_LIVE_DATA"
 
     def __init__(
         self,
@@ -70,9 +70,9 @@ class MarketDataCodeMappingService:
     @staticmethod
     def _default_source_code(*, order_book_id: str, instrument_type: str) -> str:
         """
-        生成FeedHub默认代码。
+        生成YMM Live Data默认代码。
 
-        项目内部期权代码使用JD2609-C-4000形式，而FeedHub使用
+        项目内部期权代码使用JD2609-C-4000形式，而源端使用
         JD2609C4000形式；商品期权和股指期权都统一移除分隔符。普通期货
         和指数默认保持原代码。特殊行情源代码仍可由映射表显式覆盖。
         """

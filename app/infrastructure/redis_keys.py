@@ -45,7 +45,7 @@ PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY = "pnl:realtime:snapshot_sequence"
 PNL_ACCOUNT_REALTIME_VERSIONS_KEY = "pnl:realtime:account_versions"
 PNL_POSITION_REALTIME_VERSIONS_KEY = "pnl:realtime:position_versions"
-YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
+YMM_LIVE_DATA_STATUS_KEY = "market:source:ymm_live_data:status"
 
 # WebSocket实时投影、单实例租约和短期认证票据。
 REALTIME_EVENT_STREAM = settings.realtime_event_stream_name

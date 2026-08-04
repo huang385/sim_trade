@@ -192,12 +192,12 @@ def test_same_account_positions_are_loaded_and_persisted_in_batches():
     market_tick_store = Mock()
     market_tick_store.get_latest_many.return_value = {
         ("DCE", "JD2609"): {
-            "source": "YML_FEEDHUB",
+            "source": "YMM_LIVE_DATA",
             "ingest_type": "LIVE_CALLBACK",
             "last_price": "110",
         },
         ("DCE", "JM2609"): {
-            "source": "YML_FEEDHUB",
+            "source": "YMM_LIVE_DATA",
             "ingest_type": "LIVE_CALLBACK",
             "last_price": "220",
         },
@@ -332,14 +332,14 @@ def test_only_successfully_committed_account_positions_clear_dirty():
     market_tick_store.get_latest_many.side_effect = [
         {
             ("DCE", "JD2609"): {
-                "source": "YML_FEEDHUB",
+                "source": "YMM_LIVE_DATA",
                 "ingest_type": "LIVE_CALLBACK",
                 "last_price": "110",
             }
         },
         {
             ("DCE", "JM2609"): {
-                "source": "YML_FEEDHUB",
+                "source": "YMM_LIVE_DATA",
                 "ingest_type": "LIVE_CALLBACK",
                 "last_price": "220",
             }
@@ -427,7 +427,7 @@ def test_dirty_version_change_keeps_new_version_after_database_commit():
     market_tick_store = Mock()
     market_tick_store.get_latest_many.return_value = {
         ("DCE", "JD2609"): {
-            "source": "YML_FEEDHUB",
+            "source": "YMM_LIVE_DATA",
             "ingest_type": "LIVE_CALLBACK",
             "last_price": "110",
         }
@@ -645,12 +645,12 @@ def test_option_amounts_are_recalculated_from_database_facts_not_redis():
             get_latest_many=Mock(
                 return_value={
                     ("DCE", "JD2609-C-4000"): {
-                        "source": "YML_FEEDHUB",
+                        "source": "YMM_LIVE_DATA",
                         "ingest_type": "LIVE_CALLBACK",
                         "last_price": "105",
                     },
                     ("DCE", "JD2609"): {
-                        "source": "YML_FEEDHUB",
+                        "source": "YMM_LIVE_DATA",
                         "ingest_type": "LIVE_CALLBACK",
                         "last_price": "4033",
                     },
