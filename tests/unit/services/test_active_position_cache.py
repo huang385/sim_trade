@@ -18,11 +18,12 @@ class EmptyPositionRepository:
     def __init__(self):
         self.calls = 0
         self.contract_calls = 0
+        self.active_rows = []
         self.contract_rows = []
 
     def list_active_calculation_rows(self, _db):
         self.calls += 1
-        return []
+        return list(self.active_rows)
 
     def list_active_calculation_rows_by_contracts(
         self,
@@ -45,6 +46,14 @@ class EmptyAccountRepository:
             for account_id in _account_ids
             if account_id in self.accounts
         ]
+
+
+class EmptyOutboxRepository:
+    def __init__(self, versions=None):
+        self.versions = versions or {}
+
+    def list_latest_fact_versions(self, _db, **_kwargs):
+        return dict(self.versions)
 
 
 def make_account(account_id="A001", frozen_margin="0"):
@@ -76,6 +85,7 @@ def test_cycle_snapshot_reads_version_once_and_is_immutable():
         session_factory=FakeSession,
         position_repository=repository,
         account_repository=EmptyAccountRepository(),
+        outbox_repository=EmptyOutboxRepository(),
         refresh_ms=60_000,
         version_loader=load_version,
     )
@@ -104,6 +114,7 @@ def test_account_fact_version_refreshes_only_accounts_once():
         session_factory=FakeSession,
         position_repository=positions,
         account_repository=accounts,
+        outbox_repository=EmptyOutboxRepository(),
         refresh_ms=60_000,
         version_loader=lambda: "1",
     )
@@ -135,6 +146,7 @@ def test_account_fact_version_refreshes_only_accounts_once():
         session_factory=FakeSession,
         position_repository=positions,
         account_repository=accounts,
+        outbox_repository=EmptyOutboxRepository(),
         refresh_ms=60_000,
         version_loader=lambda: "1",
     )
@@ -154,6 +166,7 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
         session_factory=FakeSession,
         position_repository=positions,
         account_repository=accounts,
+        outbox_repository=EmptyOutboxRepository(),
         refresh_ms=60_000,
         version_loader=lambda: "1",
     )
@@ -202,3 +215,55 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
     assert len(added.get_by_contract("DCE", "JD2609")) == 1
     assert removed.get_by_contract("DCE", "JD2609") == ()
     assert removed.get_by_account("A001") == ()
+
+
+def test_cycle_snapshot_carries_postgres_outbox_fact_versions():
+    positions = EmptyPositionRepository()
+    accounts = EmptyAccountRepository()
+    account = make_account()
+    accounts.accounts["A001"] = account
+    position = SimpleNamespace(
+        position_id="P1",
+        account_id="A001",
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        symbol="JD2609",
+        direction="LONG",
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        multiplier_snapshot=Decimal("10"),
+    )
+    detail = SimpleNamespace(
+        position_detail_id="PD1",
+        open_price=Decimal("3200"),
+        pnl_base_price=Decimal("3200"),
+        remaining_volume=1,
+        multiplier_snapshot=Decimal("10"),
+    )
+    instrument = SimpleNamespace(contract_multiplier=Decimal("10"))
+    positions.active_rows = [(position, detail, instrument, account)]
+    outbox = EmptyOutboxRepository(
+        {
+            ("ACCOUNT", "A001"): "70",
+            ("POSITION", "P1"): "80",
+        }
+    )
+    cache = ActivePositionCache(
+        session_factory=FakeSession,
+        position_repository=positions,
+        account_repository=accounts,
+        outbox_repository=outbox,
+        refresh_ms=60_000,
+        version_loader=lambda: "1",
+    )
+
+    cycle = cache.get_cycle_snapshot(
+        extra_account_ids={"A001"},
+        refresh_account_versions={"A001": "1"},
+        refresh_contract_versions={("DCE", "JD2609"): "1"},
+    )
+
+    assert cycle.get_account("A001").source_fact_version == "70"
+    assert cycle.get_by_contract("DCE", "JD2609")[0].source_fact_version == (
+        "80"
+    )

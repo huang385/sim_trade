@@ -191,6 +191,7 @@ class RealtimePnlService:
             event_time=tick.event_time,
             source_event_id=tick.source_event_id,
             updated_at=updated_at,
+            source_position_fact_version=snapshot.source_fact_version,
         )
 
     @staticmethod
@@ -874,6 +875,7 @@ class RealtimePnlService:
                         valuation.equity,
                     ),
                     updated_at=updated_at,
+                    source_account_fact_version=account.source_fact_version,
                 )
             )
 

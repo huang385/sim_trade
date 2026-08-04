@@ -100,6 +100,20 @@ function asNumber(value) {
     return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function compareIntegerVersion(left, right) {
+    const normalize = (value) => {
+        const raw = String(value ?? "").replace(/^0+/, "");
+        return raw || "0";
+    };
+    const normalizedLeft = normalize(left);
+    const normalizedRight = normalize(right);
+    if (normalizedLeft.length !== normalizedRight.length) {
+        return normalizedLeft.length > normalizedRight.length ? 1 : -1;
+    }
+    if (normalizedLeft === normalizedRight) return 0;
+    return normalizedLeft > normalizedRight ? 1 : -1;
+}
+
 function formatMoney(value, digits = 2) {
     return asNumber(value).toLocaleString("zh-CN", {
         minimumFractionDigits: digits,
@@ -333,7 +347,22 @@ function applyWebSocketSnapshot(payload) {
     );
     if (!snapshot) return;
     state.account = snapshot.account;
-    state.pnl = snapshot.pnl;
+    state.pnl = {
+        ...snapshot.pnl,
+        ...(snapshot.valuation?.risk_state !== undefined
+            ? {risk_state: snapshot.valuation.risk_state} : {}),
+        ...(snapshot.valuation?.risk_available_cash !== undefined
+            ? {risk_available_cash: snapshot.valuation.risk_available_cash}
+            : {}),
+        ...(snapshot.valuation?.realtime_snapshot_version !== undefined
+            ? {
+                pnl_realtime_version:
+                    snapshot.valuation.realtime_snapshot_version,
+                risk_realtime_version:
+                    snapshot.valuation.realtime_snapshot_version,
+            }
+            : {}),
+    };
     state.positions = snapshot.positions || [];
     state.orders = snapshot.active_orders || [];
     state.trades = snapshot.today_trades || [];
@@ -402,7 +431,6 @@ function applyRealtimeEvent(event) {
             "realized_pnl",
             "daily_close_pnl",
             "daily_commission",
-            "risk_state",
             "updated_at",
         ];
         const factPatch = {};
@@ -415,6 +443,11 @@ function applyRealtimeEvent(event) {
     }
     if (event.event_type === "ACCOUNT_PNL_UPDATED" && state.account && state.pnl) {
         const values = event.payload || {};
+        const version = values.realtime_snapshot_version;
+        if (version !== undefined && compareIntegerVersion(
+            version,
+            state.pnl.pnl_realtime_version,
+        ) < 0) return;
         // Redis实时PnL只更新派生估值字段，不能覆盖cash_balance、冻结资金、
         // 实际保证金或手续费等PostgreSQL基础事实。
         state.pnl = {
@@ -426,21 +459,58 @@ function applyRealtimeEvent(event) {
                     : {}),
             ...(values.daily_position_pnl !== undefined
                 ? {daily_position_pnl: values.daily_position_pnl} : {}),
-            ...(values.daily_close_pnl !== undefined
-                ? {daily_close_pnl: values.daily_close_pnl} : {}),
-            ...(values.daily_commission !== undefined
-                ? {daily_commission: values.daily_commission} : {}),
             ...(values.daily_pnl !== undefined ? {daily_pnl: values.daily_pnl} : {}),
             ...(values.equity !== undefined ? {equity: values.equity} : {}),
             ...(values.available_cash !== undefined
                 ? {available_cash: values.available_cash} : {}),
-            ...(values.risk_ratio !== undefined
-                ? {risk_ratio: values.risk_ratio} : {}),
+            ...(values.futures_unrealized_pnl !== undefined
+                ? {futures_unrealized_pnl: values.futures_unrealized_pnl}
+                : {}),
+            ...(values.option_realtime_required_margin !== undefined
+                ? {
+                    option_realtime_required_margin:
+                        values.option_realtime_required_margin,
+                }
+                : {}),
+            ...(values.long_option_market_value !== undefined
+                ? {long_option_market_value: values.long_option_market_value}
+                : {}),
+            ...(values.short_option_market_value !== undefined
+                ? {short_option_market_value: values.short_option_market_value}
+                : {}),
+            ...(values.net_option_market_value !== undefined
+                ? {net_option_market_value: values.net_option_market_value}
+                : {}),
             ...(values.updated_at !== undefined
                 ? {updated_at: values.updated_at} : {}),
             ...(values.realtime_snapshot_version !== undefined
-                ? {realtime_snapshot_version: values.realtime_snapshot_version}
+                ? {pnl_realtime_version: values.realtime_snapshot_version}
                 : {}),
+            data_source: "REDIS_REALTIME",
+        };
+        renderAccount(state.account, state.pnl);
+        return;
+    }
+    if (event.event_type === "RISK_STATE_CHANGED" && state.account && state.pnl) {
+        const values = event.payload || {};
+        const version = values.realtime_snapshot_version;
+        // 风险字段使用独立实时版本域。Redis Stream ID只负责传输顺序，
+        // 不能作为风险状态新旧判断依据。
+        if (version === undefined || compareIntegerVersion(
+            version,
+            state.pnl.risk_realtime_version,
+        ) < 0) return;
+        state.pnl = {
+            ...state.pnl,
+            ...(values.risk_state !== undefined
+                ? {risk_state: values.risk_state} : {}),
+            ...(values.risk_ratio !== undefined
+                ? {risk_ratio: values.risk_ratio} : {}),
+            ...(values.risk_available_cash !== undefined
+                ? {risk_available_cash: values.risk_available_cash} : {}),
+            ...(values.updated_at !== undefined
+                ? {updated_at: values.updated_at} : {}),
+            risk_realtime_version: version,
             data_source: "REDIS_REALTIME",
         };
         renderAccount(state.account, state.pnl);
@@ -582,8 +652,10 @@ function renderAccount(account, pnl) {
     setMetric(elements.metricRealized, account.realized_pnl);
     setMetric(elements.metricDailyPnl, pnl.daily_pnl);
     setMetric(elements.metricDailyPosition, pnl.daily_position_pnl);
-    setMetric(elements.metricDailyClose, pnl.daily_close_pnl);
-    elements.metricDailyCommission.textContent = formatMoney(pnl.daily_commission);
+    setMetric(elements.metricDailyClose, account.daily_close_pnl);
+    elements.metricDailyCommission.textContent = formatMoney(
+        account.daily_commission,
+    );
     elements.metricRisk.textContent = `${formatMoney(asNumber(pnl.risk_ratio) * 100)}%`;
     elements.metricSource.textContent =
         `${pnl.data_source} · ${formatTime(pnl.updated_at)}`;

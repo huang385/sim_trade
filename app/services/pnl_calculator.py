@@ -41,6 +41,8 @@ class PositionPnlSnapshot:
     underlying_exchange_id: str | None = None
     underlying_symbol: str | None = None
     margin_rule_snapshot: tuple[tuple[str, str], ...] = ()
+    # 本轮实际读取的PostgreSQL持仓事实Outbox版本。
+    source_fact_version: str = "0"
 
     @property
     def underlying_key(self) -> tuple[str, str] | None:

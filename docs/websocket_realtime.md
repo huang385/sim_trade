@@ -33,7 +33,7 @@ Token，不显示完整Ticket；WebSocket断开后指数退避重连并重新加
 
 ## 事件与恢复
 
-金额字段全部使用十进制字符串。事件中有两类互不混用的版本：
+金额字段全部使用十进制字符串。链路中有三类互不混用的版本：
 
 - `version`是`stream:realtime-events`中的Redis Stream消息编号，只用于断线
   恢复、快照屏障和传输顺序。
@@ -41,6 +41,11 @@ Token，不显示完整Ticket；WebSocket断开后指数退避重连并重新加
   持仓或账户的业务事实新旧。
 - `realtime_version`是PnL单写者生成的单调计算周期版本，仅用于证明Redis实时
   Hash、实体最新版本索引和本周期实时事件来自同一次原子写入。
+
+账户和持仓PnL Hash还分别保存`source_account_fact_version`和
+`source_position_fact_version`。它们是PnL本轮实际读取的PostgreSQL事实对应
+的Outbox自增编号，不是Stream ID。严格快照在同一个只读MVCC事务中批量读取
+当前Outbox版本，只有PnL已应用版本不小于当前事实版本时才允许发送。
 
 投影写入Redis时通过Lua脚本原子比较聚合根的`business_version`。晚到的旧
 Outbox消息会被标记为已处理，但不会重新写入实时Stream，因此不能把
@@ -55,13 +60,24 @@ Redis数据缺失时连接会要求重试，不会静默退回较旧的PostgreSQ
 有活动持仓时，Gateway还会在一个Redis Pipeline中批量读取账户/持仓Hash及
 其最新版本索引；任何Hash缺失、格式错误或`realtime_snapshot_version`与
 对应最新版本不一致，都不会发送`SNAPSHOT`或推进连接游标。
+同时，相关账户不得仍位于资金事实Dirty集合，账户级持仓结构Dirty集合也必须
+为空。处理期间发生新成交时，版本CAS不会清掉新Dirty，本次订阅会失败并等待
+PnL Worker下一周期完成。
+
+PostgreSQL确认账户已经没有活动持仓时，严格快照不会读取残留Redis浮盈，
+而是把累计浮盈和当日持仓盈亏明确置零，再使用数据库中的现金、保证金、
+冻结资金、平仓盈亏和手续费按统一Decimal公式重算权益、可用资金和风险率。
+因此最后一条持仓关闭后即使PnL Worker暂停且后续没有行情，也不会返回旧浮盈。
 
 业务事务还会在同一个Outbox中生成绝对事实事件：
 
 - `ACCOUNT_FACT_UPDATED`包含PostgreSQL账户现金、保证金、冻结资金、手续费和
   已实现盈亏等基础事实绝对值；
-- `ACCOUNT_PNL_UPDATED`只包含Redis实时浮盈、动态权益、实时可用资金和风险
-  估值，两类字段使用独立事件与版本域；
+- `ACCOUNT_PNL_UPDATED`只包含Redis实时浮盈、动态权益、实时可用资金和期权
+  市值等派生金额；
+- `RISK_STATE_CHANGED`是`risk_state`、`risk_ratio`和
+  `risk_available_cash`的唯一实时推送事件。测试页面使用
+  `realtime_snapshot_version`拒绝迟到的旧风险事件；
 - `POSITION_UPDATED`包含当前持仓数量、成本、保证金和盈亏绝对值；
 - 持仓全部平完后发送`POSITION_CLOSED`，客户端直接移除该持仓。
 
@@ -88,6 +104,8 @@ Cookie取得新Access Token后再申请新Ticket。
 - `pnl:realtime:snapshot_sequence`：PnL单写者计算周期的全局单调序号；
 - `pnl:realtime:account_versions`：每个账户最新实时Hash版本；
 - `pnl:realtime:position_versions`：每条持仓最新实时Hash版本。
+- `pnl:dirty_account_contracts:{account_id}`：账户尚未完成处理的结构Dirty
+  合约集合，用于覆盖最后一条持仓已关闭、活动持仓列表已为空的竞态窗口。
 
 PnL Worker通过同一个Lua脚本写入金额Hash、Hash内版本、实体最新版本索引和
 `stream:realtime-events`实时事件。Lua只附加版本和执行Redis命令，不参与

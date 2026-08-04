@@ -62,6 +62,7 @@ def test_account_fact_event_owns_only_postgres_decimal_fields():
         "available_cash",
         "risk_available_cash",
         "risk_ratio",
+        "risk_state",
     }.isdisjoint(payload)
 
 

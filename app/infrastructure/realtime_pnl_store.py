@@ -33,6 +33,7 @@ from app.infrastructure.redis_keys import (
     pnl_account_key,
     pnl_account_positions_key,
     pnl_contract_positions_key,
+    pnl_dirty_account_contracts_key,
     pnl_dirty_contract_accounts_key,
     pnl_dirty_contract_member,
     pnl_position_key,
@@ -74,8 +75,16 @@ return items
 CLEAR_DIRTY_CONTRACT_IF_UNCHANGED_SCRIPT = """
 local current = redis.call('HGET', KEYS[1], ARGV[1])
 if current == ARGV[2] then
+    local accounts = redis.call('SMEMBERS', KEYS[3])
     redis.call('SREM', KEYS[2], ARGV[1])
     redis.call('HDEL', KEYS[1], ARGV[1])
+    for _, account_id in ipairs(accounts) do
+        local account_key = ARGV[3] .. account_id
+        redis.call('SREM', account_key, ARGV[1])
+        if redis.call('SCARD', account_key) == 0 then
+            redis.call('DEL', account_key)
+        end
+    end
     redis.call('DEL', KEYS[3])
     return 1
 end
@@ -101,18 +110,20 @@ local version = redis.call('INCR', KEYS[1])
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], tostring(version))
 redis.call('SADD', KEYS[4], ARGV[2])
+redis.call('SADD', KEYS[5], ARGV[1])
 return tostring(version)
 """
 
 MARK_CONTRACT_DIRTY_ONCE_SCRIPT = """
-if redis.call('EXISTS', KEYS[5]) == 1 then
+if redis.call('EXISTS', KEYS[6]) == 1 then
     return ''
 end
 local version = redis.call('INCR', KEYS[1])
 redis.call('SADD', KEYS[2], ARGV[1])
 redis.call('HSET', KEYS[3], ARGV[1], tostring(version))
 redis.call('SADD', KEYS[4], ARGV[2])
-redis.call('SET', KEYS[5], tostring(version), 'EX', ARGV[3])
+redis.call('SADD', KEYS[5], ARGV[1])
+redis.call('SET', KEYS[6], tostring(version), 'EX', ARGV[3])
 return tostring(version)
 """
 
@@ -249,11 +260,12 @@ class RealtimePnlStore:
         return str(
             self.redis_client.eval(
                 MARK_CONTRACT_DIRTY_SCRIPT,
-                4,
+                5,
                 PNL_POSITION_CACHE_VERSION_KEY,
                 PNL_DIRTY_CONTRACTS_KEY,
                 PNL_DIRTY_CONTRACT_VERSIONS_KEY,
                 pnl_dirty_contract_accounts_key(exchange_id, symbol),
+                pnl_dirty_account_contracts_key(account_id),
                 member,
                 account_id,
             )
@@ -278,11 +290,12 @@ class RealtimePnlStore:
         member = pnl_dirty_contract_member(exchange_id, symbol)
         version = self.redis_client.eval(
             MARK_CONTRACT_DIRTY_ONCE_SCRIPT,
-            5,
+            6,
             PNL_POSITION_CACHE_VERSION_KEY,
             PNL_DIRTY_CONTRACTS_KEY,
             PNL_DIRTY_CONTRACT_VERSIONS_KEY,
             pnl_dirty_contract_accounts_key(exchange_id, symbol),
+            pnl_dirty_account_contracts_key(account_id),
             processed_pnl_fact_event_key(event_id),
             member,
             account_id,
@@ -415,6 +428,7 @@ class RealtimePnlStore:
                 pnl_dirty_contract_accounts_key(exchange_id, symbol),
                 member,
                 expected_version,
+                "pnl:dirty_account_contracts:",
             )
         )
         return completed
@@ -591,6 +605,29 @@ class RealtimePnlStore:
                 f"{item.updated_at.isoformat()}"
             )
             account_payload = _mapping(item)
+            # 账户PnL事件只拥有实时派生金额；风险状态、风险率和风险可用
+            # 资金由同周期的RISK_STATE_CHANGED独占，数据库基础事实则由
+            # ACCOUNT_FACT_UPDATED负责。Hash仍保存完整估值供严格快照读取。
+            pnl_event_payload = {
+                field: account_payload[field]
+                for field in (
+                    "account_id",
+                    "cumulative_unrealized_pnl",
+                    "daily_position_pnl",
+                    "daily_pnl",
+                    "equity",
+                    "available_cash",
+                    "futures_unrealized_pnl",
+                    "option_realtime_required_margin",
+                    "long_option_market_value",
+                    "short_option_market_value",
+                    "net_option_market_value",
+                    "updated_at",
+                    "data_source",
+                    "source_account_fact_version",
+                )
+                if field in account_payload
+            }
             operations.append(
                 [
                     "XADD_REALTIME_EVENT",
@@ -607,7 +644,7 @@ class RealtimePnlStore:
                             "entity_id": item.account_id,
                             "occurred_at": item.updated_at.isoformat(),
                             "version": dirty_version,
-                            "payload": account_payload,
+                            "payload": pnl_event_payload,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -641,6 +678,7 @@ class RealtimePnlStore:
                                 "risk_available_cash": account_payload[
                                     "risk_available_cash"
                                 ],
+                                "updated_at": account_payload["updated_at"],
                             },
                         },
                         ensure_ascii=False,
@@ -826,12 +864,15 @@ class RealtimePnlStore:
         dict[str, dict[str, str]],
         dict[str, str],
         dict[str, str],
+        set[str],
+        set[str],
     ]:
-        """一个Pipeline读取实时Hash及各实体最后原子写入的周期版本。
+        """一个Pipeline读取实时Hash、周期版本和账户相关Dirty状态。
 
         Pipeline内仍是批量命令，不因账户或持仓数量增加网络往返。严格
-        WebSocket快照用Hash内版本与独立版本索引交叉校验，任一不一致都
-        不能把当前事件游标当作已被快照覆盖。
+        WebSocket快照除交叉校验Hash版本外，还要求账户资金事实和持仓结构
+        均无未完成Dirty。账户级结构集合也能覆盖最后一条持仓已经关闭、
+        当前活动持仓查询已看不到原合约的窗口。
         """
 
         accounts = list(dict.fromkeys(account_ids))
@@ -843,6 +884,10 @@ class RealtimePnlStore:
             pipeline.hgetall(pnl_position_key(position_id))
         pipeline.hmget(PNL_ACCOUNT_REALTIME_VERSIONS_KEY, accounts)
         pipeline.hmget(PNL_POSITION_REALTIME_VERSIONS_KEY, positions)
+        for account_id in accounts:
+            pipeline.sismember(PNL_DIRTY_ACCOUNT_FACTS_KEY, account_id)
+        for account_id in accounts:
+            pipeline.scard(pnl_dirty_account_contracts_key(account_id))
         rows = pipeline.execute()
         account_end = len(accounts)
         position_end = account_end + len(positions)
@@ -854,6 +899,14 @@ class RealtimePnlStore:
             if len(rows) > position_end + 1
             else []
         )
+        dirty_fact_start = position_end + 2
+        dirty_structure_start = dirty_fact_start + len(accounts)
+        dirty_fact_rows = rows[
+            dirty_fact_start:dirty_structure_start
+        ]
+        dirty_structure_rows = rows[
+            dirty_structure_start:dirty_structure_start + len(accounts)
+        ]
         return (
             dict(zip(accounts, account_rows, strict=True)),
             dict(zip(positions, position_rows, strict=True)),
@@ -872,6 +925,24 @@ class RealtimePnlStore:
                     position_versions,
                     strict=True,
                 )
+            },
+            {
+                account_id
+                for account_id, dirty in zip(
+                    accounts,
+                    dirty_fact_rows,
+                    strict=True,
+                )
+                if dirty
+            },
+            {
+                account_id
+                for account_id, count in zip(
+                    accounts,
+                    dirty_structure_rows,
+                    strict=True,
+                )
+                if int(count or 0) > 0
             },
         )
 

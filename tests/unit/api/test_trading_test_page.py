@@ -33,8 +33,10 @@ def test_trading_test_page_and_assets_are_available() -> None:
     assert js_response.status_code == 200
     assert "REFRESH_INTERVAL_MS = 500" in js_response.text
     assert 'apiFetch("/api/orders"' in js_response.text
-    assert "pnl.daily_close_pnl" in js_response.text
-    assert "pnl.daily_commission" in js_response.text
+    assert "account.daily_close_pnl" in js_response.text
+    assert 'event.event_type === "RISK_STATE_CHANGED"' in js_response.text
+    assert "risk_realtime_version" in js_response.text
+    assert "account.daily_commission" in js_response.text
     assert "trade.daily_close_pnl" in js_response.text
     assert "/position-allocations" in js_response.text
     assert "/api/auth/login" in js_response.text

@@ -20,12 +20,17 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_ACCOUNTS_KEY,
     PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
     PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+    PNL_DIRTY_CONTRACTS_KEY,
+    PNL_DIRTY_CONTRACT_VERSIONS_KEY,
     PNL_DIRTY_POSITIONS_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_REALTIME_VERSIONS_KEY,
     REALTIME_EVENT_STREAM,
     WS_GATEWAY_LEASE_KEY,
     pnl_account_key,
+    pnl_dirty_account_contracts_key,
+    pnl_dirty_contract_accounts_key,
+    pnl_dirty_contract_member,
     pnl_position_key,
     projected_realtime_event_key,
     realtime_aggregate_business_version_key,
@@ -119,6 +124,52 @@ def test_real_redis_gateway_lease_allows_only_one_owner_and_safe_release():
         assert lease.release("owner-a") is True
     finally:
         redis_client.delete(key)
+
+
+def test_real_new_trade_dirty_cannot_be_cleared_by_older_pnl_cycle():
+    """计算期间再次成交时，旧版本CAS不能清除账户结构Dirty。"""
+
+    _require_redis()
+    suffix = uuid4().hex.upper()
+    account_id = f"WS-DIRTY-A-{suffix}"
+    exchange_id = "WST"
+    symbol = f"WS{suffix}"
+    member = pnl_dirty_contract_member(exchange_id, symbol)
+    store = RealtimePnlStore(redis_client)
+    try:
+        first = store.mark_contract_dirty(
+            exchange_id=exchange_id,
+            symbol=symbol,
+            account_id=account_id,
+        )
+        second = store.mark_contract_dirty(
+            exchange_id=exchange_id,
+            symbol=symbol,
+            account_id=account_id,
+        )
+
+        assert int(second) > int(first)
+        assert store.complete_dirty_contract(
+            exchange_id=exchange_id,
+            symbol=symbol,
+            expected_version=first,
+        ) is False
+        assert redis_client.sismember(PNL_DIRTY_CONTRACTS_KEY, member)
+        assert redis_client.hget(
+            PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+            member,
+        ) == second
+        assert redis_client.sismember(
+            pnl_dirty_account_contracts_key(account_id),
+            member,
+        )
+    finally:
+        redis_client.srem(PNL_DIRTY_CONTRACTS_KEY, member)
+        redis_client.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
+        redis_client.delete(
+            pnl_dirty_contract_accounts_key(exchange_id, symbol),
+            pnl_dirty_account_contracts_key(account_id),
+        )
 
 
 def test_real_redis_old_gateway_cannot_ack_after_lease_handover():
@@ -722,6 +773,11 @@ def test_real_strict_snapshot_rejects_stale_version_then_recovers(
             )
         )
         position_id = position.position_id
+        fact_versions = OutboxRepository.list_latest_fact_versions(
+            db,
+            account_ids=(account.account_id,),
+            position_ids=(position.position_id,),
+        )
         now = utc_now()
         account_snapshot = AccountRealtimePnl(
             account_id=account.account_id,
@@ -734,6 +790,10 @@ def test_real_strict_snapshot_rejects_stale_version_then_recovers(
             available_cash=account.available_cash + Decimal("10"),
             risk_ratio=account.risk_ratio,
             updated_at=now,
+            source_account_fact_version=fact_versions.get(
+                ("ACCOUNT", account.account_id),
+                "0",
+            ),
         )
         position_snapshot = PositionRealtimePnl(
             position_id=position.position_id,
@@ -747,6 +807,10 @@ def test_real_strict_snapshot_rejects_stale_version_then_recovers(
             event_time=now,
             source_event_id=f"TICK-PNL-{suffix}",
             updated_at=now,
+            source_position_fact_version=fact_versions.get(
+                ("POSITION", position.position_id),
+                "0",
+            ),
         )
 
     store = RealtimePnlStore(redis_client)
@@ -848,6 +912,398 @@ def test_real_strict_snapshot_rejects_stale_version_then_recovers(
         )
 
 
+def test_real_new_trade_fact_rejects_old_internally_consistent_pnl_snapshot(
+    integration_context,
+):
+    """再次成交提交后，即使Redis内部版本一致，旧业务事实快照也必须失败。"""
+
+    _require_redis()
+    suffix = uuid4().hex
+    repository = _ReservedOutboxRepository()
+    service = make_order_service(
+        integration_context,
+        outbox_repository=repository,
+    )
+
+    def create_and_settle(label: str):
+        with SessionLocal() as db:
+            order = service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"WS-FACT-{label}-{suffix}",
+                    volume=1,
+                ),
+            )
+        with SessionLocal() as db:
+            TradeSettlementService(outbox_repository=repository).settle(
+                db,
+                SettlementCommand(
+                    order_id=order.order_id,
+                    market_event_id=f"TICK-FACT-{label}-{suffix}",
+                    market_stream_message_id=f"{suffix}-{label}",
+                    tick_event_time=utc_now(),
+                    tick_sequence_id=1,
+                    match_result=MatchResult(
+                        matched=True,
+                        fill_price=Decimal("3500"),
+                        fill_volume=1,
+                        reason=None,
+                        engine_name="VN",
+                        engine_version="1.0",
+                    ),
+                ),
+            )
+
+    create_and_settle("FIRST")
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        position = db.scalar(
+            select(Position).where(
+                Position.account_id == integration_context.account_id
+            )
+        )
+        assert account is not None and position is not None
+        position_id = position.position_id
+        old_versions = OutboxRepository.list_latest_fact_versions(
+            db,
+            account_ids=(account.account_id,),
+            position_ids=(position.position_id,),
+        )
+        now = utc_now()
+        account_snapshot = AccountRealtimePnl(
+            account_id=account.account_id,
+            cumulative_unrealized_pnl=Decimal("10"),
+            daily_position_pnl=Decimal("10"),
+            daily_close_pnl=account.daily_close_pnl,
+            daily_commission=account.daily_commission,
+            daily_pnl=Decimal("10") - account.daily_commission,
+            equity=account.cash_balance + Decimal("10"),
+            available_cash=account.available_cash + Decimal("10"),
+            risk_ratio=account.risk_ratio,
+            updated_at=now,
+            source_account_fact_version=old_versions.get(
+                ("ACCOUNT", account.account_id), "0"
+            ),
+        )
+        position_snapshot = PositionRealtimePnl(
+            position_id=position.position_id,
+            account_id=position.account_id,
+            exchange_id=position.exchange_id,
+            symbol=position.symbol,
+            direction=position.direction,
+            mark_price=Decimal("3501"),
+            cumulative_unrealized_pnl=Decimal("10"),
+            daily_position_pnl=Decimal("10"),
+            event_time=now,
+            source_event_id=f"OLD-PNL-{suffix}",
+            updated_at=now,
+            source_position_fact_version=old_versions.get(
+                ("POSITION", position.position_id), "0"
+            ),
+        )
+
+    store = RealtimePnlStore(redis_client)
+    cursor_before = RealtimeEventStore(redis_client).current_cursor()
+    try:
+        store.write_cycle_snapshots(
+            positions=[position_snapshot],
+            accounts=[account_snapshot],
+            dirty_version=f"old-fact-{suffix}",
+            active_positions=[],
+            closed_positions=[],
+        )
+        create_and_settle("SECOND")
+
+        with SessionLocal() as db:
+            with pytest.raises(
+                RedisError,
+                match="尚未覆盖最新业务事实",
+            ):
+                SnapshotService(store).build(
+                    db,
+                    {integration_context.account_id},
+                    identity=RealtimeUserIdentity(
+                        integration_context.user_id,
+                        "USER",
+                    ),
+                    require_realtime_consistency=True,
+                )
+
+        # 模拟恢复PnL单写者：重新读取当前事实版本并完成下一轮原子快照。
+        with SessionLocal() as db:
+            current_account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            current_position = db.scalar(
+                select(Position).where(
+                    Position.position_id == position_id
+                )
+            )
+            assert current_account is not None and current_position is not None
+            current_versions = OutboxRepository.list_latest_fact_versions(
+                db,
+                account_ids=(current_account.account_id,),
+                position_ids=(current_position.position_id,),
+            )
+        recovered_account = account_snapshot.model_copy(
+            update={
+                "cumulative_unrealized_pnl": Decimal("20"),
+                "daily_position_pnl": Decimal("20"),
+                "equity": current_account.cash_balance + Decimal("20"),
+                "available_cash": current_account.available_cash
+                + Decimal("20"),
+                "updated_at": utc_now(),
+                "source_account_fact_version": current_versions.get(
+                    ("ACCOUNT", current_account.account_id), "0"
+                ),
+            }
+        )
+        recovered_position = position_snapshot.model_copy(
+            update={
+                "cumulative_unrealized_pnl": Decimal("20"),
+                "daily_position_pnl": Decimal("20"),
+                "updated_at": utc_now(),
+                "source_position_fact_version": current_versions.get(
+                    ("POSITION", current_position.position_id), "0"
+                ),
+            }
+        )
+        store.write_cycle_snapshots(
+            positions=[recovered_position],
+            accounts=[recovered_account],
+            dirty_version=f"recovered-fact-{suffix}",
+            active_positions=[],
+            closed_positions=[],
+        )
+        with SessionLocal() as db:
+            recovered = SnapshotService(store).build(
+                db,
+                {integration_context.account_id},
+                identity=RealtimeUserIdentity(
+                    integration_context.user_id,
+                    "USER",
+                ),
+                require_realtime_consistency=True,
+            )
+        assert recovered["accounts"][0]["pnl"]["unrealized_pnl"] == (
+            "20"
+        )
+    finally:
+        rows = redis_client.xrange(
+            REALTIME_EVENT_STREAM,
+            min=cursor_before,
+            max="+",
+        )
+        message_ids = [
+            message_id
+            for message_id, fields in rows
+            if message_id != cursor_before
+            and fields.get("account_id") == integration_context.account_id
+        ]
+        if message_ids:
+            redis_client.xdel(REALTIME_EVENT_STREAM, *message_ids)
+        redis_client.delete(
+            pnl_account_key(integration_context.account_id),
+            pnl_position_key(position_id),
+        )
+        redis_client.hdel(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            integration_context.account_id,
+        )
+        redis_client.hdel(
+            PNL_POSITION_REALTIME_VERSIONS_KEY,
+            position_id,
+        )
+
+
+def test_real_full_close_ignores_old_redis_account_unrealized_pnl(
+    integration_context,
+):
+    """最后一条持仓关闭且PnL Worker暂停时，严格快照直接安全归零。"""
+
+    _require_redis()
+    suffix = uuid4().hex
+    repository = _ReservedOutboxRepository()
+    service = make_order_service(
+        integration_context,
+        outbox_repository=repository,
+    )
+    with SessionLocal() as db:
+        open_order = service.create_order(
+            db,
+            make_request(
+                integration_context,
+                client_order_id=f"WS-CLOSE-OPEN-{suffix}",
+                volume=1,
+            ),
+        )
+    settlement = TradeSettlementService(outbox_repository=repository)
+    with SessionLocal() as db:
+        settlement.settle(
+            db,
+            SettlementCommand(
+                order_id=open_order.order_id,
+                market_event_id=f"OPEN-{suffix}",
+                market_stream_message_id=f"{suffix}-open",
+                tick_event_time=utc_now(),
+                tick_sequence_id=1,
+                match_result=MatchResult(
+                    matched=True,
+                    fill_price=Decimal("3500"),
+                    fill_volume=1,
+                    reason=None,
+                    engine_name="VN",
+                    engine_version="1.0",
+                ),
+            ),
+        )
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        position = db.scalar(
+            select(Position).where(
+                Position.account_id == integration_context.account_id
+            )
+        )
+        assert account is not None and position is not None
+        position_id = position.position_id
+        versions = OutboxRepository.list_latest_fact_versions(
+            db,
+            account_ids=(account.account_id,),
+            position_ids=(position.position_id,),
+        )
+        now = utc_now()
+        stale_account = AccountRealtimePnl(
+            account_id=account.account_id,
+            cumulative_unrealized_pnl=Decimal("100"),
+            daily_position_pnl=Decimal("100"),
+            daily_close_pnl=account.daily_close_pnl,
+            daily_commission=account.daily_commission,
+            daily_pnl=Decimal("100") - account.daily_commission,
+            equity=account.cash_balance + Decimal("100"),
+            available_cash=account.available_cash + Decimal("100"),
+            risk_ratio=account.risk_ratio,
+            updated_at=now,
+            source_account_fact_version=versions.get(
+                ("ACCOUNT", account.account_id), "0"
+            ),
+        )
+        stale_position = PositionRealtimePnl(
+            position_id=position.position_id,
+            account_id=position.account_id,
+            exchange_id=position.exchange_id,
+            symbol=position.symbol,
+            direction=position.direction,
+            mark_price=Decimal("3510"),
+            cumulative_unrealized_pnl=Decimal("100"),
+            daily_position_pnl=Decimal("100"),
+            event_time=now,
+            source_event_id=f"STALE-{suffix}",
+            updated_at=now,
+            source_position_fact_version=versions.get(
+                ("POSITION", position.position_id), "0"
+            ),
+        )
+
+    store = RealtimePnlStore(redis_client)
+    cursor_before = RealtimeEventStore(redis_client).current_cursor()
+    try:
+        store.write_cycle_snapshots(
+            positions=[stale_position],
+            accounts=[stale_account],
+            dirty_version=f"stale-close-{suffix}",
+            active_positions=[],
+            closed_positions=[],
+        )
+        with SessionLocal() as db:
+            close_order = service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"WS-CLOSE-FINAL-{suffix}",
+                    direction="SELL",
+                    offset_flag="CLOSE_TODAY",
+                    volume=1,
+                ),
+            )
+        with SessionLocal() as db:
+            settlement.settle(
+                db,
+                SettlementCommand(
+                    order_id=close_order.order_id,
+                    market_event_id=f"CLOSE-{suffix}",
+                    market_stream_message_id=f"{suffix}-close",
+                    tick_event_time=utc_now(),
+                    tick_sequence_id=2,
+                    match_result=MatchResult(
+                        matched=True,
+                        fill_price=Decimal("3505"),
+                        fill_volume=1,
+                        reason=None,
+                        engine_name="VN",
+                        engine_version="1.0",
+                    ),
+                ),
+            )
+        with SessionLocal() as db:
+            snapshot = SnapshotService(store).build(
+                db,
+                {integration_context.account_id},
+                identity=RealtimeUserIdentity(
+                    integration_context.user_id,
+                    "USER",
+                ),
+                require_realtime_consistency=True,
+            )
+        account_snapshot = snapshot["accounts"][0]
+        assert account_snapshot["positions"] == []
+        assert account_snapshot["pnl"]["unrealized_pnl"] == "0.000000"
+        assert account_snapshot["pnl"]["daily_position_pnl"] == "0.000000"
+        assert account_snapshot["pnl"]["data_source"] == (
+            "POSTGRES_ZERO_POSITION"
+        )
+        assert redis_client.hget(
+            pnl_position_key(position_id),
+            "cumulative_unrealized_pnl",
+        ) == "100"
+    finally:
+        rows = redis_client.xrange(
+            REALTIME_EVENT_STREAM,
+            min=cursor_before,
+            max="+",
+        )
+        message_ids = [
+            message_id
+            for message_id, fields in rows
+            if message_id != cursor_before
+            and fields.get("account_id") == integration_context.account_id
+        ]
+        if message_ids:
+            redis_client.xdel(REALTIME_EVENT_STREAM, *message_ids)
+        redis_client.delete(
+            pnl_account_key(integration_context.account_id),
+            pnl_position_key(position_id),
+        )
+        redis_client.hdel(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            integration_context.account_id,
+        )
+        redis_client.hdel(
+            PNL_POSITION_REALTIME_VERSIONS_KEY,
+            position_id,
+        )
+
+
 def test_real_redis_projection_is_idempotent_and_pnl_event_is_atomic():
     """真实Lua验证投影去重及账户PnL快照与事件同批写入。"""
 
@@ -936,6 +1392,17 @@ def test_real_redis_projection_is_idempotent_and_pnl_event_is_atomic():
             envelope.payload["realtime_snapshot_version"] == hash_version
             for envelope in envelopes
         )
+        by_type = {envelope.event_type.value: envelope for envelope in envelopes}
+        pnl_payload = by_type["ACCOUNT_PNL_UPDATED"].payload
+        risk_payload = by_type["RISK_STATE_CHANGED"].payload
+        assert {
+            "risk_state",
+            "risk_ratio",
+            "risk_available_cash",
+        }.isdisjoint(pnl_payload)
+        assert risk_payload["risk_state"] == "NORMAL"
+        assert risk_payload["risk_ratio"] == "0.00123456"
+        assert risk_payload["risk_available_cash"] == "0"
     finally:
         if message_ids:
             redis_client.xdel(REALTIME_EVENT_STREAM, *message_ids)

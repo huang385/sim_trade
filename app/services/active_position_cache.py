@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.repositories.account_repository import AccountRepository
 from app.repositories.position_repository import PositionRepository
+from app.repositories.outbox_repository import OutboxRepository
 from app.services.pnl_calculator import (
     PnlDetailSnapshot,
     PositionPnlSnapshot,
@@ -37,6 +38,8 @@ class AccountPnlSnapshot:
     short_option_market_value: Decimal = Decimal("0")
     risk_available_cash: Decimal = Decimal("0")
     risk_state: str = "NORMAL"
+    # 与Position快照相同，记录本轮实际参与估值的账户事实Outbox版本。
+    source_fact_version: str = "0"
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,7 @@ class ActivePositionCache:
         session_factory: Callable[[], Session],
         position_repository: PositionRepository | None = None,
         account_repository: AccountRepository | None = None,
+        outbox_repository: OutboxRepository | None = None,
         refresh_ms: int = 1000,
         monotonic: Callable[[], float] = time.monotonic,
         version_loader: Callable[[], str] | None = None,
@@ -117,6 +121,7 @@ class ActivePositionCache:
         self.account_repository = (
             account_repository or AccountRepository()
         )
+        self.outbox_repository = outbox_repository or OutboxRepository()
         self.refresh_seconds = max(refresh_ms, 1) / 1000
         self.monotonic = monotonic
         self.version_loader = version_loader
@@ -135,7 +140,10 @@ class ActivePositionCache:
         self._contract_fact_versions: dict[ContractKey, str] = {}
 
     @staticmethod
-    def _account_snapshot(account) -> AccountPnlSnapshot:
+    def _account_snapshot(
+        account,
+        fact_versions: Mapping[tuple[str, str], str] | None = None,
+    ) -> AccountPnlSnapshot:
         return AccountPnlSnapshot(
             account_id=account.account_id,
             cash_balance=Decimal(account.cash_balance),
@@ -175,6 +183,10 @@ class ActivePositionCache:
                 getattr(account, "risk_available_cash", Decimal("0"))
             ),
             risk_state=getattr(account, "risk_state", "NORMAL"),
+            source_fact_version=(fact_versions or {}).get(
+                ("ACCOUNT", account.account_id),
+                "0",
+            ),
         )
 
     def invalidate(
@@ -201,6 +213,7 @@ class ActivePositionCache:
     @staticmethod
     def _snapshots_from_rows(
         rows,
+        fact_versions: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[
         dict[ContractKey, tuple[PositionPnlSnapshot, ...]],
         dict[str, AccountPnlSnapshot],
@@ -242,7 +255,10 @@ class ActivePositionCache:
                 )
             )
             accounts[account.account_id] = (
-                ActivePositionCache._account_snapshot(account)
+                ActivePositionCache._account_snapshot(
+                    account,
+                    fact_versions,
+                )
             )
 
         by_contract: dict[
@@ -328,6 +344,10 @@ class ActivePositionCache:
                         for key, value in raw_rule_snapshot.items()
                     )
                 ),
+                source_fact_version=(fact_versions or {}).get(
+                    ("POSITION", position.position_id),
+                    "0",
+                ),
             )
             key = (
                 position.exchange_id.strip().upper(),
@@ -372,10 +392,24 @@ class ActivePositionCache:
                 db,
                 tuple(missing_account_ids),
             )
+            fact_versions = self.outbox_repository.list_latest_fact_versions(
+                db,
+                account_ids=tuple(
+                    active_account_ids
+                    | {account.account_id for account in extra_accounts}
+                ),
+                position_ids=tuple({row[0].position_id for row in rows}),
+            )
 
-        by_contract, accounts = self._snapshots_from_rows(rows)
+        by_contract, accounts = self._snapshots_from_rows(
+            rows,
+            fact_versions,
+        )
         for account in extra_accounts:
-            accounts[account.account_id] = self._account_snapshot(account)
+            accounts[account.account_id] = self._account_snapshot(
+                account,
+                fact_versions,
+            )
 
         self._by_contract = by_contract
         self._rebuild_by_account()
@@ -417,9 +451,17 @@ class ActivePositionCache:
                 db,
                 tuple(sorted(account_ids)),
             )
+            fact_versions = self.outbox_repository.list_latest_fact_versions(
+                db,
+                account_ids=tuple(
+                    set(account_ids)
+                    | {row[3].account_id for row in rows}
+                ),
+                position_ids=tuple({row[0].position_id for row in rows}),
+            )
 
         refreshed_contracts, row_accounts = (
-            self._snapshots_from_rows(rows)
+            self._snapshots_from_rows(rows, fact_versions)
         )
         if contract_keys:
             for key in contract_keys:
@@ -431,7 +473,7 @@ class ActivePositionCache:
         for account in accounts:
             found_account_ids.add(account.account_id)
             self._accounts[account.account_id] = (
-                self._account_snapshot(account)
+                self._account_snapshot(account, fact_versions)
             )
         for account_id, snapshot in row_accounts.items():
             found_account_ids.add(account_id)

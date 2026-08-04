@@ -85,9 +85,8 @@ class RealtimeFactEventService:
                 "daily_commission": _decimal_string(
                     _field(account, "daily_commission", Decimal("0"))
                 ),
-                # 浮盈、动态权益、实时可用资金和风险率由唯一PnL Worker
-                # 负责，数据库事实事件不得用较旧估值覆盖该独立字段域。
-                "risk_state": _field(account, "risk_state", "NORMAL"),
+                # 浮盈、动态权益和风险状态由PnL实时事件负责，数据库事实
+                # 事件不得用持久化旧值覆盖这些独立字段域。
                 "updated_at": account.updated_at.isoformat(),
             },
             created_at=occurred_at,

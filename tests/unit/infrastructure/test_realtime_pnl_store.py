@@ -23,9 +23,27 @@ def test_trade_dirty_is_written_by_one_atomic_lua_command():
     assert version == "12"
     redis_client.eval.assert_called_once()
     args = redis_client.eval.call_args.args
-    assert args[1] == 4
+    assert args[1] == 5
     assert "pnl:dirty_contracts" in args
     assert "pnl:dirty_contract_versions" in args
+    assert "pnl:dirty_account_contracts:A001" in args
+
+
+def test_contract_dirty_completion_cas_cleans_account_structure_only_on_match():
+    redis_client = Mock()
+    redis_client.eval.return_value = 1
+    store = RealtimePnlStore(redis_client)
+
+    assert store.complete_dirty_contract(
+        exchange_id="SHFE",
+        symbol="RB2610",
+        expected_version="12",
+    )
+
+    args = redis_client.eval.call_args.args
+    assert "SMEMBERS" in args[0]
+    assert "pnl:dirty_account_contracts:" in args
+    assert args[-2:] == ("12", "pnl:dirty_account_contracts:")
 
 
 def test_tick_snapshot_write_does_not_repeat_static_indexes():
@@ -266,6 +284,7 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
         event_time=now,
         source_event_id="TICK-1",
         updated_at=now,
+        source_position_fact_version="80",
     )
     account = AccountRealtimePnl(
         account_id="A001",
@@ -277,7 +296,10 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
         equity=Decimal("100010"),
         available_cash=Decimal("90000"),
         risk_ratio=Decimal("0.1"),
+        risk_available_cash=Decimal("89000"),
+        risk_state="MARGIN_DEFICIT",
         updated_at=now,
+        source_account_fact_version="70",
     )
 
     store.write_cycle_snapshots(
@@ -311,6 +333,31 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
         and operation[3] == "ACCOUNT_PNL_UPDATED"
     ]
     assert len(account_events) == 1
+    account_payload = json.loads(account_events[0][6])["payload"]
+    assert account_payload["source_account_fact_version"] == "70"
+    assert {
+        "risk_state",
+        "risk_ratio",
+        "risk_available_cash",
+        "cash_balance",
+        "used_margin",
+        "daily_close_pnl",
+        "daily_commission",
+    }.isdisjoint(account_payload)
+    risk_events = [
+        operation
+        for operation in operations
+        if operation[0] == "XADD_REALTIME_EVENT"
+        and operation[3] == "RISK_STATE_CHANGED"
+    ]
+    assert len(risk_events) == 1
+    risk_payload = json.loads(risk_events[0][6])["payload"]
+    assert risk_payload == {
+        "risk_state": "MARGIN_DEFICIT",
+        "risk_ratio": "0.1",
+        "risk_available_cash": "89000",
+        "updated_at": now.isoformat(),
+    }
 
 
 def test_versioned_snapshot_batch_read_uses_one_pipeline():
@@ -322,10 +369,19 @@ def test_versioned_snapshot_batch_read_uses_one_pipeline():
         {"position_id": "P002", "realtime_snapshot_version": "6"},
         ["7"],
         ["7", "6"],
+        False,
+        0,
     ]
     store = RealtimePnlStore(redis_client)
 
-    accounts, positions, account_versions, position_versions = (
+    (
+        accounts,
+        positions,
+        account_versions,
+        position_versions,
+        dirty_facts,
+        dirty_structures,
+    ) = (
         store.get_accounts_with_positions_and_versions(
             account_ids=["A001"],
             position_ids=["P001", "P002"],
@@ -336,9 +392,39 @@ def test_versioned_snapshot_batch_read_uses_one_pipeline():
     assert positions["P002"]["realtime_snapshot_version"] == "6"
     assert account_versions == {"A001": "7"}
     assert position_versions == {"P001": "7", "P002": "6"}
+    assert dirty_facts == set()
+    assert dirty_structures == set()
     redis_client.pipeline.assert_called_once_with(transaction=False)
     assert pipeline.hgetall.call_count == 3
     assert pipeline.hmget.call_count == 2
+    pipeline.sismember.assert_called_once()
+    pipeline.scard.assert_called_once()
+    pipeline.execute.assert_called_once()
+
+
+def test_versioned_snapshot_batch_read_returns_related_dirty_accounts():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [
+        {"account_id": "A001", "realtime_snapshot_version": "8"},
+        {"account_id": "A002", "realtime_snapshot_version": "8"},
+        ["8", "8"],
+        [],
+        True,
+        False,
+        0,
+        2,
+    ]
+
+    result = RealtimePnlStore(
+        redis_client
+    ).get_accounts_with_positions_and_versions(
+        account_ids=["A001", "A002"],
+        position_ids=[],
+    )
+
+    assert result[4] == {"A001"}
+    assert result[5] == {"A002"}
     pipeline.execute.assert_called_once()
 
 

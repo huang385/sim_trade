@@ -228,6 +228,12 @@ def pnl_dirty_contract_accounts_key(
     return f"pnl:dirty_contract_accounts:{member}"
 
 
+def pnl_dirty_account_contracts_key(account_id: str) -> str:
+    """返回账户尚未完成PnL处理的持仓结构Dirty合约集合。"""
+
+    return f"pnl:dirty_account_contracts:{account_id.strip()}"
+
+
 def pnl_event_failure_key(message_id: str) -> str:
     """返回PnL行情消费失败次数键名。"""
 

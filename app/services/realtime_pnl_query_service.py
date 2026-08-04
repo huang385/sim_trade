@@ -75,7 +75,7 @@ class RealtimePnlQueryService:
                 available_cash=_decimal(values, "available_cash"),
                 risk_ratio=_decimal(values, "risk_ratio"),
                 updated_at=values["updated_at"],
-                data_source="REDIS_REALTIME",
+                data_source=values.get("data_source", "REDIS_REALTIME"),
             )
         return AccountRealtimePnlResponse(
             account_id=account.account_id,

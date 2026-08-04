@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Sequence
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.common.time_utils import utc_now
@@ -56,6 +56,59 @@ class OutboxRepository:
         return db.scalar(
             select(OutboxEvent).where(OutboxEvent.event_id == event_id)
         )
+
+    @staticmethod
+    def list_latest_fact_versions(
+        db: Session,
+        *,
+        account_ids: Sequence[str] = (),
+        position_ids: Sequence[str] = (),
+    ) -> dict[tuple[str, str], str]:
+        """一次集合查询返回账户和持仓最后一个事务事实Outbox编号。
+
+        Outbox主键与业务事实同事务生成且永久单调，不会被PnL定时持久化
+        改写，因此比Account/Position.updated_at更适合作为实时估值来源版本。
+        """
+
+        conditions = []
+        if account_ids:
+            conditions.append(
+                and_(
+                    OutboxEvent.aggregate_type == "ACCOUNT",
+                    OutboxEvent.aggregate_id.in_(tuple(account_ids)),
+                    OutboxEvent.event_type.in_(
+                        ("ACCOUNT_FACT_UPDATED", "ACCOUNT_UPDATED")
+                    ),
+                )
+            )
+        if position_ids:
+            conditions.append(
+                and_(
+                    OutboxEvent.aggregate_type == "POSITION",
+                    OutboxEvent.aggregate_id.in_(tuple(position_ids)),
+                    OutboxEvent.event_type.in_(
+                        ("POSITION_UPDATED", "POSITION_CLOSED")
+                    ),
+                )
+            )
+        if not conditions:
+            return {}
+        rows = db.execute(
+            select(
+                OutboxEvent.aggregate_type,
+                OutboxEvent.aggregate_id,
+                func.max(OutboxEvent.id),
+            )
+            .where(or_(*conditions))
+            .group_by(
+                OutboxEvent.aggregate_type,
+                OutboxEvent.aggregate_id,
+            )
+        ).all()
+        return {
+            (str(aggregate_type), str(aggregate_id)): str(version)
+            for aggregate_type, aggregate_id, version in rows
+        }
 
     @staticmethod
     def claim_pending_events(
