@@ -15,7 +15,9 @@ SOURCE_EVENT_MAPPING = {
     "TRADE_CREATED": RealtimeEventType.TRADE_CREATED,
     "POSITION_UPDATED": RealtimeEventType.POSITION_UPDATED,
     "POSITION_CLOSED": RealtimeEventType.POSITION_CLOSED,
-    "ACCOUNT_UPDATED": RealtimeEventType.ACCOUNT_UPDATED,
+    "ACCOUNT_FACT_UPDATED": RealtimeEventType.ACCOUNT_FACT_UPDATED,
+    # 兼容升级前数据库中尚未发布的旧账户事实Outbox。
+    "ACCOUNT_UPDATED": RealtimeEventType.ACCOUNT_FACT_UPDATED,
 }
 
 
@@ -54,7 +56,7 @@ class RealtimeEventProjectionService:
             entity_id = str(payload.get("trade_id") or "").strip()
         elif source_type in {"POSITION_UPDATED", "POSITION_CLOSED"}:
             entity_id = str(payload.get("position_id") or "").strip()
-        elif source_type == "ACCOUNT_UPDATED":
+        elif source_type in {"ACCOUNT_FACT_UPDATED", "ACCOUNT_UPDATED"}:
             entity_id = account_id
         else:
             entity_id = str(payload.get("order_id") or "").strip()

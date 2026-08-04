@@ -6,18 +6,23 @@ from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
+from fastapi import WebSocketDisconnect
 from fastapi.testclient import TestClient
+from redis.exceptions import RedisError
 from sqlalchemy import event, select
 
 from app.common.exceptions import AuthenticationError
 from app.common.time_utils import utc_now
+from app.core.config import settings
 from app.core.database import SessionLocal, engine
 from app.core.redis_client import redis_client
 from app.infrastructure.redis_keys import (
     PNL_DIRTY_ACCOUNTS_KEY,
+    PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
     PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
     PNL_DIRTY_POSITIONS_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
+    PNL_POSITION_REALTIME_VERSIONS_KEY,
     REALTIME_EVENT_STREAM,
     WS_GATEWAY_LEASE_KEY,
     pnl_account_key,
@@ -29,6 +34,7 @@ from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.order_event_publisher import OrderEventPublisher
 from app.models.account import Account
+from app.models.app_user import AppUser
 from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.trade import Trade
@@ -37,6 +43,7 @@ from app.realtime.event_consumer import RealtimeEventConsumer
 from app.realtime.gateway_lease import GatewayLease
 from app.realtime.gateway_runtime import GatewayRuntime
 from app.realtime.snapshot_service import SnapshotService
+from app.realtime.subscription_service import RealtimeUserIdentity
 from app.realtime.websocket_api import router as websocket_router
 from app.realtime.event_enums import RealtimeEventType
 from app.realtime.event_schema import RealtimeEventEnvelope
@@ -226,6 +233,103 @@ def test_real_gateway_ticket_subscription_snapshot_and_denial(
             assert denied["payload"]["error_code"] == (
                 "WS_ACCOUNT_ACCESS_DENIED"
             )
+
+
+def test_real_account_transfer_closes_existing_websocket(
+    integration_context,
+    monkeypatch,
+):
+    """真实数据库账户转移后，周期复查应失败关闭旧用户连接。"""
+
+    _require_redis()
+    suffix = uuid4().hex
+    new_user_id = f"WSU-{suffix}"
+    issued = WebSocketTicketService(redis_client).create(
+        user_id=integration_context.user_id,
+        role="USER",
+        token_jti=uuid4().hex,
+        token_expiration=utc_now() + timedelta(minutes=5),
+    )
+    isolated_app = FastAPI()
+    isolated_runtime = GatewayRuntime()
+    isolated_runtime.active = True
+    isolated_app.state.runtime = isolated_runtime
+    isolated_app.include_router(websocket_router)
+    monkeypatch.setattr(
+        settings,
+        "ws_auth_recheck_interval_seconds",
+        0.05,
+    )
+    monkeypatch.setattr(settings, "ws_heartbeat_interval_seconds", 60)
+
+    try:
+        with SessionLocal() as db:
+            db.add(
+                AppUser(
+                    user_id=new_user_id,
+                    username=f"ws_transfer_{suffix}",
+                    password_hash="!integration-no-login!",
+                    display_name="WebSocket账户接收用户",
+                    role="USER",
+                    status="ACTIVE",
+                )
+            )
+            db.commit()
+
+        with TestClient(isolated_app) as client:
+            with client.websocket_connect(
+                f"/ws/trading?ticket={issued.ticket}"
+            ) as websocket:
+                websocket.send_json(
+                    {
+                        "action": "subscribe",
+                        "account_ids": [integration_context.account_id],
+                    }
+                )
+                assert websocket.receive_json()["event_type"] == "SNAPSHOT"
+
+                with SessionLocal() as db:
+                    account = db.scalar(
+                        select(Account).where(
+                            Account.account_id
+                            == integration_context.account_id
+                        )
+                    )
+                    assert account is not None
+                    account.user_id = new_user_id
+                    db.commit()
+
+                # 转移提交前监控协程可能已经排入一条心跳；允许消费该控制
+                # 帧，但最终必须由下一次授权复查以4403关闭旧连接。
+                close_code = None
+                for _attempt in range(5):
+                    try:
+                        event_payload = websocket.receive_json()
+                        assert event_payload["event_type"] == "HEARTBEAT"
+                    except WebSocketDisconnect as exc:
+                        close_code = exc.code
+                        break
+                assert close_code == 4403
+        assert isolated_runtime.manager.active_count == 0
+        assert isolated_runtime.manager.connections_by_user == {}
+        assert isolated_runtime.manager.connections_by_account == {}
+    finally:
+        # fixture负责删除原账户，因此必须先恢复其外键归属，再删除临时用户。
+        with SessionLocal() as db:
+            account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            if account is not None:
+                account.user_id = integration_context.user_id
+                db.flush()
+            temporary_user = db.scalar(
+                select(AppUser).where(AppUser.user_id == new_user_id)
+            )
+            if temporary_user is not None:
+                db.delete(temporary_user)
+            db.commit()
 
 
 def test_real_order_outbox_projection_reaches_websocket(integration_context):
@@ -441,7 +545,7 @@ def test_real_order_outbox_projection_reaches_websocket(integration_context):
                 assert "TRADE_CREATED" in event_types
                 assert "ORDER_UPDATED" in event_types
                 assert "POSITION_UPDATED" in event_types
-                assert event_types.count("ACCOUNT_UPDATED") == 2
+                assert event_types.count("ACCOUNT_FACT_UPDATED") == 2
                 position_event = next(
                     item
                     for item in settlement_events
@@ -451,7 +555,7 @@ def test_real_order_outbox_projection_reaches_websocket(integration_context):
                 assert position_event["payload"]["total_volume"] == (
                     position_expected
                 )
-                assert account_event["event_type"] == "ACCOUNT_UPDATED"
+                assert account_event["event_type"] == "ACCOUNT_FACT_UPDATED"
                 assert account_event["payload"]["cash_balance"] == (
                     account_expected
                 )
@@ -553,9 +657,195 @@ def test_real_order_outbox_projection_reaches_websocket(integration_context):
             PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
             integration_context.account_id,
         )
+        redis_client.hdel(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            integration_context.account_id,
+        )
         if position_id is not None:
             redis_client.srem(PNL_DIRTY_POSITIONS_KEY, position_id)
             redis_client.hdel(PNL_DIRTY_POSITION_VERSIONS_KEY, position_id)
+            redis_client.hdel(
+                PNL_POSITION_REALTIME_VERSIONS_KEY,
+                position_id,
+            )
+
+
+def test_real_strict_snapshot_rejects_stale_version_then_recovers(
+    integration_context,
+):
+    """真实PostgreSQL和Redis验证旧Hash不能覆盖游标，恢复后可重连。"""
+
+    _require_redis()
+    suffix = uuid4().hex
+    repository = _ReservedOutboxRepository()
+    with SessionLocal() as db:
+        order = make_order_service(
+            integration_context,
+            outbox_repository=repository,
+        ).create_order(
+            db,
+            make_request(
+                integration_context,
+                client_order_id=f"WS-SNAPSHOT-{suffix}",
+                volume=1,
+            ),
+        )
+        order_id = order.order_id
+    with SessionLocal() as db:
+        TradeSettlementService(outbox_repository=repository).settle(
+            db,
+            SettlementCommand(
+                order_id=order_id,
+                market_event_id=f"TICK-SNAPSHOT-{suffix}",
+                market_stream_message_id=f"{suffix}-0",
+                tick_event_time=utc_now(),
+                tick_sequence_id=1,
+                match_result=MatchResult(
+                    matched=True,
+                    fill_price=Decimal("3500"),
+                    fill_volume=1,
+                    reason=None,
+                    engine_name="VN",
+                    engine_version="1.0",
+                ),
+            ),
+        )
+    with SessionLocal() as db:
+        account = db.scalar(
+            select(Account).where(
+                Account.account_id == integration_context.account_id
+            )
+        )
+        position = db.scalar(
+            select(Position).where(
+                Position.account_id == integration_context.account_id
+            )
+        )
+        position_id = position.position_id
+        now = utc_now()
+        account_snapshot = AccountRealtimePnl(
+            account_id=account.account_id,
+            cumulative_unrealized_pnl=Decimal("10"),
+            daily_position_pnl=Decimal("10"),
+            daily_close_pnl=account.daily_close_pnl,
+            daily_commission=account.daily_commission,
+            daily_pnl=Decimal("7"),
+            equity=account.cash_balance + Decimal("10"),
+            available_cash=account.available_cash + Decimal("10"),
+            risk_ratio=account.risk_ratio,
+            updated_at=now,
+        )
+        position_snapshot = PositionRealtimePnl(
+            position_id=position.position_id,
+            account_id=position.account_id,
+            exchange_id=position.exchange_id,
+            symbol=position.symbol,
+            direction=position.direction,
+            mark_price=Decimal("3501"),
+            cumulative_unrealized_pnl=Decimal("10"),
+            daily_position_pnl=Decimal("10"),
+            event_time=now,
+            source_event_id=f"TICK-PNL-{suffix}",
+            updated_at=now,
+        )
+
+    store = RealtimePnlStore(redis_client)
+    cursor_before = RealtimeEventStore(redis_client).current_cursor()
+    message_ids: list[str] = []
+    try:
+        store.write_cycle_snapshots(
+            positions=[position_snapshot],
+            accounts=[account_snapshot],
+            dirty_version=f"snapshot-{suffix}",
+            active_positions=[],
+            closed_positions=[],
+        )
+        latest_version = redis_client.hget(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            integration_context.account_id,
+        )
+        assert latest_version and latest_version.isdigit()
+        assert redis_client.hget(
+            pnl_position_key(position_id),
+            "realtime_snapshot_version",
+        ) == redis_client.hget(
+            PNL_POSITION_REALTIME_VERSIONS_KEY,
+            position_id,
+        )
+
+        redis_client.hset(
+            pnl_account_key(integration_context.account_id),
+            "realtime_snapshot_version",
+            str(max(int(latest_version) - 1, 0)),
+        )
+        with SessionLocal() as db:
+            with pytest.raises(RedisError, match="版本不一致"):
+                SnapshotService(store).build(
+                    db,
+                    {integration_context.account_id},
+                    identity=RealtimeUserIdentity(
+                        integration_context.user_id,
+                        "USER",
+                    ),
+                    require_realtime_consistency=True,
+                )
+
+        redis_client.hset(
+            pnl_account_key(integration_context.account_id),
+            "realtime_snapshot_version",
+            latest_version,
+        )
+        with SessionLocal() as db:
+            snapshot = SnapshotService(store).build(
+                db,
+                {integration_context.account_id},
+                identity=RealtimeUserIdentity(
+                    integration_context.user_id,
+                    "USER",
+                ),
+                require_realtime_consistency=True,
+            )
+        assert snapshot["realtime"] is True
+        assert snapshot["accounts"][0]["pnl"]["equity"] == (
+            format(account_snapshot.equity, "f")
+        )
+
+        rows = redis_client.xrange(
+            REALTIME_EVENT_STREAM,
+            min=cursor_before,
+            max="+",
+        )
+        message_ids = [
+            message_id
+            for message_id, fields in rows
+            if message_id != cursor_before
+            and fields.get("account_id") == integration_context.account_id
+        ]
+    finally:
+        if message_ids:
+            redis_client.xdel(REALTIME_EVENT_STREAM, *message_ids)
+        redis_client.delete(
+            pnl_account_key(integration_context.account_id),
+            pnl_position_key(position_id),
+        )
+        redis_client.srem(
+            PNL_DIRTY_ACCOUNTS_KEY,
+            integration_context.account_id,
+        )
+        redis_client.srem(PNL_DIRTY_POSITIONS_KEY, position_id)
+        redis_client.hdel(
+            PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+            integration_context.account_id,
+        )
+        redis_client.hdel(PNL_DIRTY_POSITION_VERSIONS_KEY, position_id)
+        redis_client.hdel(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            integration_context.account_id,
+        )
+        redis_client.hdel(
+            PNL_POSITION_REALTIME_VERSIONS_KEY,
+            position_id,
+        )
 
 
 def test_real_redis_projection_is_idempotent_and_pnl_event_is_atomic():
@@ -618,13 +908,34 @@ def test_real_redis_projection_is_idempotent_and_pnl_event_is_atomic():
         ]
         message_ids.extend(message_id for message_id, _fields in own_rows)
         assert {fields["event_type"] for _id, fields in own_rows} == {
-            "ACCOUNT_UPDATED",
+            "ACCOUNT_PNL_UPDATED",
             "RISK_STATE_CHANGED",
         }
         assert redis_client.hget(
             pnl_account_key(account_id),
             "cumulative_unrealized_pnl",
         ) == "12.340000"
+        hash_version = redis_client.hget(
+            pnl_account_key(account_id),
+            "realtime_snapshot_version",
+        )
+        latest_version = redis_client.hget(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            account_id,
+        )
+        assert hash_version == latest_version
+        assert hash_version.isdigit()
+        envelopes = [
+            RealtimeEventEnvelope.model_validate_json(fields["payload"])
+            for _message_id, fields in own_rows
+        ]
+        assert {envelope.realtime_version for envelope in envelopes} == {
+            hash_version
+        }
+        assert all(
+            envelope.payload["realtime_snapshot_version"] == hash_version
+            for envelope in envelopes
+        )
     finally:
         if message_ids:
             redis_client.xdel(REALTIME_EVENT_STREAM, *message_ids)
@@ -638,6 +949,7 @@ def test_real_redis_projection_is_idempotent_and_pnl_event_is_atomic():
         redis_client.delete(pnl_account_key(account_id))
         redis_client.srem(PNL_DIRTY_ACCOUNTS_KEY, account_id)
         redis_client.hdel(PNL_DIRTY_ACCOUNT_VERSIONS_KEY, account_id)
+        redis_client.hdel(PNL_ACCOUNT_REALTIME_VERSIONS_KEY, account_id)
 
 
 @pytest.mark.parametrize(

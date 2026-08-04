@@ -190,20 +190,22 @@ async def _connection_monitor(runtime, context: ConnectionContext) -> None:
                 - set(authorization.account_ids)
             )
             if revoked:
-                # 角色降级或账户转移后，先移除路由，再向仍存活的连接说明
-                # 哪些订阅已被撤销，后续事件不会再进入该连接队列。
-                runtime.manager.unsubscribe(context, revoked)
-                await runtime.manager.enqueue(
-                    context,
-                    _control_event(
-                        RealtimeEventType.UNSUBSCRIBED,
-                        connection_id=context.connection_id,
-                        payload={
-                            "account_ids": sorted(revoked),
-                            "reason": "AUTHORIZATION_REVOKED",
-                        },
-                    ),
+                # 发送队列保存的是已序列化消息，无法可靠逐账户剔除。发现任一
+                # 已订阅账户授权撤销后整条连接失败关闭，由close取消sender、
+                # 丢弃队列并清理全部路由，客户端必须重新认证和加载快照。
+                logger.warning(
+                    "WebSocket订阅权限已撤销 connection_id=%s user_id=%s "
+                    "account_count=%s",
+                    context.connection_id,
+                    context.user_id,
+                    len(revoked),
                 )
+                await runtime.manager.close(
+                    context,
+                    code=WebSocketCloseCode.PERMISSION_DENIED,
+                    reason="账户订阅权限已撤销，需要重新连接",
+                )
+                return
         await runtime.manager.enqueue(
             context,
             _control_event(

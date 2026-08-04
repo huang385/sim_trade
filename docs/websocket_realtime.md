@@ -39,6 +39,8 @@ Token，不显示完整Ticket；WebSocket断开后指数退避重连并重新加
   恢复、快照屏障和传输顺序。
 - `business_version`是PostgreSQL Outbox自增编号，用于判断同一个订单、成交、
   持仓或账户的业务事实新旧。
+- `realtime_version`是PnL单写者生成的单调计算周期版本，仅用于证明Redis实时
+  Hash、实体最新版本索引和本周期实时事件来自同一次原子写入。
 
 投影写入Redis时通过Lua脚本原子比较聚合根的`business_version`。晚到的旧
 Outbox消息会被标记为已处理，但不会重新写入实时Stream，因此不能把
@@ -50,10 +52,16 @@ Outbox消息会被标记为已处理，但不会重新写入实时Stream，因�
 均通过才发送`SNAPSHOT`，随后只补发高于快照游标的事件。因此账户转移、
 管理员降权和订阅期间授权变化都不会形成越权或丢失窗口。严格快照所需的
 Redis数据缺失时连接会要求重试，不会静默退回较旧的PostgreSQL实时值。
+有活动持仓时，Gateway还会在一个Redis Pipeline中批量读取账户/持仓Hash及
+其最新版本索引；任何Hash缺失、格式错误或`realtime_snapshot_version`与
+对应最新版本不一致，都不会发送`SNAPSHOT`或推进连接游标。
 
 业务事务还会在同一个Outbox中生成绝对事实事件：
 
-- `ACCOUNT_UPDATED`包含账户资金、保证金、手续费、盈亏和风险字段的绝对值；
+- `ACCOUNT_FACT_UPDATED`包含PostgreSQL账户现金、保证金、冻结资金、手续费和
+  已实现盈亏等基础事实绝对值；
+- `ACCOUNT_PNL_UPDATED`只包含Redis实时浮盈、动态权益、实时可用资金和风险
+  估值，两类字段使用独立事件与版本域；
 - `POSITION_UPDATED`包含当前持仓数量、成本、保证金和盈亏绝对值；
 - 持仓全部平完后发送`POSITION_CLOSED`，客户端直接移除该持仓。
 
@@ -70,8 +78,20 @@ Gateway Consumer Group首次创建使用`$`，只消费启动后产生的新事�
 Cookie取得新Access Token后再申请新Ticket。
 
 连接存续期间Gateway会周期性重新查询用户状态、最新角色和当前订阅账户的
-归属。用户被禁用时连接立即关闭；管理员被降级或账户被转移时，相应账户会
-被自动取消订阅。Ticket中的角色只用于建立连接身份，不作为长期授权缓存。
+归属。用户被禁用、管理员被降级或任一已订阅账户被转移时，Gateway都会立即
+失败关闭整条连接，取消发送任务、丢弃已经序列化的发送队列并清理全部路由；
+客户端必须重新申请Ticket并加载完整快照。Ticket中的角色只用于建立连接
+身份，不作为长期授权缓存。
+
+实时PnL版本使用以下Redis键，均为可重建派生数据：
+
+- `pnl:realtime:snapshot_sequence`：PnL单写者计算周期的全局单调序号；
+- `pnl:realtime:account_versions`：每个账户最新实时Hash版本；
+- `pnl:realtime:position_versions`：每条持仓最新实时Hash版本。
+
+PnL Worker通过同一个Lua脚本写入金额Hash、Hash内版本、实体最新版本索引和
+`stream:realtime-events`实时事件。Lua只附加版本和执行Redis命令，不参与
+Decimal金额计算。
 
 使用项目启动脚本时Uvicorn访问日志默认关闭，防止查询参数中的完整Ticket
 进入日志。若直接运行Uvicorn，请同时传入`--no-access-log`。

@@ -110,7 +110,8 @@ class RealtimeEventStore:
         if not aggregate_type:
             aggregate_type = (
                 "ACCOUNT"
-                if envelope.event_type.value == "ACCOUNT_UPDATED"
+                if envelope.event_type.value
+                in {"ACCOUNT_FACT_UPDATED", "ACCOUNT_UPDATED"}
                 else "POSITION"
                 if envelope.event_type.value in {"POSITION_UPDATED", "POSITION_CLOSED"}
                 else "TRADE"

@@ -393,7 +393,7 @@ def test_option_full_close_clears_position_market_value_and_realtime_margin():
             "TRADE_CREATED",
             "ORDER_FILLED",
             "POSITION_CLOSED",
-            "ACCOUNT_UPDATED",
+            "ACCOUNT_FACT_UPDATED",
         }
 
 
@@ -690,7 +690,7 @@ def test_close_settlement_updates_trade_account_and_position(
             "TRADE_CREATED",
             "ORDER_PARTIALLY_FILLED",
             "POSITION_UPDATED",
-            "ACCOUNT_UPDATED",
+            "ACCOUNT_FACT_UPDATED",
         }
 
 
@@ -758,7 +758,7 @@ def test_last_close_releases_all_margin_tail():
             "TRADE_CREATED",
             "ORDER_FILLED",
             "POSITION_CLOSED",
-            "ACCOUNT_UPDATED",
+            "ACCOUNT_FACT_UPDATED",
         }
 
 

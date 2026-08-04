@@ -25,6 +25,8 @@ class PositionRealtimePnl(BaseModel):
     source_event_id: str
     updated_at: datetime
     data_source: str = "REDIS_REALTIME"
+    # 由Redis Lua在成功写入周期内设置；Python资金计算不参与版本生成。
+    realtime_snapshot_version: str | None = None
 
 
 class AccountRealtimePnl(BaseModel):
@@ -48,6 +50,7 @@ class AccountRealtimePnl(BaseModel):
     risk_ratio: Decimal
     updated_at: datetime
     data_source: str = "REDIS_REALTIME"
+    realtime_snapshot_version: str | None = None
 
 
 class PositionRealtimePnlResponse(BaseModel):

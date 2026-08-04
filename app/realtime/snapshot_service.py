@@ -153,13 +153,26 @@ class SnapshotService:
             else []
         )
 
+        account_versions: dict[str, str] = {}
+        position_versions: dict[str, str] = {}
         try:
-            account_values, position_values = (
-                self.pnl_store.get_accounts_with_positions(
+            if require_realtime_consistency and position_ids:
+                (
+                    account_values,
+                    position_values,
+                    account_versions,
+                    position_versions,
+                ) = self.pnl_store.get_accounts_with_positions_and_versions(
                     account_ids=ids,
                     position_ids=position_ids,
                 )
-            )
+            else:
+                account_values, position_values = (
+                    self.pnl_store.get_accounts_with_positions(
+                        account_ids=ids,
+                        position_ids=position_ids,
+                    )
+                )
         except RedisError:
             if require_realtime_consistency:
                 raise
@@ -193,6 +206,32 @@ class SnapshotService:
                         PositionRealtimePnl.model_validate(values)
             except (TypeError, ValueError) as exc:
                 raise RedisError("WebSocket实时快照Hash不完整") from exc
+
+            # Hash内版本和独立最新版本索引由PnL单写者在同一Lua脚本写入。
+            # 格式完整但版本落后的Hash仍必须失败，不能推进Stream游标。
+            version_errors: list[str] = []
+            for account_id in active_account_ids:
+                actual = str(
+                    account_values.get(account_id, {}).get(
+                        "realtime_snapshot_version",
+                        "",
+                    )
+                )
+                expected = account_versions.get(account_id, "")
+                if not expected.isdigit() or actual != expected:
+                    version_errors.append(f"account:{account_id}")
+            for position_id in position_ids:
+                actual = str(
+                    position_values.get(position_id, {}).get(
+                        "realtime_snapshot_version",
+                        "",
+                    )
+                )
+                expected = position_versions.get(position_id, "")
+                if not expected.isdigit() or actual != expected:
+                    version_errors.append(f"position:{position_id}")
+            if version_errors:
+                raise RedisError("WebSocket实时快照版本不一致")
 
         positions_by_account = self._rows_by_account(positions)
         orders_by_account = self._rows_by_account(orders)

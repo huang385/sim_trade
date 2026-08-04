@@ -40,6 +40,11 @@ PNL_DIRTY_CONTRACT_VERSIONS_KEY = "pnl:dirty_contract_versions"
 PNL_ACCOUNT_INDEX_KEYS_KEY = "pnl:index_keys:accounts"
 PNL_CONTRACT_INDEX_KEYS_KEY = "pnl:index_keys:contracts"
 PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
+# PnL单写者在每个成功写入周期内递增一次；账户、持仓Hash、版本索引和
+# 对应实时事件由同一个Lua脚本共同使用该版本。
+PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY = "pnl:realtime:snapshot_sequence"
+PNL_ACCOUNT_REALTIME_VERSIONS_KEY = "pnl:realtime:account_versions"
+PNL_POSITION_REALTIME_VERSIONS_KEY = "pnl:realtime:position_versions"
 YML_FEEDHUB_STATUS_KEY = "market:source:yml_feedhub:status"
 
 # WebSocket实时投影、单实例租约和短期认证票据。

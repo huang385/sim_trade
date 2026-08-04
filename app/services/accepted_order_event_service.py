@@ -80,6 +80,8 @@ class AcceptedOrderEventService:
         "TRADE_CREATED",
         "POSITION_UPDATED",
         "POSITION_CLOSED",
+        "ACCOUNT_FACT_UPDATED",
+        # 兼容升级前已存在的账户事实消息。
         "ACCOUNT_UPDATED",
     }
     SUPPORTED_OFFSET_FLAGS = {
@@ -133,6 +135,7 @@ class AcceptedOrderEventService:
             if event_type in {
                 "POSITION_UPDATED",
                 "POSITION_CLOSED",
+                "ACCOUNT_FACT_UPDATED",
                 "ACCOUNT_UPDATED",
             }
             else ("order_id", "account_id", "exchange_id", "symbol")

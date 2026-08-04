@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from redis.exceptions import WatchError
 
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
-from app.schemas.pnl_schema import PositionRealtimePnl
+from app.schemas.pnl_schema import AccountRealtimePnl, PositionRealtimePnl
 
 
 def test_trade_dirty_is_written_by_one_atomic_lua_command():
@@ -247,6 +247,99 @@ def test_closed_position_prunes_empty_account_and_contract_meta_indexes():
             "pnl:index_keys:contracts",
         ],
     ]
+
+
+def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
+    redis_client = Mock()
+    redis_client.eval.return_value = "41"
+    store = RealtimePnlStore(redis_client)
+    now = datetime.now(timezone.utc)
+    position = PositionRealtimePnl(
+        position_id="P001",
+        account_id="A001",
+        exchange_id="DCE",
+        symbol="JD2609",
+        direction="LONG",
+        mark_price=Decimal("3500"),
+        cumulative_unrealized_pnl=Decimal("10"),
+        daily_position_pnl=Decimal("10"),
+        event_time=now,
+        source_event_id="TICK-1",
+        updated_at=now,
+    )
+    account = AccountRealtimePnl(
+        account_id="A001",
+        cumulative_unrealized_pnl=Decimal("10"),
+        daily_position_pnl=Decimal("10"),
+        daily_close_pnl=Decimal("0"),
+        daily_commission=Decimal("1"),
+        daily_pnl=Decimal("9"),
+        equity=Decimal("100010"),
+        available_cash=Decimal("90000"),
+        risk_ratio=Decimal("0.1"),
+        updated_at=now,
+    )
+
+    store.write_cycle_snapshots(
+        positions=[position],
+        accounts=[account],
+        dirty_version="market-1",
+        active_positions=[],
+        closed_positions=[],
+    )
+
+    args = redis_client.eval.call_args.args
+    assert args[1] == 1
+    assert args[2] == "pnl:realtime:snapshot_sequence"
+    script = args[0]
+    assert "HSET_REALTIME_SNAPSHOT" in script
+    assert "realtime_snapshot_version" in script
+    assert "XADD" in script
+    assert "realtime_version" in script
+    operations = json.loads(args[-1])
+    snapshot_operations = [
+        operation
+        for operation in operations
+        if operation[0] == "HSET_REALTIME_SNAPSHOT"
+    ]
+    assert snapshot_operations[0][2] == "pnl:realtime:position_versions"
+    assert snapshot_operations[1][2] == "pnl:realtime:account_versions"
+    account_events = [
+        operation
+        for operation in operations
+        if operation[0] == "XADD_REALTIME_EVENT"
+        and operation[3] == "ACCOUNT_PNL_UPDATED"
+    ]
+    assert len(account_events) == 1
+
+
+def test_versioned_snapshot_batch_read_uses_one_pipeline():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [
+        {"account_id": "A001", "realtime_snapshot_version": "7"},
+        {"position_id": "P001", "realtime_snapshot_version": "7"},
+        {"position_id": "P002", "realtime_snapshot_version": "6"},
+        ["7"],
+        ["7", "6"],
+    ]
+    store = RealtimePnlStore(redis_client)
+
+    accounts, positions, account_versions, position_versions = (
+        store.get_accounts_with_positions_and_versions(
+            account_ids=["A001"],
+            position_ids=["P001", "P002"],
+        )
+    )
+
+    assert accounts["A001"]["realtime_snapshot_version"] == "7"
+    assert positions["P002"]["realtime_snapshot_version"] == "6"
+    assert account_versions == {"A001": "7"}
+    assert position_versions == {"P001": "7", "P002": "6"}
+    redis_client.pipeline.assert_called_once_with(transaction=False)
+    assert pipeline.hgetall.call_count == 3
+    assert pipeline.hmget.call_count == 2
+    pipeline.execute.assert_called_once()
 
 
 def test_dirty_position_scan_cursor_rotates_past_unprocessable_first_batch():

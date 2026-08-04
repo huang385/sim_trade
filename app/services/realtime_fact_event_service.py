@@ -53,10 +53,10 @@ class RealtimeFactEventService:
             event_id=event_id,
             aggregate_type="ACCOUNT",
             aggregate_id=resolved_account_id,
-            event_type="ACCOUNT_UPDATED",
+            event_type="ACCOUNT_FACT_UPDATED",
             payload={
                 "event_id": event_id,
-                "event_type": "ACCOUNT_UPDATED",
+                "event_type": "ACCOUNT_FACT_UPDATED",
                 "account_id": resolved_account_id,
                 "cash_balance": _decimal_string(
                     _field(account, "cash_balance", Decimal("0"))
@@ -79,33 +79,14 @@ class RealtimeFactEventService:
                 "realized_pnl": _decimal_string(
                     _field(account, "realized_pnl", Decimal("0"))
                 ),
-                "unrealized_pnl": _decimal_string(
-                    _field(account, "unrealized_pnl", Decimal("0"))
-                ),
-                "daily_position_pnl": _decimal_string(
-                    _field(account, "daily_position_pnl", Decimal("0"))
-                ),
                 "daily_close_pnl": _decimal_string(
                     _field(account, "daily_close_pnl", Decimal("0"))
                 ),
                 "daily_commission": _decimal_string(
                     _field(account, "daily_commission", Decimal("0"))
                 ),
-                "daily_pnl": _decimal_string(
-                    _field(account, "daily_pnl", Decimal("0"))
-                ),
-                "equity": _decimal_string(
-                    _field(account, "equity", Decimal("0"))
-                ),
-                "available_cash": _decimal_string(
-                    _field(account, "available_cash", Decimal("0"))
-                ),
-                "risk_available_cash": _decimal_string(
-                    _field(account, "risk_available_cash", Decimal("0"))
-                ),
-                "risk_ratio": _decimal_string(
-                    _field(account, "risk_ratio", Decimal("0"))
-                ),
+                # 浮盈、动态权益、实时可用资金和风险率由唯一PnL Worker
+                # 负责，数据库事实事件不得用较旧估值覆盖该独立字段域。
                 "risk_state": _field(account, "risk_state", "NORMAL"),
                 "updated_at": account.updated_at.isoformat(),
             },

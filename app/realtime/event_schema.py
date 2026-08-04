@@ -18,6 +18,9 @@ class RealtimeEventEnvelope(BaseModel):
     # 两者用途不同，禁止用重试后生成的Stream编号判断订单状态先后。
     version: str
     business_version: str | None = None
+    # Redis PnL单写者为账户和持仓估值生成的独立周期版本。它不属于
+    # PostgreSQL Outbox业务版本域，也不能替代Stream传输游标。
+    realtime_version: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("occurred_at")

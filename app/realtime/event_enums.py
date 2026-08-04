@@ -13,6 +13,11 @@ class RealtimeEventType(str, Enum):
     TRADE_CREATED = "TRADE_CREATED"
     POSITION_UPDATED = "POSITION_UPDATED"
     POSITION_CLOSED = "POSITION_CLOSED"
+    # PostgreSQL提交后的账户基础资金事实与Redis实时估值必须使用独立事件
+    # 类型和版本域，避免迟到数据库事件覆盖更新的盘中权益。
+    ACCOUNT_FACT_UPDATED = "ACCOUNT_FACT_UPDATED"
+    ACCOUNT_PNL_UPDATED = "ACCOUNT_PNL_UPDATED"
+    # 仅兼容升级前尚在Stream/Pending中的旧投影消息；新代码不再生产。
     ACCOUNT_UPDATED = "ACCOUNT_UPDATED"
     PNL_UPDATED = "PNL_UPDATED"
     OPTION_VALUATION_UPDATED = "OPTION_VALUATION_UPDATED"

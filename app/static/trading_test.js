@@ -387,11 +387,36 @@ function applyRealtimeEvent(event) {
         renderTrades(state.trades);
         return;
     }
-    if (event.event_type === "ACCOUNT_UPDATED" && state.account && state.pnl) {
+    if (["ACCOUNT_FACT_UPDATED", "ACCOUNT_UPDATED"].includes(event.event_type)
+        && state.account && state.pnl) {
         const values = event.payload || {};
-        // 账户事实事件和500ms实时PnL事件都使用ACCOUNT_UPDATED；只合并
-        // 实际携带的绝对字段，不让缺失字段覆盖另一类事实。
-        state.account = {...state.account, ...values};
+        // PostgreSQL账户事实只拥有基础资金字段；升级前的ACCOUNT_UPDATED
+        // 也按事实域处理，绝不让其中的旧估值覆盖state.pnl。
+        const factFields = [
+            "cash_balance",
+            "used_margin",
+            "frozen_margin",
+            "frozen_cash",
+            "frozen_commission",
+            "used_commission",
+            "realized_pnl",
+            "daily_close_pnl",
+            "daily_commission",
+            "risk_state",
+            "updated_at",
+        ];
+        const factPatch = {};
+        factFields.forEach((field) => {
+            if (values[field] !== undefined) factPatch[field] = values[field];
+        });
+        state.account = {...state.account, ...factPatch};
+        renderAccount(state.account, state.pnl);
+        return;
+    }
+    if (event.event_type === "ACCOUNT_PNL_UPDATED" && state.account && state.pnl) {
+        const values = event.payload || {};
+        // Redis实时PnL只更新派生估值字段，不能覆盖cash_balance、冻结资金、
+        // 实际保证金或手续费等PostgreSQL基础事实。
         state.pnl = {
             ...state.pnl,
             ...(values.cumulative_unrealized_pnl !== undefined
@@ -413,6 +438,9 @@ function applyRealtimeEvent(event) {
                 ? {risk_ratio: values.risk_ratio} : {}),
             ...(values.updated_at !== undefined
                 ? {updated_at: values.updated_at} : {}),
+            ...(values.realtime_snapshot_version !== undefined
+                ? {realtime_snapshot_version: values.realtime_snapshot_version}
+                : {}),
             data_source: "REDIS_REALTIME",
         };
         renderAccount(state.account, state.pnl);

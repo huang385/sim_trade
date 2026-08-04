@@ -9,7 +9,7 @@ from app.services.realtime_fact_event_service import RealtimeFactEventService
 NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 
 
-def test_account_event_contains_complete_decimal_string_facts():
+def test_account_fact_event_owns_only_postgres_decimal_fields():
     repository = Mock()
     service = RealtimeFactEventService(
         repository=repository,
@@ -40,18 +40,29 @@ def test_account_event_contains_complete_decimal_string_facts():
     service.create_account_updated(Mock(), account=account, occurred_at=NOW)
 
     payload = repository.create_event.call_args.kwargs["payload"]
+    event = repository.create_event.call_args.kwargs
+    assert event["event_type"] == "ACCOUNT_FACT_UPDATED"
     assert payload["cash_balance"] == "1000"
     assert payload["frozen_commission"] == "4"
-    assert payload["risk_ratio"] == "0.1"
+    assert payload["daily_close_pnl"] == "9"
     assert all(
         not isinstance(payload[field], float)
         for field in (
             "cash_balance",
             "used_margin",
-            "equity",
-            "available_cash",
+            "daily_close_pnl",
+            "daily_commission",
         )
     )
+    assert {
+        "unrealized_pnl",
+        "daily_position_pnl",
+        "daily_pnl",
+        "equity",
+        "available_cash",
+        "risk_available_cash",
+        "risk_ratio",
+    }.isdisjoint(payload)
 
 
 def test_zero_volume_position_produces_closed_absolute_event():

@@ -10,6 +10,7 @@ from app.core.config import settings
 
 from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
+    PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
     PNL_CONTRACT_INDEX_KEYS_KEY,
     PNL_DIRTY_ACCOUNT_FACTS_KEY,
     PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
@@ -24,6 +25,8 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_POSITION_SCAN_CURSOR_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_CACHE_VERSION_KEY,
+    PNL_POSITION_REALTIME_VERSIONS_KEY,
+    PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
     PNL_WORKER_LEASE_KEY,
     REALTIME_EVENT_STREAM,
     parse_pnl_dirty_contract_member,
@@ -133,6 +136,14 @@ for _, operation in ipairs(operations) do
         for index = 3, #operation, 2 do
             redis.call('HSET', key, operation[index], operation[index + 1])
         end
+    elseif command == 'HSET_REALTIME_SNAPSHOT' then
+        -- operation[3]是实体版本Hash，operation[4]是账户或持仓编号。
+        -- 金额仍由Python预先计算；Lua只附加周期版本并执行Redis命令。
+        for index = 5, #operation, 2 do
+            redis.call('HSET', key, operation[index], operation[index + 1])
+        end
+        redis.call('HSET', key, 'realtime_snapshot_version', snapshot_version)
+        redis.call('HSET', operation[3], operation[4], snapshot_version)
     elseif command == 'SADD' then
         redis.call('SADD', key, operation[3])
     elseif command == 'SREM_MEMBER_AND_PRUNE_INDEX' then
@@ -141,22 +152,27 @@ for _, operation in ipairs(operations) do
             redis.call('SREM', operation[4], key)
         end
     elseif command == 'XADD_REALTIME_EVENT' then
+        local envelope = cjson.decode(operation[7])
+        envelope['realtime_version'] = snapshot_version
+        if envelope['payload'] then
+            envelope['payload']['realtime_snapshot_version'] = snapshot_version
+        end
         redis.call(
             'XADD', key, 'MAXLEN', '~', operation[8], '*',
             'event_id', operation[3],
             'event_type', operation[4],
             'account_id', operation[5],
             'entity_id', operation[6],
-            'payload', operation[7]
+            'payload', cjson.encode(envelope)
         )
     end
 end
-return 1
+return snapshot_version
 """
 
-WRITE_CYCLE_SCRIPT = (
-    "local unused = ARGV[1]\n" + APPLY_CYCLE_OPERATIONS_BODY
-)
+WRITE_CYCLE_SCRIPT = """
+local snapshot_version = tostring(redis.call('INCR', KEYS[1]))
+""" + APPLY_CYCLE_OPERATIONS_BODY
 
 # Redis 5中租约键自然过期与WATCH的组合不能提供本场景要求的严格屏障，因此
 # 最终快照写入使用Lua完成“检查持有者+执行预生成命令”。Lua只搬运Python
@@ -165,6 +181,7 @@ WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
+local snapshot_version = tostring(redis.call('INCR', KEYS[2]))
 """ + APPLY_CYCLE_OPERATIONS_BODY
 
 
@@ -182,6 +199,7 @@ def _mapping(model) -> dict[str, str]:
     return {
         key: _redis_value(value)
         for key, value in model.model_dump(mode="python").items()
+        if value is not None
     }
 
 
@@ -493,7 +511,12 @@ class RealtimePnlStore:
 
         operations: list[list[str]] = []
         for item in positions:
-            hash_operation = ["HSET", pnl_position_key(item.position_id)]
+            hash_operation = [
+                "HSET_REALTIME_SNAPSHOT",
+                pnl_position_key(item.position_id),
+                PNL_POSITION_REALTIME_VERSIONS_KEY,
+                item.position_id,
+            ]
             for field, value in _mapping(item).items():
                 hash_operation.extend((field, value))
             operations.append(hash_operation)
@@ -543,7 +566,12 @@ class RealtimePnlStore:
             )
 
         for item in accounts:
-            hash_operation = ["HSET", pnl_account_key(item.account_id)]
+            hash_operation = [
+                "HSET_REALTIME_SNAPSHOT",
+                pnl_account_key(item.account_id),
+                PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+                item.account_id,
+            ]
             for field, value in _mapping(item).items():
                 hash_operation.extend((field, value))
             operations.append(hash_operation)
@@ -568,13 +596,13 @@ class RealtimePnlStore:
                     "XADD_REALTIME_EVENT",
                     REALTIME_EVENT_STREAM,
                     account_event_id,
-                    "ACCOUNT_UPDATED",
+                    "ACCOUNT_PNL_UPDATED",
                     item.account_id,
                     item.account_id,
                     json.dumps(
                         {
                             "event_id": account_event_id,
-                            "event_type": "ACCOUNT_UPDATED",
+                            "event_type": "ACCOUNT_PNL_UPDATED",
                             "account_id": item.account_id,
                             "entity_id": item.account_id,
                             "occurred_at": item.updated_at.isoformat(),
@@ -681,7 +709,8 @@ class RealtimePnlStore:
         )
         self.redis_client.eval(
             WRITE_CYCLE_SCRIPT,
-            0,
+            1,
+            PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
             "",
             json.dumps(
                 operations,
@@ -721,8 +750,9 @@ class RealtimePnlStore:
         written = bool(
             self.redis_client.eval(
                 WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT,
-                1,
+                2,
                 self.worker_lease_key,
+                PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
                 lease_owner,
                 json.dumps(
                     operations,
@@ -784,6 +814,65 @@ class RealtimePnlStore:
         return (
             dict(zip(accounts, account_rows, strict=True)),
             dict(zip(positions, position_rows, strict=True)),
+        )
+
+    def get_accounts_with_positions_and_versions(
+        self,
+        *,
+        account_ids: Iterable[str],
+        position_ids: Iterable[str],
+    ) -> tuple[
+        dict[str, dict[str, str]],
+        dict[str, dict[str, str]],
+        dict[str, str],
+        dict[str, str],
+    ]:
+        """一个Pipeline读取实时Hash及各实体最后原子写入的周期版本。
+
+        Pipeline内仍是批量命令，不因账户或持仓数量增加网络往返。严格
+        WebSocket快照用Hash内版本与独立版本索引交叉校验，任一不一致都
+        不能把当前事件游标当作已被快照覆盖。
+        """
+
+        accounts = list(dict.fromkeys(account_ids))
+        positions = list(dict.fromkeys(position_ids))
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for account_id in accounts:
+            pipeline.hgetall(pnl_account_key(account_id))
+        for position_id in positions:
+            pipeline.hgetall(pnl_position_key(position_id))
+        pipeline.hmget(PNL_ACCOUNT_REALTIME_VERSIONS_KEY, accounts)
+        pipeline.hmget(PNL_POSITION_REALTIME_VERSIONS_KEY, positions)
+        rows = pipeline.execute()
+        account_end = len(accounts)
+        position_end = account_end + len(positions)
+        account_rows = rows[:account_end]
+        position_rows = rows[account_end:position_end]
+        account_versions = rows[position_end] if len(rows) > position_end else []
+        position_versions = (
+            rows[position_end + 1]
+            if len(rows) > position_end + 1
+            else []
+        )
+        return (
+            dict(zip(accounts, account_rows, strict=True)),
+            dict(zip(positions, position_rows, strict=True)),
+            {
+                account_id: str(version or "")
+                for account_id, version in zip(
+                    accounts,
+                    account_versions,
+                    strict=True,
+                )
+            },
+            {
+                position_id: str(version or "")
+                for position_id, version in zip(
+                    positions,
+                    position_versions,
+                    strict=True,
+                )
+            },
         )
 
     def get_account_with_positions(

@@ -215,7 +215,12 @@ class ConnectionManager:
         code: int,
         reason: str,
     ) -> None:
-        """幂等关闭连接，并清理用户、账户、任务和临时缓冲索引。"""
+        """幂等关闭连接，并清理队列、路由、发送任务和快照缓冲。
+
+        权限撤销时队列中可能已经存在不再授权账户的序列化消息。连接先标记
+        closing，再取消唯一发送任务并丢弃全部排队消息，避免旧消息在账户
+        转移或角色降级后继续泄露。第一版不尝试解析字符串做逐账户过滤。
+        """
 
         if context.closing:
             return
@@ -227,9 +232,20 @@ class ConnectionManager:
             if not user_connections:
                 self.connections_by_user.pop(context.user_id, None)
         self.unsubscribe(context, set(context.subscribed_account_ids))
+        context.authorized_account_ids = frozenset()
         current_task = asyncio.current_task()
         if context.sender_task and context.sender_task is not current_task:
             context.sender_task.cancel()
+            await asyncio.gather(
+                context.sender_task,
+                return_exceptions=True,
+            )
+        # 发送任务已经停止，此后再清空队列，不会与sender并发取走下一条消息。
+        while True:
+            try:
+                context.send_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
         try:
             await context.websocket.close(code=int(code), reason=reason[:123])
         except Exception:
