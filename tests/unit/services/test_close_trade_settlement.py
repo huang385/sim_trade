@@ -388,6 +388,13 @@ def test_option_full_close_clears_position_market_value_and_realtime_margin():
         assert position.option_market_value == Decimal("0.000000")
         assert position.realtime_required_margin == Decimal("0.000000")
         assert position.total_volume == 0
+        events = db.scalars(select(OutboxEvent)).all()
+        assert {event.event_type for event in events} == {
+            "TRADE_CREATED",
+            "ORDER_FILLED",
+            "POSITION_CLOSED",
+            "ACCOUNT_UPDATED",
+        }
 
 
 def seed_cross_day_close(session_factory):
@@ -677,7 +684,14 @@ def test_close_settlement_updates_trade_account_and_position(
         assert trade_allocations[0].position_detail_id == "PD-1"
         assert trade_allocations[0].close_volume == 3
         assert trade_allocations[0].commission == Decimal("18.000000")
-        assert len(db.scalars(select(OutboxEvent)).all()) == 2
+        events = db.scalars(select(OutboxEvent)).all()
+        assert len(events) == 4
+        assert {event.event_type for event in events} == {
+            "TRADE_CREATED",
+            "ORDER_PARTIALLY_FILLED",
+            "POSITION_UPDATED",
+            "ACCOUNT_UPDATED",
+        }
 
 
 def test_partial_close_then_cancel_releases_only_remaining_allocation():
@@ -739,6 +753,13 @@ def test_last_close_releases_all_margin_tail():
         assert db.scalar(select(PositionDetail)).remaining_margin == Decimal(
             "0.000000"
         )
+        events = db.scalars(select(OutboxEvent)).all()
+        assert {event.event_type for event in events} == {
+            "TRADE_CREATED",
+            "ORDER_FILLED",
+            "POSITION_CLOSED",
+            "ACCOUNT_UPDATED",
+        }
 
 
 def test_multiple_details_are_closed_fifo_and_pnl_is_summed_per_detail():

@@ -14,6 +14,9 @@ def test_order_accepted_projection_adds_absolute_status():
         fields={
             "event_id": "E001",
             "event_type": "ORDER_ACCEPTED",
+            "aggregate_type": "ORDER",
+            "aggregate_id": "O001",
+            "business_version": "1",
             "payload": json.dumps(
                 {
                     "event_id": "E001",
@@ -30,6 +33,8 @@ def test_order_accepted_projection_adds_absolute_status():
     assert event.payload["status"] == "ACCEPTED"
     assert event.payload["frozen_margin"] == "8400.000000"
     assert event.version == "10-0"
+    assert event.business_version == "1"
+    assert event.payload["business_version"] == "1"
 
 
 def test_projection_publish_is_atomic_and_idempotent():
@@ -41,6 +46,9 @@ def test_projection_publish_is_atomic_and_idempotent():
         fields={
             "event_id": "E001",
             "event_type": "ORDER_FILLED",
+            "aggregate_type": "ORDER",
+            "aggregate_id": "O001",
+            "business_version": "2",
             "payload": json.dumps(
                 {
                     "event_id": "E001",
@@ -59,3 +67,30 @@ def test_projection_publish_is_atomic_and_idempotent():
     assert "EXISTS" in script
     assert "XADD" in script
     assert "SET" in script
+    assert "is_greater" in script
+    assert redis_client.eval.call_args_list[0].args[-1] == "2"
+
+
+def test_stale_business_version_is_not_published_again():
+    redis_client = Mock()
+    redis_client.eval.return_value = "STALE"
+    store = RealtimeEventStore(redis_client)
+    event = RealtimeEventProjectionService.project(
+        source_message_id="99-0",
+        fields={
+            "event_id": "E-LATE",
+            "event_type": "ORDER_ACCEPTED",
+            "aggregate_type": "ORDER",
+            "aggregate_id": "O001",
+            "business_version": "1",
+            "payload": json.dumps(
+                {
+                    "event_id": "E-LATE",
+                    "account_id": "A001",
+                    "order_id": "O001",
+                }
+            ),
+        },
+    )
+
+    assert store.publish_projected_once(event) is None

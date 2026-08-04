@@ -134,7 +134,11 @@ def test_accepted_order_cancel_releases_only_frozen_resources_and_writes_outbox(
         account.used_margin,
         account.used_commission,
     ) == unchanged_account
-    event = outbox.create_event.call_args.kwargs
+    event = next(
+        call.kwargs
+        for call in outbox.create_event.call_args_list
+        if call.kwargs["event_type"] == "ORDER_CANCELLED"
+    )
     assert event["event_type"] == "ORDER_CANCELLED"
     assert event["payload"]["released_margin"] == "20000.000000"
     assert event["payload"]["released_commission"] == "100.000000"
@@ -172,8 +176,9 @@ def test_partially_filled_order_cancels_only_remaining_and_keeps_trade_values():
     assert account.used_margin == Decimal("6000")
     assert account.used_commission == Decimal("30")
     assert account.available_cash == Decimal("93970.000000")
-    assert outbox.create_event.call_args.kwargs["event_type"] == (
-        "ORDER_PARTIALLY_CANCELLED"
+    assert any(
+        call.kwargs["event_type"] == "ORDER_PARTIALLY_CANCELLED"
+        for call in outbox.create_event.call_args_list
     )
 
 

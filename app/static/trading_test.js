@@ -385,26 +385,67 @@ function applyRealtimeEvent(event) {
     if (event.event_type === "TRADE_CREATED") {
         upsertById(state.trades, event.payload, "trade_id");
         renderTrades(state.trades);
-        // 新成交可能新增或关闭持仓，重新订阅会通过同一WebSocket取得完整快照。
-        subscribeCurrentAccount();
         return;
     }
     if (event.event_type === "ACCOUNT_UPDATED" && state.account && state.pnl) {
         const values = event.payload || {};
+        // 账户事实事件和500ms实时PnL事件都使用ACCOUNT_UPDATED；只合并
+        // 实际携带的绝对字段，不让缺失字段覆盖另一类事实。
+        state.account = {...state.account, ...values};
         state.pnl = {
             ...state.pnl,
-            unrealized_pnl: values.cumulative_unrealized_pnl,
-            daily_position_pnl: values.daily_position_pnl,
-            daily_close_pnl: values.daily_close_pnl,
-            daily_commission: values.daily_commission,
-            daily_pnl: values.daily_pnl,
-            equity: values.equity,
-            available_cash: values.available_cash,
-            risk_ratio: values.risk_ratio,
-            updated_at: values.updated_at,
+            ...(values.cumulative_unrealized_pnl !== undefined
+                ? {unrealized_pnl: values.cumulative_unrealized_pnl}
+                : values.unrealized_pnl !== undefined
+                    ? {unrealized_pnl: values.unrealized_pnl}
+                    : {}),
+            ...(values.daily_position_pnl !== undefined
+                ? {daily_position_pnl: values.daily_position_pnl} : {}),
+            ...(values.daily_close_pnl !== undefined
+                ? {daily_close_pnl: values.daily_close_pnl} : {}),
+            ...(values.daily_commission !== undefined
+                ? {daily_commission: values.daily_commission} : {}),
+            ...(values.daily_pnl !== undefined ? {daily_pnl: values.daily_pnl} : {}),
+            ...(values.equity !== undefined ? {equity: values.equity} : {}),
+            ...(values.available_cash !== undefined
+                ? {available_cash: values.available_cash} : {}),
+            ...(values.risk_ratio !== undefined
+                ? {risk_ratio: values.risk_ratio} : {}),
+            ...(values.updated_at !== undefined
+                ? {updated_at: values.updated_at} : {}),
             data_source: "REDIS_REALTIME",
         };
         renderAccount(state.account, state.pnl);
+        return;
+    }
+    if (event.event_type === "POSITION_UPDATED") {
+        const values = event.payload || {};
+        const row = state.positions.find(
+            (item) => item.position.position_id === values.position_id,
+        );
+        if (row) {
+            row.position = {...row.position, ...values};
+        } else {
+            state.positions.unshift({
+                position: values,
+                pnl: {
+                    mark_price: null,
+                    unrealized_pnl: values.unrealized_pnl || "0",
+                    daily_position_pnl: values.daily_position_pnl || "0",
+                    data_source: "POSTGRES_FACT",
+                },
+                valuation: {},
+                details: [],
+            });
+        }
+        renderPositions(state.positions);
+        return;
+    }
+    if (event.event_type === "POSITION_CLOSED") {
+        state.positions = state.positions.filter(
+            (item) => item.position.position_id !== event.payload?.position_id,
+        );
+        renderPositions(state.positions);
         return;
     }
     if (["PNL_UPDATED", "OPTION_VALUATION_UPDATED"].includes(event.event_type)) {
@@ -412,7 +453,6 @@ function applyRealtimeEvent(event) {
             (item) => item.position.position_id === event.entity_id,
         );
         if (!row) {
-            subscribeCurrentAccount();
             return;
         }
         const values = event.payload || {};

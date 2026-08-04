@@ -15,7 +15,10 @@ from app.realtime.connection_context import ConnectionContext
 from app.realtime.event_enums import RealtimeEventType, WebSocketCloseCode
 from app.realtime.event_schema import RealtimeEventEnvelope, SubscribeMessage
 from app.realtime.metrics import realtime_metrics
-from app.realtime.subscription_service import RealtimeUserIdentity
+from app.realtime.subscription_service import (
+    RealtimeUserIdentity,
+    SubscriptionAuthorization,
+)
 
 
 router = APIRouter()
@@ -59,22 +62,40 @@ def _authenticate(runtime, ticket: str):
 def _authorize_subscription(
     runtime,
     *,
-    identity: RealtimeUserIdentity,
+    user_id: str,
     account_ids: list[str],
     existing: set[str],
-) -> frozenset[str]:
+) -> SubscriptionAuthorization:
     with SessionLocal() as db:
-        return runtime.subscription_service.authorize(
+        return runtime.subscription_service.authorize_current(
             db,
-            identity=identity,
+            user_id=user_id,
             requested_account_ids=account_ids,
             existing_account_ids=existing,
         )
 
 
-def _build_snapshot(runtime, account_ids: set[str]) -> dict:
+def _recheck_subscriptions(runtime, context: ConnectionContext):
     with SessionLocal() as db:
-        return runtime.snapshot_service.build(db, account_ids)
+        return runtime.subscription_service.recheck_current_subscriptions(
+            db,
+            user_id=context.user_id,
+            subscribed_account_ids=set(context.subscribed_account_ids),
+        )
+
+
+def _build_snapshot(
+    runtime,
+    account_ids: set[str],
+    identity: RealtimeUserIdentity,
+) -> dict:
+    with SessionLocal() as db:
+        return runtime.snapshot_service.build(
+            db,
+            account_ids,
+            identity=identity,
+            require_realtime_consistency=True,
+        )
 
 
 async def _connection_monitor(runtime, context: ConnectionContext) -> None:
@@ -129,15 +150,26 @@ async def _connection_monitor(runtime, context: ConnectionContext) -> None:
         if monotonic() - last_auth_check >= (
             settings.ws_auth_recheck_interval_seconds
         ):
-            def check_active() -> bool:
-                with SessionLocal() as db:
-                    return runtime.auth_service.is_active(
-                        db,
-                        context.user_id,
-                    )
-
             try:
-                active = await asyncio.to_thread(check_active)
+                authorization = await asyncio.to_thread(
+                    _recheck_subscriptions,
+                    runtime,
+                    context,
+                )
+            except AppError as exc:
+                logger.warning(
+                    "WebSocket当前用户已失效 connection_id=%s user_id=%s "
+                    "error_code=%s",
+                    context.connection_id,
+                    context.user_id,
+                    exc.error_code,
+                )
+                await runtime.manager.close(
+                    context,
+                    code=WebSocketCloseCode.AUTHENTICATION_FAILED,
+                    reason="当前用户不可用",
+                )
+                return
             except Exception:
                 logger.exception(
                     "WebSocket身份复查失败 connection_id=%s user_id=%s",
@@ -151,13 +183,27 @@ async def _connection_monitor(runtime, context: ConnectionContext) -> None:
                 )
                 return
             last_auth_check = monotonic()
-            if not active:
-                await runtime.manager.close(
+            context.role = authorization.identity.role
+            context.authorized_account_ids = authorization.account_ids
+            revoked = (
+                set(context.subscribed_account_ids)
+                - set(authorization.account_ids)
+            )
+            if revoked:
+                # 角色降级或账户转移后，先移除路由，再向仍存活的连接说明
+                # 哪些订阅已被撤销，后续事件不会再进入该连接队列。
+                runtime.manager.unsubscribe(context, revoked)
+                await runtime.manager.enqueue(
                     context,
-                    code=WebSocketCloseCode.AUTHENTICATION_FAILED,
-                    reason="当前用户不可用",
+                    _control_event(
+                        RealtimeEventType.UNSUBSCRIBED,
+                        connection_id=context.connection_id,
+                        payload={
+                            "account_ids": sorted(revoked),
+                            "reason": "AUTHORIZATION_REVOKED",
+                        },
+                    ),
                 )
-                return
         await runtime.manager.enqueue(
             context,
             _control_event(
@@ -248,16 +294,17 @@ async def trading_websocket(websocket: WebSocket, ticket: str = ""):
                     continue
 
                 realtime_metrics.increment("ws_subscription_requests")
-                targets = await asyncio.to_thread(
+                first_authorization = await asyncio.to_thread(
                     _authorize_subscription,
                     runtime,
-                    identity=identity,
+                    user_id=context.user_id,
                     account_ids=request.account_ids,
                     existing=set(context.subscribed_account_ids),
                 )
                 # 授权仍每次查库，authorized_account_ids只是连接上下文审计值，
                 # 绝不能用它绕过最新账户归属校验。
-                target_set = set(targets)
+                context.role = first_authorization.identity.role
+                target_set = set(first_authorization.account_ids)
                 runtime.manager.subscribe(
                     context,
                     target_set,
@@ -271,6 +318,16 @@ async def trading_websocket(websocket: WebSocket, ticket: str = ""):
                         _build_snapshot,
                         runtime,
                         target_set,
+                        first_authorization.identity,
+                    )
+                    # 快照构造完成后再次读取当前角色和账户归属，修复第一次
+                    # 授权与快照发送之间账户转移的TOCTOU窗口。
+                    second_authorization = await asyncio.to_thread(
+                        _authorize_subscription,
+                        runtime,
+                        user_id=context.user_id,
+                        account_ids=sorted(target_set),
+                        existing=set(context.subscribed_account_ids),
                     )
                 except Exception:
                     # 已注册路由后加载快照失败时不能继续假装同步。关闭连接
@@ -287,6 +344,18 @@ async def trading_websocket(websocket: WebSocket, ticket: str = ""):
                         reason="完整快照加载失败，需要重新同步",
                     )
                     return
+                if set(second_authorization.account_ids) != target_set:
+                    runtime.manager.unsubscribe(context, target_set)
+                    await runtime.manager.close(
+                        context,
+                        code=WebSocketCloseCode.PERMISSION_DENIED,
+                        reason="账户订阅权限已变化",
+                    )
+                    return
+                context.role = second_authorization.identity.role
+                context.authorized_account_ids = (
+                    second_authorization.account_ids
+                )
                 snapshot.update(
                     {
                         "connection_id": context.connection_id,

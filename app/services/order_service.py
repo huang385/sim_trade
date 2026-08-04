@@ -65,6 +65,7 @@ from app.services.option_trading_permission_service import (
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.rule_query_service import (
     RuleQueryService,
     get_rule_query_service,
@@ -166,6 +167,9 @@ class OrderService:
         self.trading_day_provider = trading_day_provider
         self.order_id_factory = order_id_factory
         self.event_id_factory = event_id_factory
+        self.realtime_fact_events = RealtimeFactEventService(
+            repository=self.outbox_repository,
+        )
         self.allocation_id_factory = allocation_id_factory
         # 仅测试或受信任内部调用可在构造时显式提供管理员范围。生产HTTP
         # Service不设置默认值，每次请求必须传入由current_user构造的范围。
@@ -545,6 +549,7 @@ class OrderService:
             order_id = self.order_id_factory()
             accepted_at = utc_now()
             frozen_position_volume = 0
+            position = None
 
             if is_open:
                 if is_option:
@@ -736,6 +741,10 @@ class OrderService:
                 position.updated_at = accepted_at
                 frozen_position_volume = request.volume
 
+            # 账户冻结字段和可用资金已经发生变化，更新时间必须与本次接单
+            # 事务一致，供实时账户绝对事实和审计查询共同使用。
+            account.updated_at = accepted_at
+
             # 订单已完成所有校验和资源冻结，可以进入ACCEPTED状态。
             order = self.order_repository.create(
                 db=db,
@@ -823,6 +832,21 @@ class OrderService:
                 },
                 created_at=accepted_at,
             )
+
+            self.realtime_fact_events.create_account_updated(
+                db,
+                account=account,
+                occurred_at=accepted_at,
+                account_id=request.account_id,
+            )
+            if position is not None:
+                # 平仓接单会冻结持仓；即使尚未成交，客户端也必须看到最新
+                # available_volume和frozen_volume，而不是等待完整快照。
+                self.realtime_fact_events.create_position_updated(
+                    db,
+                    position=position,
+                    occurred_at=accepted_at,
+                )
 
             # 账户冻结、订单记录和 Outbox 事件在同一次 commit 中原子提交。
             # commit 失败时由下方异常分支统一 rollback。

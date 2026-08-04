@@ -4,10 +4,12 @@ from decimal import Decimal
 from typing import Any, Sequence
 
 from redis.exceptions import RedisError
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.common.exceptions import AuthorizationError
 from app.common.time_utils import utc_now
+from app.enums.auth_enums import UserRole
 from app.enums.order_enums import OrderStatus
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.models.account import Account
@@ -18,12 +20,15 @@ from app.models.trade import Trade
 from app.schemas.account_schema import AccountResponse
 from app.schemas.order_schema import OrderResponse
 from app.schemas.pnl_schema import (
+    AccountRealtimePnl,
     AccountRealtimePnlResponse,
+    PositionRealtimePnl,
     PositionRealtimePnlResponse,
 )
 from app.schemas.position_schema import PositionResponse
 from app.schemas.trade_schema import TradeResponse
 from app.services.realtime_pnl_query_service import RealtimePnlQueryService
+from app.realtime.subscription_service import RealtimeUserIdentity
 
 
 ACTIVE_ORDER_STATUSES = (
@@ -59,19 +64,46 @@ class SnapshotService:
         self,
         db: Session,
         account_ids: set[str],
+        *,
+        identity: RealtimeUserIdentity | None = None,
+        require_realtime_consistency: bool = False,
     ) -> dict[str, Any]:
-        """固定五次集合SQL读取账户、订单、成交、持仓和明细。"""
+        """固定五次集合SQL读取账户、订单、成交、持仓和明细。
+
+        WebSocket严格模式在PostgreSQL使用只读REPEATABLE READ，并要求
+        Redis实时Hash完整；普通HTTP调用仍允许回退数据库最近快照。
+        """
 
         if not account_ids:
             return {"generated_at": utc_now().isoformat(), "accounts": []}
+        if require_realtime_consistency:
+            bind = db.get_bind()
+            if bind.dialect.name == "postgresql":
+                # 必须在本Session第一条SQL前设置隔离级别，随后五次集合查询
+                # 才会看到同一个MVCC快照，避免旧Account与新Position混合。
+                db.connection(
+                    execution_options={"isolation_level": "REPEATABLE READ"}
+                )
+                db.execute(text("SET TRANSACTION READ ONLY"))
         ids = tuple(sorted(account_ids))
+        account_statement = select(Account).where(
+            Account.account_id.in_(ids)
+        )
+        if identity is not None and identity.role != UserRole.ADMIN.value:
+            account_statement = account_statement.where(
+                Account.user_id == identity.user_id
+            )
         accounts = list(
             db.scalars(
-                select(Account)
-                .where(Account.account_id.in_(ids))
-                .order_by(Account.id)
+                account_statement.order_by(Account.id)
             ).all()
         )
+        authorized_ids = tuple(account.account_id for account in accounts)
+        if set(authorized_ids) != set(ids):
+            raise AuthorizationError(
+                "无权读取目标交易账户快照",
+                error_code="WS_ACCOUNT_ACCESS_DENIED",
+            )
         positions = list(
             db.scalars(
                 select(Position)
@@ -129,7 +161,38 @@ class SnapshotService:
                 )
             )
         except RedisError:
+            if require_realtime_consistency:
+                raise
             account_values, position_values = {}, {}
+
+        if require_realtime_consistency:
+            # 有活动持仓时，账户和每条持仓都必须具有完整实时Hash。无持仓
+            # 账户没有行情派生值，使用同一数据库快照中的资金事实是安全的。
+            missing_positions = [
+                position_id
+                for position_id in position_ids
+                if not position_values.get(position_id)
+            ]
+            active_account_ids = {
+                position.account_id for position in positions
+            }
+            missing_accounts = [
+                account_id
+                for account_id in ids
+                if account_id in active_account_ids
+                and not account_values.get(account_id)
+            ]
+            if missing_positions or missing_accounts:
+                raise RedisError("WebSocket实时快照Hash缺失")
+            try:
+                for values in account_values.values():
+                    if values:
+                        AccountRealtimePnl.model_validate(values)
+                for values in position_values.values():
+                    if values:
+                        PositionRealtimePnl.model_validate(values)
+            except (TypeError, ValueError) as exc:
+                raise RedisError("WebSocket实时快照Hash不完整") from exc
 
         positions_by_account = self._rows_by_account(positions)
         orders_by_account = self._rows_by_account(orders)

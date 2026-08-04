@@ -186,11 +186,19 @@ def test_two_ticks_partial_then_full_preserve_all_balances():
             for trade in trades
         )
         assert len(details) == 2
-        assert len(outbox) == 4
+        assert len(outbox) == 8
+        assert [event.event_type for event in outbox].count(
+            "POSITION_UPDATED"
+        ) == 2
+        assert [event.event_type for event in outbox].count(
+            "ACCOUNT_UPDATED"
+        ) == 2
         assert {item.event_type for item in outbox} == {
             "TRADE_CREATED",
             "ORDER_PARTIALLY_FILLED",
             "ORDER_FILLED",
+            "POSITION_UPDATED",
+            "ACCOUNT_UPDATED",
         }
 
 

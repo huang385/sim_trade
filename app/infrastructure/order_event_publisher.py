@@ -58,6 +58,11 @@ class OrderEventPublisher:
             fields={
                 "event_id": event.event_id,
                 "event_type": event.event_type,
+                # PostgreSQL自增主键代表同一聚合根业务事务的先后顺序。
+                # Redis Stream ID只代表实际发布顺序，重试时两者可能不同。
+                "aggregate_type": event.aggregate_type,
+                "aggregate_id": event.aggregate_id,
+                "business_version": str(event.id),
                 "payload": payload_json,
             },
         )

@@ -141,3 +141,24 @@ class AccountRepository:
             .order_by(Account.id)
         )
         return db.scalars(statement).all()
+
+    @staticmethod
+    def list_owned_by_account_ids(
+        db: Session,
+        *,
+        account_ids: Sequence[str],
+        user_id: str,
+    ) -> Sequence[Account]:
+        """一次SQL按账户集合和当前用户归属共同过滤。"""
+
+        if not account_ids:
+            return []
+        statement = (
+            select(Account)
+            .where(
+                Account.account_id.in_(tuple(account_ids)),
+                Account.user_id == user_id,
+            )
+            .order_by(Account.id)
+        )
+        return db.scalars(statement).all()

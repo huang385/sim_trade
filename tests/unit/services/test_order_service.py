@@ -174,7 +174,11 @@ def test_create_open_order_success(direction, expected_margin):
     assert account.frozen_commission == Decimal("6.000000")
     assert order_repository.create.call_args.kwargs["status"] == "ACCEPTED"
     assert order_repository.create.call_args.kwargs["total_volume"] == 2
-    event_args = outbox_repository.create_event.call_args.kwargs
+    event_args = next(
+        call.kwargs
+        for call in outbox_repository.create_event.call_args_list
+        if call.kwargs["event_type"] == "ORDER_ACCEPTED"
+    )
     assert event_args["aggregate_type"] == "ORDER"
     assert event_args["aggregate_id"] == "O20260717000001"
     assert event_args["event_type"] == "ORDER_ACCEPTED"
@@ -306,9 +310,11 @@ def test_create_close_order_freezes_commission_and_position(
     assert allocation.remaining_frozen_volume == 2
     assert allocation.status == "ACTIVE"
     assert (
-        outbox_repository.create_event.call_args.kwargs["payload"][
-            "frozen_position_volume"
-        ]
+        next(
+            call.kwargs
+            for call in outbox_repository.create_event.call_args_list
+            if call.kwargs["event_type"] == "ORDER_ACCEPTED"
+        )["payload"]["frozen_position_volume"]
         == 2
     )
 

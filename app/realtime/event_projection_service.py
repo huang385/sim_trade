@@ -13,6 +13,9 @@ SOURCE_EVENT_MAPPING = {
     "ORDER_CANCELLED": RealtimeEventType.ORDER_CANCELLED,
     "ORDER_PARTIALLY_CANCELLED": RealtimeEventType.ORDER_CANCELLED,
     "TRADE_CREATED": RealtimeEventType.TRADE_CREATED,
+    "POSITION_UPDATED": RealtimeEventType.POSITION_UPDATED,
+    "POSITION_CLOSED": RealtimeEventType.POSITION_CLOSED,
+    "ACCOUNT_UPDATED": RealtimeEventType.ACCOUNT_UPDATED,
 }
 
 
@@ -36,17 +39,28 @@ class RealtimeEventProjectionService:
         if not isinstance(payload, dict):
             raise ValueError("订单事件payload必须是对象")
         event_id = str(fields.get("event_id") or payload.get("event_id") or "")
+        aggregate_type = str(fields.get("aggregate_type") or "").strip().upper()
+        aggregate_id = str(fields.get("aggregate_id") or "").strip()
+        business_version = str(fields.get("business_version") or "").strip()
         account_id = str(payload.get("account_id") or "").strip()
         if not event_id or not account_id:
             raise ValueError("订单事件缺少event_id或account_id")
         if source_type == "ORDER_ACCEPTED":
             # 接单Outbox历史结构没有status字段，投影补充确定的绝对状态。
             payload = {**payload, "status": "ACCEPTED"}
-        entity_id = str(
-            payload.get("trade_id")
-            if source_type == "TRADE_CREATED"
-            else payload.get("order_id")
-        ).strip()
+        if not aggregate_type or not aggregate_id or not business_version.isdigit():
+            raise ValueError("实时投影事件缺少合法聚合根业务版本")
+        if source_type == "TRADE_CREATED":
+            entity_id = str(payload.get("trade_id") or "").strip()
+        elif source_type in {"POSITION_UPDATED", "POSITION_CLOSED"}:
+            entity_id = str(payload.get("position_id") or "").strip()
+        elif source_type == "ACCOUNT_UPDATED":
+            entity_id = account_id
+        else:
+            entity_id = str(payload.get("order_id") or "").strip()
+        # 客户端收到的绝对事实中直接携带业务版本，便于独立于传输游标
+        # 检查同一订单、持仓或账户是否发生状态倒退。
+        payload = {**payload, "business_version": business_version}
         occurred_raw = (
             payload.get("updated_at")
             or payload.get("created_at")
@@ -69,5 +83,6 @@ class RealtimeEventProjectionService:
             occurred_at=occurred_at,
             # Gateway路由时会以目标Stream消息编号覆盖该来源版本。
             version=source_message_id,
+            business_version=business_version,
             payload=payload,
         )

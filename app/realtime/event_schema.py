@@ -14,7 +14,10 @@ class RealtimeEventEnvelope(BaseModel):
     account_id: str | None = None
     entity_id: str | None = None
     occurred_at: datetime
+    # version是目标Redis Stream传输游标；business_version是业务聚合版本。
+    # 两者用途不同，禁止用重试后生成的Stream编号判断订单状态先后。
     version: str
+    business_version: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("occurred_at")

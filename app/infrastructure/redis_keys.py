@@ -67,6 +67,18 @@ def projected_realtime_event_key(event_id: str) -> str:
     return f"ws:projection:processed:{event_id}"
 
 
+def realtime_aggregate_business_version_key(
+    aggregate_type: str,
+    aggregate_id: str,
+) -> str:
+    """返回实时投影聚合根最后成功业务版本键。"""
+
+    return (
+        "ws:projection:business_version:"
+        f"{aggregate_type.strip().upper()}:{aggregate_id.strip()}"
+    )
+
+
 def realtime_projection_failure_key(message_id: str) -> str:
     """返回实时投影失败计数键。"""
 

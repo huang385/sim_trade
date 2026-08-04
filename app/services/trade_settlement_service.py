@@ -52,6 +52,7 @@ from app.services.option_trade_settlement_strategy import (
 from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
 )
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
 @dataclass(frozen=True)
@@ -175,6 +176,9 @@ class TradeSettlementService:
         self.event_id_factory = event_id_factory or (
             lambda: f"EVT-{uuid4().hex.upper()}"
         )
+        self.realtime_fact_events = RealtimeFactEventService(
+            repository=self.outbox_repository,
+        )
 
     @staticmethod
     def _allocate_frozen(
@@ -218,6 +222,8 @@ class TradeSettlementService:
         *,
         trade: Trade,
         order,
+        account,
+        position: Position,
         now,
     ) -> None:
         """
@@ -313,6 +319,52 @@ class TradeSettlementService:
             created_at=now,
         )
 
+        # 成交事务已经计算出PostgreSQL最终账户和持仓事实；把完整绝对值
+        # 同事务写入Outbox，客户端无需收到Trade后重新加载整份快照。
+        self.realtime_fact_events.create_position_updated(
+            db,
+            position=position,
+            occurred_at=now,
+        )
+        self.realtime_fact_events.create_account_updated(
+            db,
+            account=account,
+            occurred_at=now,
+            account_id=order.account_id,
+        )
+
+    def _get_affected_position(self, db: Session, *, order) -> Position:
+        """按订单开平方向取得刚被当前事务修改的持仓汇总。"""
+
+        # 生产Session关闭autoflush；期权策略刚创建的新持仓必须先flush，
+        # 后续同事务SELECT才能取得数据库生成及已写入的真实绝对状态。
+        db.flush()
+        if order.offset_flag == OffsetFlag.OPEN.value:
+            direction = (
+                PositionDirection.LONG.value
+                if order.direction == OrderDirection.BUY.value
+                else PositionDirection.SHORT.value
+            )
+        else:
+            direction = (
+                PositionDirection.LONG.value
+                if order.direction == OrderDirection.SELL.value
+                else PositionDirection.SHORT.value
+            )
+        position = self.position_repository.get_for_update(
+            db,
+            account_id=order.account_id,
+            exchange_id=order.exchange_id,
+            symbol=order.symbol,
+            direction=direction,
+        )
+        if position is None:
+            raise DataAccessError(
+                "成交事务完成后找不到受影响持仓",
+                error_code="SETTLEMENT_POSITION_NOT_FOUND",
+            )
+        return position
+
     def settle(
         self,
         db: Session,
@@ -401,10 +453,13 @@ class TradeSettlementService:
                     trade_id=self.trade_id_factory(),
                     now=now,
                 )
+                position = self._get_affected_position(db, order=order)
                 self._create_outbox_events(
                     db,
                     trade=trade,
                     order=order,
+                    account=account,
+                    position=position,
                     now=now,
                 )
                 db.commit()
@@ -484,10 +539,13 @@ class TradeSettlementService:
                     trade_repository=self.trade_repository,
                     position_repository=self.position_repository,
                 )
+                position = self._get_affected_position(db, order=order)
                 self._create_outbox_events(
                     db,
                     trade=trade,
                     order=order,
+                    account=account,
+                    position=position,
                     now=now,
                 )
                 db.commit()
@@ -720,7 +778,14 @@ class TradeSettlementService:
             )
             self.position_repository.add_detail(db, detail)
             # Outbox与全部业务变更一起提交，Redis暂时不可用也不会丢失事件。
-            self._create_outbox_events(db, trade=trade, order=order, now=now)
+            self._create_outbox_events(
+                db,
+                trade=trade,
+                order=order,
+                account=account,
+                position=position,
+                now=now,
+            )
             db.commit()
             return SettlementResult(trade.trade_id, order.order_id, "SETTLED")
 

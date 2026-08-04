@@ -32,6 +32,7 @@ from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
 from app.services.order_freeze_service import OrderFreezeService
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
 def generate_cancel_event_id() -> str:
@@ -85,6 +86,9 @@ class OrderCancellationService:
             allocation_repository or PositionFreezeAllocationRepository()
         )
         self.event_id_factory = event_id_factory
+        self.realtime_fact_events = RealtimeFactEventService(
+            repository=self.outbox_repository,
+        )
         self.time_provider = time_provider
         self.default_access_scope = default_access_scope
 
@@ -223,6 +227,7 @@ class OrderCancellationService:
             # 账户已经按Order→Account顺序锁定；平仓撤单随后继续锁持仓、
             # 逐笔明细和本订单Allocation，开仓撤单不访问持仓。
             cancel_volume = order.remaining_volume
+            position = None
             released_margin = quantize_money(order.frozen_margin)
             released_cash = quantize_money(
                 getattr(order, "frozen_cash", Decimal("0"))
@@ -412,6 +417,7 @@ class OrderCancellationService:
             order.frozen_commission = Decimal("0.000000")
             order.cancelled_at = cancelled_at
             order.updated_at = cancelled_at
+            account.updated_at = cancelled_at
             if order.traded_volume == 0:
                 order.status = OrderStatus.CANCELLED.value
                 event_type = "ORDER_CANCELLED"
@@ -476,6 +482,19 @@ class OrderCancellationService:
                 },
                 created_at=cancelled_at,
             )
+
+            self.realtime_fact_events.create_account_updated(
+                db,
+                account=account,
+                occurred_at=cancelled_at,
+                account_id=order.account_id,
+            )
+            if position is not None:
+                self.realtime_fact_events.create_position_updated(
+                    db,
+                    position=position,
+                    occurred_at=cancelled_at,
+                )
 
             # Redis 不参与本事务；即使暂时不可用，数据库和 PENDING Outbox
             # 仍可正常提交，之后由发布 Worker 重试。

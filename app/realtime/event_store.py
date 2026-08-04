@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.infrastructure.redis_keys import (
     REALTIME_EVENT_STREAM,
     projected_realtime_event_key,
+    realtime_aggregate_business_version_key,
 )
 from app.realtime.event_schema import RealtimeEventEnvelope
 
@@ -13,6 +14,32 @@ from app.realtime.event_schema import RealtimeEventEnvelope
 PUBLISH_PROJECTED_EVENT_ONCE_SCRIPT = """
 if redis.call('EXISTS', KEYS[2]) == 1 then
     return ''
+end
+
+-- 业务版本是PostgreSQL正整数主键。使用字符串长度和字典序比较，避免Lua
+-- double在大整数超过2^53后丢失精度。
+local function normalize_integer(value)
+    local normalized = string.gsub(value or '', '^0+', '')
+    if normalized == '' then
+        return '0'
+    end
+    return normalized
+end
+
+local function is_greater(left, right)
+    left = normalize_integer(left)
+    right = normalize_integer(right)
+    if string.len(left) ~= string.len(right) then
+        return string.len(left) > string.len(right)
+    end
+    return left > right
+end
+
+local current_version = redis.call('GET', KEYS[3])
+if current_version and not is_greater(ARGV[8], current_version) then
+    -- 迟到旧事件也标记为已处理，避免至少一次投递反复触发相同比较。
+    redis.call('SET', KEYS[2], 'STALE', 'EX', ARGV[6])
+    return 'STALE'
 end
 local message_id = redis.call(
     'XADD', KEYS[1], 'MAXLEN', '~', ARGV[7], '*',
@@ -22,6 +49,7 @@ local message_id = redis.call(
     'entity_id', ARGV[4],
     'payload', ARGV[5]
 )
+redis.call('SET', KEYS[3], ARGV[8])
 redis.call('SET', KEYS[2], message_id, 'EX', ARGV[6])
 return message_id
 """
@@ -75,11 +103,33 @@ class RealtimeEventStore:
             if processed_ttl_seconds is not None
             else settings.order_event_processed_ttl_seconds
         )
+        aggregate_type = str(envelope.payload.get("aggregate_type") or "")
+        aggregate_id = str(envelope.payload.get("aggregate_id") or "")
+        # 旧payload没有聚合字段时，从事件实体类型和编号恢复；投影服务会
+        # 对Outbox输入做严格校验，这里的回退仅方便直接构造Envelope的测试。
+        if not aggregate_type:
+            aggregate_type = (
+                "ACCOUNT"
+                if envelope.event_type.value == "ACCOUNT_UPDATED"
+                else "POSITION"
+                if envelope.event_type.value in {"POSITION_UPDATED", "POSITION_CLOSED"}
+                else "TRADE"
+                if envelope.event_type.value == "TRADE_CREATED"
+                else "ORDER"
+            )
+        aggregate_id = aggregate_id or envelope.entity_id or envelope.account_id or ""
+        business_version = str(envelope.business_version or "")
+        if not aggregate_id or not business_version.isdigit():
+            raise ValueError("实时投影缺少合法聚合根业务版本")
         result = self.redis_client.eval(
             PUBLISH_PROJECTED_EVENT_ONCE_SCRIPT,
-            2,
+            3,
             self.stream_name,
             projected_realtime_event_key(envelope.event_id),
+            realtime_aggregate_business_version_key(
+                aggregate_type,
+                aggregate_id,
+            ),
             envelope.event_id,
             envelope.event_type.value,
             envelope.account_id or "",
@@ -87,8 +137,9 @@ class RealtimeEventStore:
             self.serialize(envelope),
             ttl,
             settings.realtime_event_stream_maxlen,
+            business_version,
         )
-        if not result:
+        if not result or result in {"STALE", b"STALE"}:
             return None
         return result.decode() if isinstance(result, bytes) else str(result)
 

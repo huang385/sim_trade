@@ -13,7 +13,10 @@ def test_publish_writes_expected_redis_stream_fields():
     redis_client = Mock()
     redis_client.xadd.return_value = b"1-0"
     event = SimpleNamespace(
+        id=17,
         event_id="EVT-1",
+        aggregate_type="ORDER",
+        aggregate_id="O001",
         event_type="ORDER_ACCEPTED",
         payload={
             "price": Decimal("3500.000000"),
@@ -31,6 +34,9 @@ def test_publish_writes_expected_redis_stream_fields():
     assert stream == ORDER_EVENT_STREAM
     assert fields["event_id"] == "EVT-1"
     assert fields["event_type"] == "ORDER_ACCEPTED"
+    assert fields["aggregate_type"] == "ORDER"
+    assert fields["aggregate_id"] == "O001"
+    assert fields["business_version"] == "17"
     payload = json.loads(fields["payload"])
     assert payload["price"] == "3500.000000"
     assert payload["trading_day"] == "2026-07-20"

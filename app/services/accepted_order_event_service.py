@@ -76,7 +76,12 @@ class AcceptedOrderEventService:
     }
     # TRADE_CREATED 与订单状态事件发布到同一 Stream。活动订单消费者只需
     # 安全确认它，不维护成交派生数据，避免把合法成交事件误送入死信。
-    PASSTHROUGH_EVENT_TYPES = {"TRADE_CREATED"}
+    PASSTHROUGH_EVENT_TYPES = {
+        "TRADE_CREATED",
+        "POSITION_UPDATED",
+        "POSITION_CLOSED",
+        "ACCOUNT_UPDATED",
+    }
     SUPPORTED_OFFSET_FLAGS = {
         OffsetFlag.OPEN.value,
         OffsetFlag.CLOSE.value,
@@ -123,7 +128,15 @@ class AcceptedOrderEventService:
         if "event_type" in payload and payload.get("event_type") != event_type:
             raise OrderEventValidationError("event_type与payload不一致")
 
-        required_fields = ("order_id", "account_id", "exchange_id", "symbol")
+        required_fields = (
+            ("account_id",)
+            if event_type in {
+                "POSITION_UPDATED",
+                "POSITION_CLOSED",
+                "ACCOUNT_UPDATED",
+            }
+            else ("order_id", "account_id", "exchange_id", "symbol")
+        )
         missing = [
             name
             for name in required_fields
@@ -138,10 +151,10 @@ class AcceptedOrderEventService:
         return ParsedOrderEvent(
             event_id=event_id,
             event_type=event_type,
-            order_id=payload["order_id"].strip(),
+            order_id=str(payload.get("order_id") or "").strip(),
             account_id=payload["account_id"].strip(),
-            exchange_id=payload["exchange_id"].strip(),
-            symbol=payload["symbol"].strip(),
+            exchange_id=str(payload.get("exchange_id") or "").strip(),
+            symbol=str(payload.get("symbol") or "").strip(),
             payload=payload,
         )
 

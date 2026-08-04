@@ -54,10 +54,16 @@ class GatewayRuntime:
             dead_letter_stream=WS_GATEWAY_DEAD_LETTER_STREAM,
             failure_ttl_seconds=settings.order_event_failure_ttl_seconds,
             failure_key_factory=websocket_delivery_failure_key,
+            # 首次连接由完整快照建立当前状态，不重放最多百万条历史增量。
+            # 已存在Group时ensure_group的BUSYGROUP分支不会重置原游标。
+            group_start_id="$",
         )
         self.consumer = RealtimeEventConsumer(
             consumer=stream_consumer,
             router=RealtimeEventRouter(self.manager),
+            lease=self.lease,
+            owner_id=self.owner_id,
+            on_lease_lost=self._handle_lease_lost,
         )
         self.active = False
         self.consumer_task: asyncio.Task | None = None
@@ -110,11 +116,16 @@ class GatewayRuntime:
                 renewed = False
             if renewed:
                 continue
-            self.active = False
-            realtime_metrics.set("ws_gateway_lease_status", 0)
-            self.consumer.stop()
-            await self.manager.shutdown()
+            await self._handle_lease_lost()
             return
+
+    async def _handle_lease_lost(self) -> None:
+        """幂等停止失去租约的实例；绝不释放其他owner的新租约。"""
+
+        self.active = False
+        realtime_metrics.set("ws_gateway_lease_status", 0)
+        self.consumer.stop()
+        await self.manager.shutdown()
 
     async def stop(self) -> None:
         self.active = False
