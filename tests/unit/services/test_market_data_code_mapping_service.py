@@ -25,7 +25,7 @@ def make_service(rows):
     return MarketDataCodeMappingService(repository), repository
 
 
-def test_commodity_option_without_explicit_mapping_uses_feedhub_format():
+def test_commodity_option_without_explicit_mapping_uses_source_format():
     service, _repository = make_service(
         [(instrument("JD2609-C-4000", "FUTURES_OPTION"), None)]
     )
@@ -36,7 +36,7 @@ def test_commodity_option_without_explicit_mapping_uses_feedhub_format():
     assert snapshot.to_internal("JD2609C4000") == "JD2609-C-4000"
 
 
-def test_index_option_without_explicit_mapping_uses_feedhub_format():
+def test_index_option_without_explicit_mapping_uses_source_format():
     service, _repository = make_service(
         [(instrument("IO2608-P-4000", "INDEX_OPTION"), None)]
     )

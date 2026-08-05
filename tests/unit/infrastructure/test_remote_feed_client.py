@@ -207,6 +207,33 @@ def test_status_is_sanitized_and_connection_error_is_reported():
     assert "must-not-leak" not in str(messages)
 
 
+def test_storage_slow_consumer_is_not_forwarded_twice_as_error():
+    sdk = FakeSdk()
+    messages = []
+    errors = []
+    client = RemoteFeedClient(sdk)
+    client.start_tick_callbacks(
+        {"JD2609"},
+        on_quote=Mock(),
+        on_subscribe=Mock(),
+        on_message=messages.append,
+        on_error=errors.append,
+    )
+
+    sdk.status_handler(
+        FakeStatus(
+            component="storage",
+            state="slow_consumer",
+            message="storage queue is slow",
+            details={},
+        )
+    )
+
+    assert messages[0]["component"] == "storage"
+    assert messages[0]["state"] == "slow_consumer"
+    assert errors == []
+
+
 def test_stop_closes_sdk_and_joins_both_threads():
     sdk = FakeSdk()
     client = RemoteFeedClient(sdk)

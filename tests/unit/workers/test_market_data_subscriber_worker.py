@@ -217,6 +217,42 @@ def test_storage_slow_consumer_does_not_mark_live_subscription_failed(caplog):
     assert "实时订阅继续运行" in caplog.text
 
 
+def test_storage_slow_consumer_warning_is_deduplicated_for_sixty_seconds(
+    caplog,
+):
+    clock = MutableClock(10)
+    worker, *_ = make_worker(clock=clock)
+
+    with caplog.at_level(logging.WARNING):
+        worker.on_message(
+            {
+                "type": "status",
+                "component": "storage",
+                "state": "slow_consumer",
+            }
+        )
+        worker.on_error({"raw": {"code": "STORAGE_SLOW_CONSUMER"}})
+        clock.value = 69
+        worker.on_message(
+            {
+                "type": "status",
+                "component": "storage",
+                "state": "slow_consumer",
+            }
+        )
+        clock.value = 70
+        worker.on_message(
+            {
+                "type": "status",
+                "component": "storage",
+                "state": "slow_consumer",
+            }
+        )
+
+    assert caplog.text.count("行情中心存储消费较慢") == 2
+    assert worker.last_error == ""
+
+
 def test_no_active_orders_does_not_open_empty_subscription():
     worker, feed_client, *_ = make_worker(details={})
 
@@ -554,6 +590,24 @@ def test_slow_consumer_gap_stays_degraded_after_recovery():
     )
 
     assert worker._derive_status(0) == MarketDataSourceStatus.DEGRADED
+
+
+def test_storage_slow_consumer_does_not_degrade_live_session():
+    worker, _feed, _service, subscriptions, _clock = make_worker()
+    worker._desired_codes = frozenset({"JD2609"})
+    subscriptions.mark_requested(frozenset({"JD2609"}))
+    previous_status = worker._derive_status(0)
+
+    worker.on_message(
+        {
+            "type": "status",
+            "component": "storage",
+            "state": "slow_consumer",
+        }
+    )
+
+    assert worker._source_issue == ""
+    assert worker._derive_status(0) == previous_status
 
 
 def test_replaced_sdk_session_requests_worker_stop():

@@ -272,7 +272,13 @@ class RemoteFeedClient:
                     "slow_consumer",
                     "error",
                     "replaced",
-                }:
+                } and not (
+                    message["component"] == "storage"
+                    and message["state"] == "slow_consumer"
+                ):
+                    # storage/slow_consumer 只描述行情中心历史存储积压，
+                    # 已经由状态回调交给Worker处理；不要再作为运行错误重复
+                    # 转发。会话级slow_consumer仍必须进入on_error。
                     code = (
                         f"{message['component']}_{message['state']}"
                         .upper()

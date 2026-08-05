@@ -158,6 +158,7 @@ class MarketDataSubscriberWorker:
         # 坏Tick可能高频连续到达。这里只记录限频后的错误类型和标准合约代码，
         # 不打印完整行情报文，既保留排障信息也避免日志刷屏或泄露上游细节。
         self._last_invalid_tick_log_at: float | None = None
+        self._last_storage_slow_consumer_log_at: float | None = None
         self.last_tick_at: datetime | None = None
         self.last_published_at: datetime | None = None
         self.last_disconnect_at: datetime | None = None
@@ -194,6 +195,22 @@ class MarketDataSubscriberWorker:
             str(code or "UNKNOWN").strip().upper(),
             type(exc).__name__,
             str(exc)[:300],
+        )
+
+    def _log_storage_slow_consumer(self) -> None:
+        """行情中心存储告警最多每60秒输出一次，不影响实时订阅状态。"""
+
+        now = self.monotonic()
+        with self._state_lock:
+            if (
+                self._last_storage_slow_consumer_log_at is not None
+                and now - self._last_storage_slow_consumer_log_at < 60
+            ):
+                return
+            self._last_storage_slow_consumer_log_at = now
+        logger.warning(
+            "行情中心存储消费较慢，实时订阅继续运行 "
+            "code=STORAGE_SLOW_CONSUMER"
         )
 
     def request_stop(self, *_args) -> None:
@@ -340,6 +357,11 @@ class MarketDataSubscriberWorker:
         state = str(message.get("state") or "unknown")
         issue = f"{component}_{state}".upper()
         details = message.get("details") or {}
+        if component == "storage" and state == "slow_consumer":
+            # 行情中心历史存储管线积压不代表当前策略的实时订阅丢包。
+            # 会话自身的 session/slow_consumer 仍按不可补发缺口处理。
+            self._log_storage_slow_consumer()
+            return
         terminal = state == "replaced" or (
             component == "session"
             and state == "disconnected"
@@ -386,10 +408,7 @@ class MarketDataSubscriberWorker:
             # 该告警来自行情中心的历史存储消费者，不是当前 WebSocket
             # 客户端消费变慢。实时 Tick 仍可连续到达时不应把行情订阅标成
             # 运行错误；保留 WARNING 便于服务端排查存储积压即可。
-            logger.warning(
-                "行情中心存储消费较慢，实时订阅继续运行 code=%s",
-                code,
-            )
+            self._log_storage_slow_consumer()
             return
         with self._state_lock:
             self.last_error = code

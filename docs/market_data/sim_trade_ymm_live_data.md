@@ -72,11 +72,5 @@ REMOTE_MARKET_DATA_VERIFY_SSL=true
 market:source:ymm_live_data:status
 ```
 
-旧键不会被程序模糊扫描或自动删除。确认旧行情Worker已经停止后，可以人工执行一次：
-
-```text
-DEL market:source:yml_feedhub:status
-```
-
-当前旧SDK源码和旧文档仅为回滚审计保留；在新客户端真实连接、真实Tick和下游链路
-完成验收前不得删除，也不存在新源失败后自动回退旧源的运行分支。
+旧行情源代码、文档和Redis状态键已在真实连接、真实Tick及下游链路验收完成后删除。
+系统不存在新源失败后自动回退旧源的运行分支。
