@@ -25,6 +25,7 @@ from app.infrastructure.redis_keys import (
 from app.main import app
 from app.models.outbox_event import OutboxEvent
 from app.repositories.order_repository import OrderRepository
+from app.repositories.outbox_repository import OutboxRepository
 from app.services.accepted_order_event_service import AcceptedOrderEventService
 from app.workers.order_event_consumer_worker import OrderEventConsumerWorker
 from app.workers.outbox_publisher_worker import OutboxPublisherWorker
@@ -40,6 +41,25 @@ def require_redis_connection():
         redis_client.ping()
     except (RedisConnectionError, RedisTimeoutError) as exc:
         pytest.skip(f"Redis不可连接: {exc}")
+
+
+class EventScopedOutboxRepository(OutboxRepository):
+    """只领取本测试事件，避免共享数据库中的历史Outbox干扰验收。"""
+
+    def __init__(self, event_id: str):
+        self.event_id = event_id
+
+    def claim_pending_events(self, db, **_kwargs):
+        event = db.scalar(
+            select(OutboxEvent)
+            .where(OutboxEvent.event_id == self.event_id)
+            .with_for_update()
+        )
+        if event is None:
+            return []
+        event.status = "PROCESSING"
+        db.flush()
+        return [event]
 
 
 def test_api_outbox_stream_consumer_registers_active_order(integration_context):
@@ -94,6 +114,7 @@ def test_api_outbox_stream_consumer_registers_active_order(integration_context):
             redis_client,
             stream_name=stream_name,
         ),
+        outbox_repository=EventScopedOutboxRepository(event_id),
     ).run_once()
 
     active_index = ActiveOrderIndex(redis_client)

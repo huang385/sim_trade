@@ -12,6 +12,16 @@ class ActivePositionContractSource(Protocol):
     def list_active_contract_codes(self) -> set[str]:
         """返回当前至少存在一条有效持仓的合约代码。"""
 
+    def list_margin_dependency_codes(self) -> set[str]:
+        """返回活动期权空头持仓依赖的标的订阅代码。"""
+
+
+class PreSubscriptionContractSource(Protocol):
+    """下单前临时行情需求所需的最小读取接口。"""
+
+    def list_active_contract_codes(self) -> set[str]:
+        """返回所有尚未到期的期权及标的标准代码。"""
+
 
 @dataclass(frozen=True)
 class SubscriptionChange:
@@ -46,12 +56,14 @@ class MarketSubscriptionService:
         active_order_index: ActiveOrderIndex,
         active_position_contract_source: ActivePositionContractSource,
         debounce_seconds: float,
+        pre_subscription_source: PreSubscriptionContractSource | None = None,
     ):
         self.active_order_index = active_order_index
         self.active_position_contract_source = (
             active_position_contract_source
         )
         self.debounce_seconds = debounce_seconds
+        self.pre_subscription_source = pre_subscription_source
         self._requested_codes: frozenset[str] = frozenset()
         self._subscribed_codes: set[str] = set()
         self._failure_reasons: dict[str, str] = {}
@@ -85,6 +97,44 @@ class MarketSubscriptionService:
                 continue
         return desired
 
+    def _get_margin_dependency_codes(self) -> set[str]:
+        """汇总活动期权卖方订单和空头持仓依赖的标的代码。"""
+
+        desired: set[str] = set()
+        for source in (
+            self.active_order_index,
+            self.active_position_contract_source,
+        ):
+            loader = getattr(source, "list_margin_dependency_codes", None)
+            if loader is None:
+                continue
+            raw_codes = loader()
+            # 兼容只实现旧协议的测试替身和渐进升级调用方；生产实现固定
+            # 返回集合，未知对象不能被当作订阅代码迭代。
+            if not isinstance(raw_codes, (set, frozenset, list, tuple)):
+                continue
+            for raw_code in raw_codes:
+                try:
+                    desired.add(normalize_code(raw_code))
+                except ValueError:
+                    continue
+        return desired
+
+    def _get_pre_subscription_codes(self) -> set[str]:
+        """读取仍有效的临时期权行情需求；过期成员由Redis读取时清理。"""
+
+        if self.pre_subscription_source is None:
+            return set()
+        desired: set[str] = set()
+        for raw_code in (
+            self.pre_subscription_source.list_active_contract_codes()
+        ):
+            try:
+                desired.add(normalize_code(raw_code))
+            except ValueError:
+                continue
+        return desired
+
     def get_desired_codes(self) -> frozenset[str]:
         """
         汇总目标订阅集合。
@@ -97,6 +147,8 @@ class MarketSubscriptionService:
         return frozenset(
             self._get_active_order_codes()
             | self._get_active_position_codes()
+            | self._get_margin_dependency_codes()
+            | self._get_pre_subscription_codes()
         )
 
     def observe(

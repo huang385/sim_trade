@@ -17,13 +17,13 @@ from app.repositories.order_repository import OrderRepository
 from app.repositories.position_repository import PositionRepository
 from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.account_valuation_calculator import AccountValuationCalculator
-from app.services.commodity_option_margin_calculator import (
-    CommodityFuturesOptionMarginCalculator,
-)
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
 )
 from app.services.option_margin_calculator import OptionMarginInput
+from app.services.option_margin_calculator_resolver import (
+    OptionMarginCalculatorResolver,
+)
 from app.services.pnl_calculator import (
     PnlCalculator,
     PnlDetailSnapshot,
@@ -80,6 +80,7 @@ class PnlSnapshotPersistenceService:
         instrument_repository: InstrumentRepository | None = None,
         order_repository: OrderRepository | None = None,
         calculator: PnlCalculator | None = None,
+        option_margin_resolver: OptionMarginCalculatorResolver | None = None,
     ):
         self.session_factory = session_factory
         self.pnl_store = pnl_store
@@ -91,6 +92,9 @@ class PnlSnapshotPersistenceService:
         )
         self.order_repository = order_repository or OrderRepository()
         self.calculator = calculator or PnlCalculator()
+        self.option_margin_resolver = (
+            option_margin_resolver or OptionMarginCalculatorResolver()
+        )
 
     @staticmethod
     def _risk(used_margin: Decimal, equity: Decimal) -> Decimal:
@@ -215,18 +219,37 @@ class PnlSnapshotPersistenceService:
         required = Decimal("0.000000")
         if position.direction == PositionDirection.SHORT.value:
             if underlying is None or underlying_price is None:
-                raise ValueError("商品期权空头缺少标的行情")
-            rule, underlying_rate, underlying_multiplier = (
-                OptionMarginAdjustmentService._rule(position)
-            )
+                raise ValueError("期权空头缺少标的行情")
+            rule = OptionMarginAdjustmentService._rule(position)
             if (
                 position.margin_rule_id != rule.rule_id
                 or position.margin_rule_version != rule.rule_version
             ):
                 raise ValueError("期权保证金规则版本不一致")
+            underlying_multiplier = Decimal("1")
+            underlying_margin_per_lot = Decimal("0.000000")
+            if position.instrument_type == InstrumentType.FUTURES_OPTION.value:
+                underlying_rate, underlying_multiplier = (
+                    OptionMarginAdjustmentService
+                    ._commodity_underlying_inputs(position)
+                )
+                underlying_margin_per_lot = quantize_money(
+                    underlying_price
+                    * underlying_multiplier
+                    * underlying_rate
+                )
+            else:
+                underlying_multiplier = Decimal(
+                    underlying.contract_multiplier
+                )
             if underlying_multiplier <= 0:
                 raise ValueError("期权标的乘数快照不合法")
-            required = CommodityFuturesOptionMarginCalculator().calculate(
+            calculator = self.option_margin_resolver.resolve(
+                instrument_type=position.instrument_type,
+                exchange_id=instrument.exchange_id,
+                margin_algorithm=rule.margin_algorithm,
+            )
+            required = calculator.calculate(
                 OptionMarginInput(
                     option_type=OptionType(instrument.option_type),
                     strike_price=Decimal(instrument.strike_price),
@@ -238,11 +261,7 @@ class PnlSnapshotPersistenceService:
                     price_mode=MarginPriceMode.REALTIME,
                     calculated_at=utc_now(),
                     rule=rule,
-                    underlying_margin_per_lot=quantize_money(
-                        underlying_price
-                        * underlying_multiplier
-                        * underlying_rate
-                    ),
+                    underlying_margin_per_lot=underlying_margin_per_lot,
                 )
             ).total_margin
         return _PositionFactUpdate(
@@ -413,10 +432,14 @@ class PnlSnapshotPersistenceService:
             # 金额不确定时禁止部分写入；风险状态单独提交并保留Dirty重试。
             account.risk_state = AccountRiskState.VALUATION_UNAVAILABLE.value
             account.updated_at = utc_now()
+            # 仅记录异常类型无法区分“缺行情”“规则快照损坏”等不同问题，
+            # 会让生产排障只能反复复现。错误详情限制长度，既保留定位信息，
+            # 也避免异常对象携带的大段内容持续刷屏。
             logger.warning(
-                "账户完整估值不可用 account_id=%s reason=%s",
+                "账户完整估值不可用 account_id=%s reason=%s detail=%s",
                 account.account_id,
                 type(exc).__name__,
+                str(exc)[:256],
             )
             return False
 
@@ -567,10 +590,21 @@ class PnlSnapshotPersistenceService:
         for position_id, account_id in mappings:
             positions_by_account.setdefault(account_id, []).append(position_id)
 
+        # PostgreSQL 是持仓事实来源。持仓已被删除、但进程在删除前已经把它
+        # 标为 Dirty 时，Repository 不会返回映射；这类孤儿 Dirty 不可能
+        # 通过重试恢复，必须按读取到的版本执行 CAS 清理，否则会永久占用
+        # 持久化批次并持续挤压正常持仓。
+        mapped_position_ids = {
+            position_id
+            for position_ids in positions_by_account.values()
+            for position_id in position_ids
+        }
+        orphan_position_ids = set(position_versions) - mapped_position_ids
+
         account_ids = sorted(
             set(positions_by_account) | set(account_versions)
         )
-        successful_positions: list[str] = []
+        successful_positions: list[str] = list(orphan_position_ids)
         successful_accounts: list[str] = []
         accounts_persisted = 0
         for account_id in account_ids:
@@ -584,6 +618,11 @@ class PnlSnapshotPersistenceService:
                     )
                     if account is None:
                         db.rollback()
+                        # 账户已被 PostgreSQL 删除时，对应 Redis Dirty 同样
+                        # 不具备重试价值。仍使用原版本 CAS 清理，避免并发的
+                        # 新版本被误删。
+                        if account_id in account_versions:
+                            successful_accounts.append(account_id)
                         continue
                     complete = self._recalculate_locked_account(db, account)
                     db.commit()

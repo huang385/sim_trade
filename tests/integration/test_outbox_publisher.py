@@ -20,6 +20,25 @@ from app.workers.outbox_publisher_worker import OutboxPublisherWorker
 pytestmark = pytest.mark.integration
 
 
+class EventScopedOutboxRepository(OutboxRepository):
+    """只领取本测试创建的事件，隔离共享数据库中的其他待发事件。"""
+
+    def __init__(self, event_id: str):
+        self.event_id = event_id
+
+    def claim_pending_events(self, db, **_kwargs):
+        event = db.scalar(
+            select(OutboxEvent)
+            .where(OutboxEvent.event_id == self.event_id)
+            .with_for_update()
+        )
+        if event is None:
+            return []
+        event.status = "PROCESSING"
+        db.flush()
+        return [event]
+
+
 def test_pending_outbox_event_reaches_redis_and_becomes_sent(
     integration_context,
 ):
@@ -53,6 +72,7 @@ def test_pending_outbox_event_reaches_redis_and_becomes_sent(
             redis_client,
             stream_name=stream_name,
         ),
+        outbox_repository=EventScopedOutboxRepository(event_id),
     )
     result = worker.run_once()
 

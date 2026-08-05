@@ -55,6 +55,14 @@ end
 return 0
 """
 
+CLEAR_DIRTY_IF_VERSION_MISSING_SCRIPT = """
+if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+    redis.call('SREM', KEYS[2], ARGV[1])
+    return 1
+end
+return 0
+"""
+
 # 账户事实版本是跨处理周期的永久单调计数器。完成当前版本时只移除Dirty
 # 集合成员，不能HDEL版本字段，否则下一次HINCRBY会从1重新开始。
 CLEAR_ACCOUNT_FACT_DIRTY_IF_UNCHANGED_SCRIPT = """
@@ -1067,6 +1075,53 @@ class RealtimePnlStore:
                 codes.add(normalized_symbol)
         return codes
 
+    def list_margin_dependency_codes(self) -> set[str]:
+        """批量返回活动期权空头持仓依赖的标的订阅代码。"""
+
+        index_keys = sorted(
+            str(value)
+            for value in self.redis_client.smembers(
+                PNL_CONTRACT_INDEX_KEYS_KEY
+            )
+        )
+        if not index_keys:
+            return set()
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for index_key in index_keys:
+            pipeline.smembers(index_key)
+        position_ids = sorted(
+            {
+                str(position_id)
+                for members in pipeline.execute()
+                for position_id in (members or ())
+            }
+        )
+        if not position_ids:
+            return set()
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for position_id in position_ids:
+            pipeline.hmget(
+                pnl_position_key(position_id),
+                (
+                    "instrument_type",
+                    "direction",
+                    "underlying_order_book_id",
+                ),
+            )
+        codes: set[str] = set()
+        for values in pipeline.execute():
+            instrument_type, direction, underlying_code = (
+                values or (None, None, None)
+            )
+            if (
+                str(instrument_type or "")
+                in {"FUTURES_OPTION", "INDEX_OPTION"}
+                and str(direction or "") == "SHORT"
+                and underlying_code
+            ):
+                codes.add(str(underlying_code))
+        return codes
+
     def remove_contract_position(
         self,
         *,
@@ -1162,14 +1217,26 @@ class RealtimePnlStore:
             PNL_DIRTY_POSITION_VERSIONS_KEY,
             position_ids,
         )
-        return [
-            (position_id, version or "")
-            for position_id, version in zip(
-                position_ids,
-                versions,
-                strict=True,
-            )
-        ]
+        result: list[tuple[str, str]] = []
+        for position_id, version in zip(
+            position_ids,
+            versions,
+            strict=True,
+        ):
+            if version is None:
+                # Set成员与版本Hash必须由同一Lua脚本写入。版本缺失说明是
+                # 历史测试/异常中断留下的孤儿成员；只在版本仍不存在时原子
+                # 删除，避免与并发的新Dirty写入竞争。
+                self.redis_client.eval(
+                    CLEAR_DIRTY_IF_VERSION_MISSING_SCRIPT,
+                    2,
+                    PNL_DIRTY_POSITION_VERSIONS_KEY,
+                    PNL_DIRTY_POSITIONS_KEY,
+                    position_id,
+                )
+                continue
+            result.append((position_id, version))
+        return result
 
     def complete_dirty_position(
         self,
@@ -1259,14 +1326,23 @@ class RealtimePnlStore:
             PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
             account_ids,
         )
-        return [
-            (account_id, version or "")
-            for account_id, version in zip(
-                account_ids,
-                versions,
-                strict=True,
-            )
-        ]
+        result: list[tuple[str, str]] = []
+        for account_id, version in zip(
+            account_ids,
+            versions,
+            strict=True,
+        ):
+            if version is None:
+                self.redis_client.eval(
+                    CLEAR_DIRTY_IF_VERSION_MISSING_SCRIPT,
+                    2,
+                    PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+                    PNL_DIRTY_ACCOUNTS_KEY,
+                    account_id,
+                )
+                continue
+            result.append((account_id, version))
+        return result
 
     def complete_dirty_account(
         self,

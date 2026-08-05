@@ -6,7 +6,7 @@ from app.enums.order_enums import OffsetFlag, OrderDirection
 
 
 class OptionTradingPermissionService:
-    """统一校验系统产品开关、账户权限以及实时风险限制。"""
+    """统一校验产品开关、账户权限以及实时风险限制。"""
 
     def __init__(self, config: Settings = settings):
         self.config = config
@@ -19,15 +19,12 @@ class OptionTradingPermissionService:
         direction: OrderDirection,
         offset_flag: OffsetFlag,
     ) -> None:
-        # 历史期货测试桩和升级前构造的合约对象可能尚未显式携带
-        # instrument_type。数据库迁移会把真实历史数据回填为 FUTURES，
-        # 这里同样按 FUTURES 兼容，避免期权扩展改变原期货链路。
+        # 迁移前构造的历史合约可能没有 instrument_type；按期货兼容，
+        # 避免期权扩展改变原有期货订单链路。
         instrument_type = InstrumentType(
             getattr(instrument, "instrument_type", InstrumentType.FUTURES.value)
         )
-        # 统一账户的风险状态属于账户级限制，必须先于具体产品开关判断。
-        # 无论本次开仓的是期货、商品期权还是股指期权，只要账户估值不可用
-        # 或风险可用资金已经不足，都不能继续增加风险；平仓仍然允许执行。
+        # 风险不足时禁止继续开仓增加风险，但必须允许已有仓位平仓。
         if (
             getattr(account, "risk_state", AccountRiskState.NORMAL.value)
             in {
@@ -69,31 +66,26 @@ class OptionTradingPermissionService:
                 )
             return
 
-        # 本阶段股指期权只允许买方开仓及卖出平多。卖出开仓无论配置值
-        # 如何都失败关闭，避免误启用尚未接入指数行情的卖方保证金链路。
-        if direction == OrderDirection.SELL and offset_flag == OffsetFlag.OPEN:
-            raise BusinessRuleError(
-                "股指期权卖出开仓暂未开放",
-                error_code="INDEX_OPTION_SHORT_TRADING_UNAVAILABLE",
-            )
-        if not self.config.index_option_buy_trading_enabled:
+        # 股指期权买方与卖方分别使用独立开关。卖出开仓及其买入平仓必须
+        # 同时开放，避免账户能够建立空头却无法主动平仓。
+        is_close = offset_flag in {
+            OffsetFlag.CLOSE,
+            OffsetFlag.CLOSE_TODAY,
+            OffsetFlag.CLOSE_YESTERDAY,
+        }
+        is_long_side = (
+            direction == OrderDirection.BUY and offset_flag == OffsetFlag.OPEN
+        ) or (direction == OrderDirection.SELL and is_close)
+        is_short_side = (
+            direction == OrderDirection.SELL and offset_flag == OffsetFlag.OPEN
+        ) or (direction == OrderDirection.BUY and is_close)
+        if is_long_side and not self.config.index_option_buy_trading_enabled:
             raise BusinessRuleError(
                 "股指期权买方交易未开启",
                 error_code="INDEX_OPTION_BUY_TRADING_NOT_ENABLED",
             )
-        if not (
-            (direction == OrderDirection.BUY and offset_flag == OffsetFlag.OPEN)
-            or (
-                direction == OrderDirection.SELL
-                and offset_flag
-                in {
-                    OffsetFlag.CLOSE,
-                    OffsetFlag.CLOSE_TODAY,
-                    OffsetFlag.CLOSE_YESTERDAY,
-                }
-            )
-        ):
+        if is_short_side and not self.config.index_option_short_trading_enabled:
             raise BusinessRuleError(
-                "本阶段只支持股指期权买方开平仓",
-                error_code="INDEX_OPTION_SHORT_TRADING_UNAVAILABLE",
+                "股指期权卖方交易未开启",
+                error_code="INDEX_OPTION_SHORT_TRADING_NOT_ENABLED",
             )

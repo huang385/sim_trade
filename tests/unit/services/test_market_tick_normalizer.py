@@ -118,6 +118,46 @@ def test_pandas_timestamps_become_python_datetime_and_trading_date():
     assert tick.event_time.utcoffset().total_seconds() == 8 * 3600
 
 
+def test_ymm_compact_integer_datetime_preserves_milliseconds():
+    """生产SDK使用YYYYMMDDHHMMSSmmm整数，不能因文档示例是datetime而丢弃。"""
+
+    tick = normalize(
+        make_data(
+            trading_date=20260805,
+            datetime=20260805095638840,
+        )
+    )
+
+    assert tick.trading_day == date(2026, 8, 5)
+    assert tick.event_time == datetime(
+        2026,
+        8,
+        5,
+        9,
+        56,
+        38,
+        840000,
+        tzinfo=tick.event_time.tzinfo,
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected_microsecond"),
+    [
+        (20260805095638, 0),
+        (20260805095638840, 840000),
+        (20260805095638840123, 840123),
+    ],
+)
+def test_ymm_compact_datetime_supports_seconds_millis_and_micros(
+    raw_value,
+    expected_microsecond,
+):
+    tick = normalize(make_data(datetime=raw_value))
+
+    assert tick.event_time.microsecond == expected_microsecond
+
+
 def test_aware_utc_time_is_converted_to_asia_shanghai():
     tick = normalize(
         make_data(datetime=datetime(2026, 7, 22, 1, 32, 8, tzinfo=timezone.utc))

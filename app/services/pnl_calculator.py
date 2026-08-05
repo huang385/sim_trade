@@ -40,6 +40,7 @@ class PositionPnlSnapshot:
     strike_price: Decimal | None = None
     underlying_exchange_id: str | None = None
     underlying_symbol: str | None = None
+    underlying_order_book_id: str | None = None
     margin_rule_snapshot: tuple[tuple[str, str], ...] = ()
     # 本轮实际读取的PostgreSQL持仓事实Outbox版本。
     source_fact_version: str = "0"

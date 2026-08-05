@@ -105,19 +105,6 @@ class RuleQueryService:
                 error_code="INDEX_NOT_TRADEABLE",
             )
 
-        # 股指期权卖出开仓在本阶段固定关闭。先返回稳定错误码，不让尚未
-        # 配置的手续费或保证金规则把结果变成“规则不存在”。
-        if (
-            instrument.instrument_type
-            == InstrumentType.INDEX_OPTION.value
-            and direction == "SELL"
-            and offset_flag == "OPEN"
-        ):
-            raise BusinessRuleError(
-                "股指期权卖出开仓暂未开放",
-                error_code="INDEX_OPTION_SHORT_TRADING_UNAVAILABLE",
-            )
-
         if instrument.instrument_type == InstrumentType.FUTURES.value:
             margin_rule = self.margin_repository.get_current(
                 db=db,
@@ -181,8 +168,10 @@ class RuleQueryService:
         if (
             direction == "SELL"
             and offset_flag == "OPEN"
-            and instrument.instrument_type
-            == InstrumentType.FUTURES_OPTION.value
+            and instrument.instrument_type in {
+                InstrumentType.FUTURES_OPTION.value,
+                InstrumentType.INDEX_OPTION.value,
+            }
         ):
             option_margin_rule = self.option_margin_repository.resolve(
                 db=db,

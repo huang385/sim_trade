@@ -3,6 +3,9 @@
 const REFRESH_INTERVAL_MS = 500;
 const SLOW_REFRESH_INTERVAL_MS = 2000;
 const ACTIVE_ORDER_STATUSES = new Set(["ACCEPTED", "PARTIALLY_FILLED"]);
+const OPTION_CODE_PATTERN = /-[CP]-/i;
+const OPTION_MARKET_PREPARE_TIMEOUT_MS = 15000;
+const OPTION_MARKET_STATUS_POLL_MS = 300;
 
 const state = {
     accountId: "",
@@ -970,6 +973,8 @@ async function submitOrder(event) {
     };
 
     try {
+        await ensureOptionMarketReady(payload);
+        elements.submitOrder.textContent = "正在提交…";
         const order = await apiFetch("/api/orders", {
             method: "POST",
             body: JSON.stringify(payload),
@@ -986,6 +991,48 @@ async function submitOrder(event) {
     } finally {
         elements.submitOrder.disabled = false;
         elements.submitOrder.textContent = "提交限价订单";
+    }
+}
+
+function delay(milliseconds) {
+    return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function ensureOptionMarketReady(payload) {
+    // 普通期货不需要下单前准备。项目内部商品期权和股指期权都采用
+    // “合约月份-C/P-行权价”格式，因此可以统一走同一个准备接口。
+    if (!OPTION_CODE_PATTERN.test(payload.symbol)) return;
+
+    elements.submitOrder.textContent = "正在准备期权行情…";
+    const preparation = {
+        account_id: payload.account_id,
+        exchange_id: payload.exchange_id,
+        symbol: payload.symbol,
+        direction: payload.direction,
+        offset_flag: payload.offset_flag,
+    };
+    let status = await apiFetch("/api/market-data/subscriptions/prepare", {
+        method: "POST",
+        body: JSON.stringify(preparation),
+    });
+    const deadline = Date.now() + OPTION_MARKET_PREPARE_TIMEOUT_MS;
+    const query = new URLSearchParams({
+        account_id: payload.account_id,
+        exchange_id: payload.exchange_id,
+        symbol: payload.symbol,
+    });
+    while (status.status !== "READY" && Date.now() < deadline) {
+        await delay(OPTION_MARKET_STATUS_POLL_MS);
+        status = await apiFetch(
+            `/api/market-data/subscriptions/status?${query.toString()}`,
+        );
+    }
+    if (status.status !== "READY") {
+        throw new Error(
+            `等待期权行情超时，尚未就绪：${status.requested_codes
+                .filter((code) => !status.ready_codes.includes(code))
+                .join("、")}`,
+        );
     }
 }
 

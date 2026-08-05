@@ -88,6 +88,10 @@ from app.services.option_premium_calculator import OptionPremiumCalculator
 from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
 )
+from app.services.option_market_pre_subscription_service import (
+    OptionMarketPreSubscriptionService,
+    get_option_market_pre_subscription_service,
+)
 
 
 __all__ = [
@@ -146,4 +150,6 @@ __all__ = [
     "OptionOrderMarginAdjustmentService",
     "OptionPremiumCalculator",
     "OptionTradingPermissionService",
+    "OptionMarketPreSubscriptionService",
+    "get_option_market_pre_subscription_service",
 ]

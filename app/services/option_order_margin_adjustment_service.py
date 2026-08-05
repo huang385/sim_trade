@@ -13,14 +13,14 @@ from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.order_repository import OrderRepository
-from app.services.commodity_option_margin_calculator import (
-    CommodityFuturesOptionMarginCalculator,
-)
 from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
 )
 from app.services.option_margin_calculator import OptionMarginInput
+from app.services.option_margin_calculator_resolver import (
+    OptionMarginCalculatorResolver,
+)
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class OptionOrderMarginAdjustmentResult:
 
 class OptionOrderMarginAdjustmentService:
     """
-    重估商品期权活动卖出开仓订单，并在订单与账户行锁内补充冻结。
+    重估活动期权卖出开仓订单，并在订单与账户行锁内补充冻结。
 
     行情Worker和成交结算共同复用``ensure_locked``，前者负责500ms周期
     提前补冻，后者负责成交前最后一道安全检查。两条链路均固定采用
@@ -57,6 +57,7 @@ class OptionOrderMarginAdjustmentService:
         order_repository: OrderRepository | None = None,
         account_repository: AccountRepository | None = None,
         instrument_repository: InstrumentRepository | None = None,
+        option_margin_resolver: OptionMarginCalculatorResolver | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.order_repository = order_repository or OrderRepository()
@@ -64,16 +65,22 @@ class OptionOrderMarginAdjustmentService:
         self.instrument_repository = (
             instrument_repository or InstrumentRepository()
         )
+        self.option_margin_resolver = (
+            option_margin_resolver or OptionMarginCalculatorResolver()
+        )
 
     @classmethod
     def is_target_order(cls, order) -> bool:
-        """只处理仍有剩余量的商品期权卖出开仓限价订单。"""
+        """只处理仍有剩余量的期权卖出开仓限价订单。"""
 
         return bool(
             order is not None
             and order.status in cls.ACTIVE_STATUSES
             and order.remaining_volume > 0
-            and order.instrument_type == InstrumentType.FUTURES_OPTION.value
+            and order.instrument_type in {
+                InstrumentType.FUTURES_OPTION.value,
+                InstrumentType.INDEX_OPTION.value,
+            }
             and order.direction == OrderDirection.SELL.value
             and order.offset_flag == OffsetFlag.OPEN.value
             and order.order_type == "LIMIT"
@@ -140,9 +147,7 @@ class OptionOrderMarginAdjustmentService:
                 error_code="OPTION_MARGIN_PRICE_UNAVAILABLE",
             )
 
-        rule, underlying_rate, underlying_multiplier = (
-            OptionMarginAdjustmentService._rule(order)
-        )
+        rule = OptionMarginAdjustmentService._rule(order)
         if (
             order.margin_rule_id != rule.rule_id
             or order.margin_rule_version != rule.rule_version
@@ -152,13 +157,33 @@ class OptionOrderMarginAdjustmentService:
                 error_code="OPTION_MARGIN_SNAPSHOT_VERSION_MISMATCH",
             )
         option_multiplier = Decimal(order.commission_contract_multiplier)
+        underlying_multiplier = Decimal("1")
+        underlying_margin_per_lot = Decimal("0.000000")
+        if order.instrument_type == InstrumentType.FUTURES_OPTION.value:
+            underlying_rate, underlying_multiplier = (
+                OptionMarginAdjustmentService._commodity_underlying_inputs(
+                    order
+                )
+            )
+            underlying_margin_per_lot = quantize_money(
+                underlying_tick.last_price
+                * underlying_multiplier
+                * underlying_rate
+            )
+        else:
+            underlying_multiplier = Decimal(underlying.contract_multiplier)
         if option_multiplier <= 0 or underlying_multiplier <= 0:
             raise DataAccessError(
                 "活动期权订单合约乘数快照不合法",
                 error_code="OPTION_MARGIN_MULTIPLIER_INVALID",
             )
         option_price = max(Decimal(order.limit_price), option_tick.last_price)
-        result = CommodityFuturesOptionMarginCalculator().calculate(
+        calculator = self.option_margin_resolver.resolve(
+            instrument_type=order.instrument_type,
+            exchange_id=instrument.exchange_id,
+            margin_algorithm=rule.margin_algorithm,
+        )
+        result = calculator.calculate(
             OptionMarginInput(
                 option_type=OptionType(instrument.option_type),
                 strike_price=Decimal(instrument.strike_price),
@@ -170,11 +195,7 @@ class OptionOrderMarginAdjustmentService:
                 price_mode=MarginPriceMode.REALTIME,
                 calculated_at=utc_now(),
                 rule=rule,
-                underlying_margin_per_lot=quantize_money(
-                    underlying_tick.last_price
-                    * underlying_multiplier
-                    * underlying_rate
-                ),
+                underlying_margin_per_lot=underlying_margin_per_lot,
             )
         )
         return result

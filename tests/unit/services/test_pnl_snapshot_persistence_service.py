@@ -491,6 +491,61 @@ def test_account_dirty_without_position_dirty_is_persisted_and_cas_cleared():
     )
 
 
+def test_deleted_position_dirty_is_cas_cleared_without_retrying_forever():
+    """PostgreSQL 已不存在的持仓 Dirty 应按原版本安全清理。"""
+
+    pnl_store = Mock()
+    pnl_store.list_dirty_positions.return_value = [("P-DELETED", "v1")]
+    pnl_store.list_dirty_accounts.return_value = []
+    pnl_store.complete_dirty_position.return_value = True
+    position_repository = Mock()
+    position_repository.list_account_ids_for_positions.return_value = []
+
+    result = PnlSnapshotPersistenceService(
+        session_factory=Mock(return_value=nullcontext(Mock())),
+        pnl_store=pnl_store,
+        market_tick_store=Mock(),
+        position_repository=position_repository,
+    ).persist_batch(500)
+
+    pnl_store.complete_dirty_position.assert_called_once_with(
+        "P-DELETED", "v1"
+    )
+    assert result.positions_persisted == 1
+    assert result.retained == 0
+
+
+def test_deleted_account_dirty_is_cas_cleared_without_business_write():
+    """账户已删除时结束本版本 Dirty，不执行任何估值写入。"""
+
+    mapping_db = Mock()
+    account_db = Mock()
+    pnl_store = Mock()
+    pnl_store.list_dirty_positions.return_value = []
+    pnl_store.list_dirty_accounts.return_value = [("A-DELETED", "v7")]
+    position_repository = Mock()
+    position_repository.list_account_ids_for_positions.return_value = []
+    account_repository = Mock()
+    account_repository.get_by_account_id_for_update.return_value = None
+
+    result = PnlSnapshotPersistenceService(
+        session_factory=Mock(
+            side_effect=[nullcontext(mapping_db), nullcontext(account_db)]
+        ),
+        pnl_store=pnl_store,
+        market_tick_store=Mock(),
+        account_repository=account_repository,
+        position_repository=position_repository,
+    ).persist_batch(500)
+
+    account_db.rollback.assert_called_once()
+    account_db.commit.assert_not_called()
+    pnl_store.complete_dirty_account.assert_called_once_with(
+        "A-DELETED", "v7"
+    )
+    assert result.accounts_persisted == 0
+
+
 def test_missing_market_persists_unavailable_state_and_keeps_dirty_version():
     position, detail = make_position("P1", "JD2609", "100")
     account = make_account()

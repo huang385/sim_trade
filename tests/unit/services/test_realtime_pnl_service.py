@@ -565,14 +565,49 @@ def test_account_fact_dirty_reuses_existing_pnl_without_contract_rebuild():
 
 
 @pytest.mark.parametrize(
-    ("booked_margin", "expected_risk_available"),
+    (
+        "booked_margin",
+        "instrument_type",
+        "margin_algorithm",
+        "expected_required_margin",
+        "expected_risk_available",
+    ),
     [
-        ("1000", "97550.000000"),
-        ("1500", "97300.000000"),
+        (
+            "1000",
+            "FUTURES_OPTION",
+            "COMMODITY_FUTURES_OPTION",
+            "1250.000000",
+            "97550.000000",
+        ),
+        (
+            "1500",
+            "FUTURES_OPTION",
+            "COMMODITY_FUTURES_OPTION",
+            "1250.000000",
+            "97300.000000",
+        ),
+        (
+            "1000",
+            "INDEX_OPTION",
+            "CFFEX_INDEX_OPTION",
+            "1205.000000",
+            "97595.000000",
+        ),
+        (
+            "1500",
+            "INDEX_OPTION",
+            "CFFEX_INDEX_OPTION",
+            "1205.000000",
+            "97300.000000",
+        ),
     ],
 )
 def test_option_long_short_market_value_and_margin_are_exact(
     booked_margin,
+    instrument_type,
+    margin_algorithm,
+    expected_required_margin,
     expected_risk_available,
 ):
     """同账户期权多空持仓只写一次快照，并精确核对权益与风险保证金。"""
@@ -596,7 +631,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
                     volume,
                 ),
             ),
-            instrument_type="FUTURES_OPTION",
+            instrument_type=instrument_type,
             total_volume=volume,
             persisted_realtime_required_margin=(
                 Decimal("1000") if direction == "SHORT" else Decimal("0")
@@ -614,7 +649,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
                 {
                     "rule_id": "1",
                     "rule_version": "V1",
-                    "margin_algorithm": "COMMODITY_FUTURES_OPTION",
+                    "margin_algorithm": margin_algorithm,
                     "margin_adjustment_rate": "0.1",
                     "minimum_guarantee_rate": "0.05",
                     "out_of_money_deduction_rate": "1",
@@ -721,7 +756,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
     # 空头每手：权利金1200 + 最低风险50 = 1250。
     assert (
         store.accounts["A001"]["option_realtime_required_margin"]
-        == "1250.000000"
+        == expected_required_margin
     )
     assert (
         store.accounts["A001"]["risk_available_cash"]

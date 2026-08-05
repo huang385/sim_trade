@@ -12,10 +12,18 @@ def make_index(details):
         for detail in details.values()
         if detail.get("order_book_id")
     }
+    index.list_margin_dependency_codes.return_value = set()
     return index
 
 
 def make_position_source(codes=()):
+    source = Mock()
+    source.list_active_contract_codes.return_value = set(codes)
+    source.list_margin_dependency_codes.return_value = set()
+    return source
+
+
+def make_pre_subscription_source(codes=()):
     source = Mock()
     source.list_active_contract_codes.return_value = set(codes)
     return source
@@ -81,6 +89,65 @@ def test_active_orders_and_positions_are_merged_and_deduplicated():
     assert service.get_desired_codes() == frozenset(
         {"JD2609", "A2609", "AG2612"}
     )
+
+
+def test_option_short_margin_dependencies_join_subscription_union():
+    index = make_index(
+        {"O1": {"order_book_id": "IO2609-C-4000"}}
+    )
+    positions = make_position_source({"JD2609-C-4000"})
+    index.list_margin_dependency_codes.return_value = {"000300.SH"}
+    positions.list_margin_dependency_codes.return_value = {"JD2609"}
+    service = MarketSubscriptionService(
+        active_order_index=index,
+        active_position_contract_source=positions,
+        debounce_seconds=3,
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {
+            "IO2609-C-4000",
+            "000300.SH",
+            "JD2609-C-4000",
+            "JD2609",
+        }
+    )
+
+
+def test_temporary_option_and_underlying_codes_join_subscription_union():
+    pre_subscriptions = make_pre_subscription_source(
+        {"jd2609-c-4000", "JD2609"}
+    )
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
+        pre_subscription_source=pre_subscriptions,
+        debounce_seconds=3,
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"JD2609-C-4000", "JD2609"}
+    )
+    pre_subscriptions.list_active_contract_codes.assert_called_once_with()
+
+
+def test_expired_temporary_codes_leave_union_when_source_removes_them():
+    pre_subscriptions = make_pre_subscription_source(
+        {"IO2609-C-4000", "000300.SH"}
+    )
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
+        pre_subscription_source=pre_subscriptions,
+        debounce_seconds=3,
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"IO2609-C-4000", "000300.SH"}
+    )
+    pre_subscriptions.list_active_contract_codes.return_value = set()
+
+    assert service.get_desired_codes() == frozenset()
 
 
 def test_add_and_remove_changes_wait_for_debounce():

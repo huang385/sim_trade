@@ -13,7 +13,7 @@ class CffexIndexOptionMarginCalculator:
     """
     中金所股指期权卖方保证金纯计算器。
 
-    本阶段只提供单元测试和未来扩展能力，不接入股指期权卖出开仓。
+    由统一期权保证金解析器接入下单冻结、成交前重估和盘中调整链路。
     """
 
     def calculate(self, request: OptionMarginInput) -> OptionMarginResult:
@@ -95,4 +95,3 @@ class CffexIndexOptionMarginCalculator:
             price_mode=request.price_mode,
             calculated_at=request.calculated_at,
         )
-

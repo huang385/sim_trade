@@ -199,6 +199,27 @@ def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
     redis_client.srem.assert_not_called()
 
 
+def test_short_option_positions_expose_underlying_subscription_codes():
+    redis_client = Mock()
+    redis_client.smembers.return_value = {
+        "pnl:contract_positions:CFFEX:IO2609-C-4000"
+    }
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.side_effect = [
+        [{"P-IO", "P-LONG"}],
+        [
+            ["INDEX_OPTION", "SHORT", "000300.SH"],
+            ["INDEX_OPTION", "LONG", "000300.SH"],
+        ],
+    ]
+
+    assert RealtimePnlStore(
+        redis_client
+    ).list_margin_dependency_codes() == {"000300.SH"}
+    assert pipeline.smembers.call_count == 1
+    assert pipeline.hmget.call_count == 2
+
+
 def test_account_fact_dirty_uses_independent_version_and_cas_keys():
     redis_client = Mock()
     redis_client.eval.return_value = "3"
@@ -463,6 +484,20 @@ def test_dirty_position_scan_cursor_is_reused_after_store_restart():
     assert redis_client.sscan.call_args.kwargs["cursor"] == 27
 
 
+def test_dirty_position_without_version_is_atomically_pruned():
+    redis_client = Mock()
+    redis_client.eval.side_effect = [[], 1]
+    redis_client.get.return_value = "0"
+    redis_client.sscan.return_value = (0, ["P-ORPHAN"])
+    redis_client.hmget.return_value = [None]
+
+    result = RealtimePnlStore(redis_client).list_dirty_positions(10)
+
+    assert result == []
+    assert redis_client.eval.call_count == 2
+    assert redis_client.eval.call_args.args[-1] == "P-ORPHAN"
+
+
 def test_dirty_account_scan_cursor_rotates_past_unprocessable_first_batch():
     redis_client = Mock()
     redis_client.eval.return_value = []
@@ -481,6 +516,20 @@ def test_dirty_account_scan_cursor_rotates_past_unprocessable_first_batch():
     assert redis_client.sscan.call_args_list[1].kwargs["cursor"] == 15
     assert redis_client.set.call_args_list[0].args[-1] == "15"
     assert redis_client.set.call_args_list[1].args[-1] == "0"
+
+
+def test_dirty_account_without_version_is_atomically_pruned():
+    redis_client = Mock()
+    redis_client.eval.side_effect = [[], 1]
+    redis_client.get.return_value = "0"
+    redis_client.sscan.return_value = (0, ["A-ORPHAN"])
+    redis_client.hmget.return_value = [None]
+
+    result = RealtimePnlStore(redis_client).list_dirty_accounts(10)
+
+    assert result == []
+    assert redis_client.eval.call_count == 2
+    assert redis_client.eval.call_args.args[-1] == "A-ORPHAN"
 
 
 def test_rebuild_active_indexes_retries_watch_conflict_then_succeeds():

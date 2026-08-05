@@ -206,6 +206,97 @@ def test_adjust_recalculates_risk_instead_of_using_stale_risk_cash():
     db.rollback.assert_not_called()
 
 
+def test_index_option_short_margin_uses_cffex_formula_and_releases_downward():
+    """股指期权复用同一调整事务，仅由解析器切换保证金公式。"""
+
+    snapshot = {
+        "rule_id": "2",
+        "rule_version": "CFFEX-V1",
+        "margin_algorithm": "CFFEX_INDEX_OPTION",
+        "margin_adjustment_rate": "0.12",
+        "minimum_guarantee_rate": "0.07",
+        "out_of_money_deduction_rate": "1",
+        "minimum_underlying_margin_ratio": "0",
+        "extra_margin_rate": "0",
+    }
+    account = make_account(
+        cash_balance=Decimal("109800"),
+        available_cash=Decimal("41800"),
+        risk_available_cash=Decimal("41800"),
+        equity=Decimal("99800"),
+        used_margin=Decimal("58000"),
+        option_used_margin=Decimal("58000"),
+        option_realtime_required_margin=Decimal("58000"),
+        short_option_market_value=Decimal("10000"),
+    )
+    position = make_position(
+        order_book_id="IO2609-C-4000",
+        exchange_id="CFFEX",
+        symbol="IO2609-C-4000",
+        instrument_type="INDEX_OPTION",
+        total_volume=1,
+        used_margin=Decimal("58000"),
+        realtime_required_margin=Decimal("58000"),
+        multiplier_snapshot=Decimal("100"),
+        margin_rule_id=2,
+        margin_rule_version="CFFEX-V1",
+        margin_rule_snapshot=snapshot,
+    )
+    details = [
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("58000"),
+            realtime_required_margin=Decimal("58000"),
+            multiplier_snapshot=Decimal("100"),
+            margin_rule_id=2,
+            margin_rule_version="CFFEX-V1",
+            margin_rule_snapshot=snapshot,
+        )
+    ]
+    latest = {
+        ("CFFEX", "IO2609-C-4000"): market_values(
+            "IO2609-C-4000", "90"
+        ),
+        ("CFFEX", "000300"): market_values("000300", "3900"),
+    }
+    service, account, position, details = build_service(
+        account=account,
+        position=position,
+        details=details,
+        latest=latest,
+    )
+    service.instrument_repository.get_by_order_book_id.return_value = (
+        SimpleNamespace(
+            id=11,
+            order_book_id="IO2609-C-4000",
+            exchange_id="CFFEX",
+            symbol="IO2609-C-4000",
+            instrument_type="INDEX_OPTION",
+            underlying_instrument_id=12,
+            option_type="CALL",
+            strike_price=Decimal("4000"),
+            contract_multiplier=Decimal("100"),
+        )
+    )
+    service.instrument_repository.get_by_id.return_value = SimpleNamespace(
+        id=12,
+        order_book_id="000300",
+        exchange_id="CFFEX",
+        symbol="000300",
+        contract_multiplier=Decimal("1"),
+    )
+
+    service.adjust(Mock(), account_id="A1", position_id="P1")
+
+    # 每手：权利金90*100 + max(3900*100*12%-虚值100*100,
+    # 最低保障3900*100*7%*12%) = 45800。
+    assert position.realtime_required_margin == Decimal("45800.000000")
+    assert position.used_margin == Decimal("45800.000000")
+    assert details[0].remaining_margin == Decimal("45800.000000")
+    assert account.used_margin == Decimal("45800.000000")
+    assert account.option_used_margin == Decimal("45800.000000")
+
+
 def test_local_position_success_cannot_clear_valuation_unavailable():
     account = make_account(risk_state="VALUATION_UNAVAILABLE")
     service, account, _position, _details = build_service(account=account)

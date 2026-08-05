@@ -39,6 +39,9 @@ from app.services.market_data_code_mapping_service import (
     MarketDataCodeMappingSnapshot,
 )
 from app.services.market_subscription_service import MarketSubscriptionService
+from app.infrastructure.market_pre_subscription_store import (
+    MarketPreSubscriptionStore,
+)
 from app.services.market_tick_normalizer import (
     MarketTickNormalizationError,
     MarketTickNormalizer,
@@ -152,6 +155,9 @@ class MarketDataSubscriberWorker:
         self._disconnected_waiting = False
         self._ever_started = False
         self._last_queue_drop_at: float | None = None
+        # 坏Tick可能高频连续到达。这里只记录限频后的错误类型和标准合约代码，
+        # 不打印完整行情报文，既保留排障信息也避免日志刷屏或泄露上游细节。
+        self._last_invalid_tick_log_at: float | None = None
         self.last_tick_at: datetime | None = None
         self.last_published_at: datetime | None = None
         self.last_disconnect_at: datetime | None = None
@@ -170,6 +176,25 @@ class MarketDataSubscriberWorker:
     def _set_status(self, status: MarketDataSourceStatus) -> None:
         with self._state_lock:
             self._status = status
+
+    def _record_invalid_tick(self, exc: Exception, code: object) -> None:
+        """累计坏Tick，并且最多每5秒输出一条脱敏原因日志。"""
+
+        self._increment("invalid_count")
+        now = self.monotonic()
+        with self._state_lock:
+            if (
+                self._last_invalid_tick_log_at is not None
+                and now - self._last_invalid_tick_log_at < 5
+            ):
+                return
+            self._last_invalid_tick_log_at = now
+        logger.warning(
+            "行情Tick校验失败 code=%s reason=%s detail=%s",
+            str(code or "UNKNOWN").strip().upper(),
+            type(exc).__name__,
+            str(exc)[:300],
+        )
 
     def request_stop(self, *_args) -> None:
         """SIGINT/SIGTERM 只发出停止请求，资源由主循环 finally 统一释放。"""
@@ -229,8 +254,11 @@ class MarketDataSubscriberWorker:
                 )
             )
             self._increment("enqueued_count")
-        except ValueError:
-            self._increment("invalid_count")
+        except ValueError as exc:
+            self._record_invalid_tick(
+                exc,
+                data.get("order_book_id"),
+            )
         except queue.Full:
             self._increment("queue_full_drop_count")
             with self._state_lock:
@@ -354,6 +382,15 @@ class MarketDataSubscriberWorker:
 
         raw = error.get("raw") or {}
         code = str(raw.get("code") or "REMOTE_MARKET_DATA_ERROR")
+        if code == "STORAGE_SLOW_CONSUMER":
+            # 该告警来自行情中心的历史存储消费者，不是当前 WebSocket
+            # 客户端消费变慢。实时 Tick 仍可连续到达时不应把行情订阅标成
+            # 运行错误；保留 WARNING 便于服务端排查存储积压即可。
+            logger.warning(
+                "行情中心存储消费较慢，实时订阅继续运行 code=%s",
+                code,
+            )
+            return
         with self._state_lock:
             self.last_error = code
         logger.error("行情订阅运行期错误 code=%s", code)
@@ -372,8 +409,15 @@ class MarketDataSubscriberWorker:
                 self._increment("published_count")
                 with self._state_lock:
                     self.last_published_at = utc_now()
-        except (MarketTickValidationError, MarketTickNormalizationError, ValueError):
-            self._increment("invalid_count")
+        except (
+            MarketTickValidationError,
+            MarketTickNormalizationError,
+            ValueError,
+        ) as exc:
+            self._record_invalid_tick(
+                exc,
+                item.data.get("order_book_id"),
+            )
         except Exception:
             self._increment("processing_error_count")
             logger.exception("单条行情处理异常")
@@ -751,6 +795,15 @@ def build_worker() -> MarketDataSubscriberWorker:
         # 活动持仓合约索引由实时盈亏Worker维护在Redis中。复用该索引可让
         # 已成交持仓继续接收行情，同时避免订阅Worker高频查询PostgreSQL。
         active_position_contract_source=RealtimePnlStore(redis_client),
+        # 下单前临时需求与活动订单、持仓订阅取并集。商品期权写入
+        # “期权+标的期货”，股指期权写入“期权+标的指数”。
+        pre_subscription_source=MarketPreSubscriptionStore(
+            redis_client,
+            ttl_seconds=settings.market_pre_subscription_ttl_seconds,
+            max_codes_per_account=(
+                settings.market_pre_subscription_max_codes_per_account
+            ),
+        ),
         debounce_seconds=(
             settings.remote_market_data_subscription_debounce_seconds
         ),

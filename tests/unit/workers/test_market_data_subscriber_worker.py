@@ -185,6 +185,38 @@ def test_bad_tick_does_not_escape_processing_loop():
     assert worker.stats_snapshot().invalid_count == 1
 
 
+def test_invalid_tick_detail_log_is_rate_limited(caplog):
+    """连续坏 Tick 继续计数，但诊断日志最多每五秒输出一次。"""
+
+    clock = MutableClock(10)
+    worker, *_ = make_worker(clock=clock)
+
+    with caplog.at_level(logging.WARNING):
+        worker._record_invalid_tick(ValueError("first detail"), "JD2609")
+        clock.value = 12
+        worker._record_invalid_tick(ValueError("second detail"), "JD2609")
+        clock.value = 15
+        worker._record_invalid_tick(ValueError("third detail"), "JD2609")
+
+    assert worker.stats_snapshot().invalid_count == 3
+    assert caplog.text.count("行情Tick校验失败") == 2
+    assert "first detail" in caplog.text
+    assert "second detail" not in caplog.text
+    assert "third detail" in caplog.text
+
+
+def test_storage_slow_consumer_does_not_mark_live_subscription_failed(caplog):
+    """行情中心存储积压与本进程实时回调无关，只记录告警。"""
+
+    worker, *_ = make_worker()
+
+    with caplog.at_level(logging.WARNING):
+        worker.on_error({"raw": {"code": "STORAGE_SLOW_CONSUMER"}})
+
+    assert worker.last_error == ""
+    assert "实时订阅继续运行" in caplog.text
+
+
 def test_no_active_orders_does_not_open_empty_subscription():
     worker, feed_client, *_ = make_worker(details={})
 

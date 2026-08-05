@@ -5,7 +5,6 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import delete, select
 
-from app.common.exceptions import BusinessRuleError
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
@@ -54,12 +53,21 @@ class _FixedOptionPrices:
 
 
 class _IndexOptionPermissionConfig:
-    """为集成测试显式开启买方权限，卖方开仓仍由正式服务固定拒绝。"""
+    """为集成测试显式开启股指期权买方和卖方权限。"""
 
     option_trading_enabled = True
     commodity_option_trading_enabled = True
     index_option_buy_trading_enabled = True
-    index_option_short_trading_enabled = False
+    index_option_short_trading_enabled = True
+
+
+class _FixedIndexOptionPrices:
+    @staticmethod
+    def get_margin_prices(**_kwargs):
+        return OptionMarginMarketPrices(
+            option_price=Decimal("100"),
+            underlying_price=Decimal("4000"),
+        )
 
 
 def _settle(order_id: str, event_id: str, price: str, volume: int):
@@ -428,9 +436,29 @@ def test_index_option_long_open_close_uses_real_postgres(integration_context):
         db.add(option)
         db.flush()
         option_id = option.id
+        db.add(
+            OptionMarginRule(
+                exchange_id="CFFEX",
+                product_id="IO",
+                instrument_id=option.id,
+                instrument_type="INDEX_OPTION",
+                margin_algorithm="CFFEX_INDEX_OPTION",
+                margin_adjustment_rate=Decimal("0.12"),
+                minimum_guarantee_rate=Decimal("0.07"),
+                out_of_money_deduction_rate=Decimal("1"),
+                minimum_underlying_margin_ratio=Decimal("0"),
+                extra_margin_rate=Decimal("0"),
+                trading_day=integration_context.trading_day,
+                rule_version=f"IT-{suffix}-MARGIN",
+                data_source="INTERNAL",
+                is_active=True,
+            )
+        )
         for direction, offset_flag in (
             ("BUY", "OPEN"),
+            ("SELL", "OPEN"),
             ("SELL", "CLOSE_TODAY"),
+            ("BUY", "CLOSE_TODAY"),
         ):
             db.add(
                 FeeRuleItem(
@@ -455,6 +483,9 @@ def test_index_option_long_open_close_uses_real_postgres(integration_context):
         order_service.option_permission_service = (
             OptionTradingPermissionService(_IndexOptionPermissionConfig())
         )
+        order_service.option_market_price_service = _FixedIndexOptionPrices()
+        _put_live_tick("CFFEX", index_symbol, "4000")
+        _put_live_tick("CFFEX", option_symbol, "100")
 
         with SessionLocal() as db:
             buy_open = order_service.create_order(
@@ -549,27 +580,134 @@ def test_index_option_long_open_close_uses_real_postgres(integration_context):
             assert account.daily_pnl == Decimal("1340.000000")
 
         with SessionLocal() as db:
-            with pytest.raises(BusinessRuleError) as exc_info:
-                order_service.create_order(
-                    db,
-                    make_request(
-                        integration_context,
-                        client_order_id=f"IDXOPT-SHORT-{suffix}",
-                        exchange_id="CFFEX",
-                        symbol=option_symbol,
-                        direction="SELL",
-                        offset_flag="OPEN",
-                        limit_price=Decimal("100"),
-                        volume=1,
-                    ),
-                )
-        assert (
-            exc_info.value.error_code
-            == "INDEX_OPTION_SHORT_TRADING_UNAVAILABLE"
+            sell_open = order_service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"IDXOPT-SHORT-{suffix}",
+                    exchange_id="CFFEX",
+                    symbol=option_symbol,
+                    direction="SELL",
+                    offset_flag="OPEN",
+                    limit_price=Decimal("100"),
+                    volume=1,
+                ),
+            )
+        # 每手：权利金100*100 + 指数4000*100*12% = 58000。
+        assert sell_open.frozen_margin == Decimal("58000.000000")
+        assert sell_open.frozen_cash == Decimal("0.000000")
+        assert sell_open.frozen_commission == Decimal("15.000000")
+        assert sell_open.margin_rule_snapshot["margin_algorithm"] == (
+            "CFFEX_INDEX_OPTION"
         )
+        assert "underlying_margin_rate" not in sell_open.margin_rule_snapshot
+        assert _settle(
+            sell_open.order_id,
+            f"IDXOPT-SHORT-{suffix}",
+            "98",
+            1,
+        ).action == "SETTLED"
+
+        with SessionLocal() as db:
+            short_position = db.scalar(
+                select(Position).where(
+                    Position.account_id == integration_context.account_id,
+                    Position.order_book_id == option_symbol,
+                    Position.direction == "SHORT",
+                )
+            )
+            short_trade = db.scalar(
+                select(Trade).where(Trade.order_id == sell_open.order_id)
+            )
+            assert short_trade.premium_cash_flow == Decimal("9800.000000")
+            assert short_trade.margin == Decimal("58000.000000")
+            assert short_position.total_volume == 1
+            assert short_position.used_margin == Decimal("58000.000000")
+
+        # 定时持久化也必须通过同一解析器重算股指期权保证金，不能退回
+        # 商品期权公式或直接信任Redis中的金额。
+        with SessionLocal() as db:
+            account = db.scalar(
+                select(Account)
+                .where(
+                    Account.account_id == integration_context.account_id
+                )
+                .with_for_update()
+            )
+            recalculated = PnlSnapshotPersistenceService(
+                session_factory=SessionLocal,
+                pnl_store=None,
+                market_tick_store=MarketTickStore(redis_client),
+            )._recalculate_locked_account(db, account)
+            db.commit()
+        assert recalculated is True
+
+        with SessionLocal() as db:
+            buy_close = order_service.create_order(
+                db,
+                make_request(
+                    integration_context,
+                    client_order_id=f"IDXOPT-SHORT-CLOSE-{suffix}",
+                    exchange_id="CFFEX",
+                    symbol=option_symbol,
+                    direction="BUY",
+                    offset_flag="CLOSE_TODAY",
+                    limit_price=Decimal("90"),
+                    volume=1,
+                ),
+            )
+        assert _settle(
+            buy_close.order_id,
+            f"IDXOPT-SHORT-CLOSE-{suffix}",
+            "90",
+            1,
+        ).action == "SETTLED"
+
+        # 平仓提交与500ms估值是异步链路；再做一次账户级完整核对，清除
+        # 已关闭空头在上一周期留下的浮动盈亏。
+        with SessionLocal() as db:
+            account = db.scalar(
+                select(Account)
+                .where(
+                    Account.account_id == integration_context.account_id
+                )
+                .with_for_update()
+            )
+            assert PnlSnapshotPersistenceService(
+                session_factory=SessionLocal,
+                pnl_store=None,
+                market_tick_store=MarketTickStore(redis_client),
+            )._recalculate_locked_account(db, account)
+            db.commit()
+
+        with SessionLocal() as db:
+            short_position = db.scalar(
+                select(Position).where(
+                    Position.account_id == integration_context.account_id,
+                    Position.order_book_id == option_symbol,
+                    Position.direction == "SHORT",
+                )
+            )
+            account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            assert short_position.total_volume == 0
+            assert short_position.realized_pnl == Decimal("800.000000")
+            assert account.used_margin == Decimal("0.000000")
+            assert account.option_used_margin == Decimal("0.000000")
+            assert account.daily_commission == Decimal("90.000000")
+            assert account.daily_close_pnl == Decimal("2200.000000")
+            assert account.daily_pnl == Decimal("2110.000000")
     finally:
         with SessionLocal() as db:
             if option_id is not None:
+                db.execute(
+                    delete(OptionMarginRule).where(
+                        OptionMarginRule.instrument_id == option_id
+                    )
+                )
                 db.execute(
                     delete(FeeRuleItem).where(
                         FeeRuleItem.instrument_id == option_id

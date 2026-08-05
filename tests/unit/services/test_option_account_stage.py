@@ -252,7 +252,7 @@ def make_account(**overrides):
     return SimpleNamespace(**values)
 
 
-def test_index_option_sell_open_is_always_rejected():
+def test_index_option_sell_open_requires_short_trading_switch():
     service = OptionTradingPermissionService(make_permission_config())
     with pytest.raises(BusinessRuleError) as exc_info:
         service.validate(
@@ -263,9 +263,30 @@ def test_index_option_sell_open_is_always_rejected():
             direction=OrderDirection.SELL,
             offset_flag=OffsetFlag.OPEN,
         )
-    assert (
-        exc_info.value.error_code
-        == "INDEX_OPTION_SHORT_TRADING_UNAVAILABLE"
+    assert exc_info.value.error_code == "INDEX_OPTION_SHORT_TRADING_NOT_ENABLED"
+
+
+@pytest.mark.parametrize(
+    ("direction", "offset_flag"),
+    [
+        (OrderDirection.SELL, OffsetFlag.OPEN),
+        (OrderDirection.BUY, OffsetFlag.CLOSE_TODAY),
+    ],
+)
+def test_index_option_short_open_and_close_share_short_switch(
+    direction,
+    offset_flag,
+):
+    service = OptionTradingPermissionService(
+        make_permission_config(index_option_short_trading_enabled=True)
+    )
+    service.validate(
+        account=make_account(),
+        instrument=SimpleNamespace(
+            instrument_type=InstrumentType.INDEX_OPTION.value
+        ),
+        direction=direction,
+        offset_flag=offset_flag,
     )
 
 
@@ -322,32 +343,43 @@ def test_unified_risk_state_blocks_futures_open(risk_state, direction):
     )
 
 
-def test_index_option_sell_open_returns_fixed_error_before_rule_lookup():
+def test_index_option_sell_open_resolves_fee_and_margin_rules():
     instrument_repository = Mock()
     instrument_repository.get.return_value = SimpleNamespace(
         id=10,
+        product_id="IO",
+        underlying_instrument_id=20,
         instrument_type=InstrumentType.INDEX_OPTION.value,
         is_active=True,
     )
     fee_items = Mock()
+    fee_items.resolve.return_value = SimpleNamespace(id=30)
+    option_margins = Mock()
+    option_margins.resolve.return_value = SimpleNamespace(id=40)
+    db = Mock()
+    db.get.return_value = SimpleNamespace(
+        id=20,
+        instrument_type=InstrumentType.INDEX.value,
+    )
     service = RuleQueryService(
         instrument_repository=instrument_repository,
         margin_repository=Mock(),
         fee_repository=Mock(),
         fee_item_repository=fee_items,
+        option_margin_repository=option_margins,
     )
 
-    with pytest.raises(BusinessRuleError) as exc_info:
-        service.get_order_rules(
-            db=Mock(),
-            exchange_id="CFFEX",
-            symbol="IO2609-C-4000",
-            trading_day=date(2026, 7, 30),
-            direction="SELL",
-            offset_flag="OPEN",
-        )
-    assert (
-        exc_info.value.error_code
-        == "INDEX_OPTION_SHORT_TRADING_UNAVAILABLE"
+    rules = service.get_order_rules(
+        db=db,
+        exchange_id="CFFEX",
+        symbol="IO2609-C-4000",
+        trading_day=date(2026, 7, 30),
+        direction="SELL",
+        offset_flag="OPEN",
     )
-    fee_items.resolve.assert_not_called()
+    assert rules.fee_rule_item.id == 30
+    assert rules.option_margin_rule.id == 40
+    assert rules.underlying_instrument.id == 20
+    assert rules.underlying_margin_rule is None
+    fee_items.resolve.assert_called_once()
+    option_margins.resolve.assert_called_once()

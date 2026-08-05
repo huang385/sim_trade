@@ -41,5 +41,8 @@ def test_trading_test_page_and_assets_are_available() -> None:
     assert "/position-allocations" in js_response.text
     assert "/api/auth/login" in js_response.text
     assert "/api/auth/refresh" in js_response.text
+    assert "/api/market-data/subscriptions/prepare" in js_response.text
+    assert "/api/market-data/subscriptions/status" in js_response.text
+    assert "ensureOptionMarketReady(payload)" in js_response.text
     assert "Authorization: `Bearer ${state.accessToken}`" in js_response.text
     assert "localStorage.setItem" not in js_response.text

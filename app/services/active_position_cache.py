@@ -338,6 +338,11 @@ class ActivePositionCache:
                 underlying_symbol=(
                     underlying.symbol if underlying is not None else None
                 ),
+                underlying_order_book_id=(
+                    underlying.order_book_id
+                    if underlying is not None
+                    else None
+                ),
                 margin_rule_snapshot=tuple(
                     sorted(
                         (str(key), str(value))

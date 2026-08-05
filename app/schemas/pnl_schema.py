@@ -19,6 +19,7 @@ class PositionRealtimePnl(BaseModel):
     cumulative_unrealized_pnl: Decimal
     daily_position_pnl: Decimal
     instrument_type: str = "FUTURES"
+    underlying_order_book_id: str | None = None
     option_market_value: Decimal = Decimal("0")
     realtime_required_margin: Decimal = Decimal("0")
     event_time: datetime

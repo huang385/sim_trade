@@ -82,7 +82,22 @@ class MarketTickNormalizer:
         else:
             text = str(value).strip().replace("Z", "+00:00")
             try:
-                result = datetime.fromisoformat(text)
+                # YMM Live Data生产回调当前使用RQData紧凑整数时间：
+                # YYYYMMDDHHMMSSmmm，例如20260805095638840。
+                # 文档示例中的datetime、pandas.Timestamp和ISO字符串继续兼容。
+                if text.isdigit() and len(text) in {14, 17, 20}:
+                    date_time_text = text[:14]
+                    result = datetime.strptime(
+                        date_time_text,
+                        "%Y%m%d%H%M%S",
+                    )
+                    fraction = text[14:]
+                    if fraction:
+                        result = result.replace(
+                            microsecond=int(fraction.ljust(6, "0"))
+                        )
+                else:
+                    result = datetime.fromisoformat(text)
             except ValueError as exc:
                 raise MarketTickNormalizationError(
                     f"{field_name}不是合法时间"

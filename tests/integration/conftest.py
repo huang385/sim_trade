@@ -11,11 +11,26 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
+from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.redis_keys import (
+    PNL_ACCOUNT_INDEX_KEYS_KEY,
+    PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+    PNL_CONTRACT_INDEX_KEYS_KEY,
+    PNL_DIRTY_ACCOUNT_FACTS_KEY,
+    PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+    PNL_DIRTY_ACCOUNTS_KEY,
+    PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
     PNL_DIRTY_CONTRACTS_KEY,
     PNL_DIRTY_CONTRACT_VERSIONS_KEY,
+    PNL_DIRTY_POSITIONS_KEY,
+    PNL_DIRTY_POSITION_VERSIONS_KEY,
+    PNL_POSITION_REALTIME_VERSIONS_KEY,
+    pnl_account_key,
+    pnl_account_positions_key,
+    pnl_contract_positions_key,
     pnl_dirty_contract_accounts_key,
     pnl_dirty_contract_member,
+    pnl_position_key,
 )
 from app.models.account import Account
 from app.models.fee_rule import FeeRule
@@ -204,6 +219,15 @@ def integration_context():
 
     # 只删除该测试生成的精确编号数据，不影响用户已有账户、规则和订单。
     with SessionLocal() as db:
+        position_rows = db.execute(
+            select(
+                Position.position_id,
+                Position.exchange_id,
+                Position.symbol,
+            ).where(
+                Position.account_id == context.account_id
+            )
+        ).all()
         order_ids = db.scalars(
             select(Order.order_id).where(
                 Order.account_id == context.account_id
@@ -282,14 +306,62 @@ def integration_context():
         context.symbol,
     )
     try:
-        redis_client.srem(PNL_DIRTY_CONTRACTS_KEY, member)
-        redis_client.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
-        redis_client.delete(
+        pipeline = redis_client.pipeline(transaction=True)
+        pipeline.srem(PNL_DIRTY_CONTRACTS_KEY, member)
+        pipeline.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
+        pipeline.delete(
             pnl_dirty_contract_accounts_key(
                 context.exchange_id,
                 context.symbol,
             )
         )
+        # 测试数据库记录已经删除，精确移除同一测试实体留下的实时快照和
+        # Dirty 引用。否则真实 Worker 会把这些孤儿编号永久当作待落库任务。
+        pipeline.srem(PNL_DIRTY_ACCOUNTS_KEY, context.account_id)
+        pipeline.hdel(PNL_DIRTY_ACCOUNT_VERSIONS_KEY, context.account_id)
+        pipeline.srem(PNL_DIRTY_ACCOUNT_FACTS_KEY, context.account_id)
+        pipeline.hdel(
+            PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
+            context.account_id,
+        )
+        pipeline.hdel(
+            PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
+            context.account_id,
+        )
+        pipeline.srem(
+            PNL_ACCOUNT_INDEX_KEYS_KEY,
+            pnl_account_key(context.account_id),
+        )
+        pipeline.delete(
+            pnl_account_key(context.account_id),
+            pnl_account_positions_key(context.account_id),
+        )
+        for row in position_rows:
+            pipeline.srem(PNL_DIRTY_POSITIONS_KEY, row.position_id)
+            pipeline.hdel(PNL_DIRTY_POSITION_VERSIONS_KEY, row.position_id)
+            pipeline.hdel(
+                PNL_POSITION_REALTIME_VERSIONS_KEY,
+                row.position_id,
+            )
+            pipeline.srem(
+                pnl_contract_positions_key(row.exchange_id, row.symbol),
+                row.position_id,
+            )
+            pipeline.delete(pnl_position_key(row.position_id))
+        pipeline.execute()
+        for row in position_rows:
+            contract_key = pnl_contract_positions_key(
+                row.exchange_id,
+                row.symbol,
+            )
+            if redis_client.scard(contract_key) == 0:
+                redis_client.srem(
+                    PNL_CONTRACT_INDEX_KEYS_KEY,
+                    contract_key,
+                )
+        # 测试可能在订单详情已删除后留下空的合约派生成员；使用生产代码的
+        # 原子对账逻辑统一修剪，避免下一次行情Worker误订阅测试合约。
+        ActiveOrderIndex(redis_client).reconcile_active_contracts()
     except RedisError:
         # Redis不可用不应把只依赖PostgreSQL的测试改判失败；需要Redis的
         # 测试会在自身初始化阶段按项目规范明确skip。

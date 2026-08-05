@@ -33,12 +33,12 @@ from app.services.pnl_calculator import (
 )
 from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.account_risk_state_service import AccountRiskStateService
-from app.services.commodity_option_margin_calculator import (
-    CommodityFuturesOptionMarginCalculator,
-)
 from app.services.option_margin_calculator import (
     OptionMarginInput,
     OptionMarginRuleSnapshot,
+)
+from app.services.option_margin_calculator_resolver import (
+    OptionMarginCalculatorResolver,
 )
 
 
@@ -109,11 +109,15 @@ class RealtimePnlService:
         pnl_store: RealtimePnlStore,
         calculator: PnlCalculator | None = None,
         market_tick_store: MarketTickStore | None = None,
+        option_margin_resolver: OptionMarginCalculatorResolver | None = None,
     ):
         self.active_position_cache = active_position_cache
         self.pnl_store = pnl_store
         self.calculator = calculator or PnlCalculator()
         self.market_tick_store = market_tick_store
+        self.option_margin_resolver = (
+            option_margin_resolver or OptionMarginCalculatorResolver()
+        )
 
     @staticmethod
     def parse_tick(fields: Mapping[str, str]) -> MarketTick | None:
@@ -186,6 +190,7 @@ class RealtimePnlService:
             ),
             daily_position_pnl=result.daily_position_pnl,
             instrument_type=snapshot.instrument_type,
+            underlying_order_book_id=snapshot.underlying_order_book_id,
             option_market_value=option_market_value,
             realtime_required_margin=realtime_required_margin,
             event_time=tick.event_time,
@@ -197,7 +202,7 @@ class RealtimePnlService:
     @staticmethod
     def _option_rule(
         snapshot: PositionPnlSnapshot,
-    ) -> tuple[OptionMarginRuleSnapshot, Decimal, Decimal]:
+    ) -> OptionMarginRuleSnapshot:
         values = dict(snapshot.margin_rule_snapshot)
         required = {
             "rule_id",
@@ -208,33 +213,40 @@ class RealtimePnlService:
             "out_of_money_deduction_rate",
             "minimum_underlying_margin_ratio",
             "extra_margin_rate",
-            "underlying_margin_rate",
-            "underlying_multiplier",
         }
         if not required.issubset(values):
             raise ValueError("期权空头持仓缺少完整保证金规则快照")
-        return (
-            OptionMarginRuleSnapshot(
-                rule_id=int(values["rule_id"]),
-                rule_version=values["rule_version"],
-                margin_algorithm=values["margin_algorithm"],
-                margin_adjustment_rate=Decimal(
-                    values["margin_adjustment_rate"]
-                ),
-                minimum_guarantee_rate=Decimal(
-                    values["minimum_guarantee_rate"]
-                ),
-                out_of_money_deduction_rate=Decimal(
-                    values["out_of_money_deduction_rate"]
-                ),
-                minimum_underlying_margin_ratio=Decimal(
-                    values["minimum_underlying_margin_ratio"]
-                ),
-                extra_margin_rate=Decimal(values["extra_margin_rate"]),
+        return OptionMarginRuleSnapshot(
+            rule_id=int(values["rule_id"]),
+            rule_version=values["rule_version"],
+            margin_algorithm=values["margin_algorithm"],
+            margin_adjustment_rate=Decimal(
+                values["margin_adjustment_rate"]
             ),
-            Decimal(values["underlying_margin_rate"]),
-            Decimal(values["underlying_multiplier"]),
+            minimum_guarantee_rate=Decimal(
+                values["minimum_guarantee_rate"]
+            ),
+            out_of_money_deduction_rate=Decimal(
+                values["out_of_money_deduction_rate"]
+            ),
+            minimum_underlying_margin_ratio=Decimal(
+                values["minimum_underlying_margin_ratio"]
+            ),
+            extra_margin_rate=Decimal(values["extra_margin_rate"]),
         )
+
+    @staticmethod
+    def _commodity_underlying_inputs(
+        snapshot: PositionPnlSnapshot,
+    ) -> tuple[Decimal, Decimal]:
+        values = dict(snapshot.margin_rule_snapshot)
+        try:
+            return (
+                Decimal(values["underlying_margin_rate"]),
+                Decimal(values["underlying_multiplier"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("商品期权空头缺少标的保证金快照") from exc
 
     def _calculate_missing_position(
         self,
@@ -376,12 +388,7 @@ class RealtimePnlService:
                             * position.contract_multiplier
                             * Decimal(position.total_volume)
                         )
-                        if (
-                            instrument_type
-                            == InstrumentType.FUTURES_OPTION
-                            and position.direction
-                            == PositionDirection.SHORT.value
-                        ):
+                        if position.direction == PositionDirection.SHORT.value:
                             underlying_tick = underlying_ticks.get(
                                 position.underlying_key
                             )
@@ -393,21 +400,29 @@ class RealtimePnlService:
                                 or position.option_type is None
                             ):
                                 raise ValueError(
-                                    "商品期权空头缺少有效标的行情"
+                                    "期权空头缺少有效标的行情"
                                 )
-                            (
-                                margin_rule,
-                                underlying_margin_rate,
-                                underlying_multiplier,
-                            ) = self._option_rule(position)
-                            underlying_margin_per_lot = quantize_money(
-                                underlying_tick.last_price
-                                * underlying_multiplier
-                                * underlying_margin_rate
+                            margin_rule = self._option_rule(position)
+                            underlying_multiplier = Decimal("1")
+                            underlying_margin_per_lot = Decimal("0.000000")
+                            if instrument_type == InstrumentType.FUTURES_OPTION:
+                                (
+                                    underlying_margin_rate,
+                                    underlying_multiplier,
+                                ) = self._commodity_underlying_inputs(position)
+                                underlying_margin_per_lot = quantize_money(
+                                    underlying_tick.last_price
+                                    * underlying_multiplier
+                                    * underlying_margin_rate
+                                )
+                            calculator = self.option_margin_resolver.resolve(
+                                instrument_type=instrument_type.value,
+                                exchange_id=position.exchange_id,
+                                margin_algorithm=(
+                                    margin_rule.margin_algorithm
+                                ),
                             )
-                            margin_result = (
-                                CommodityFuturesOptionMarginCalculator()
-                                .calculate(
+                            margin_result = calculator.calculate(
                                     OptionMarginInput(
                                         option_type=OptionType(
                                             position.option_type
@@ -433,7 +448,6 @@ class RealtimePnlService:
                                             underlying_margin_per_lot
                                         ),
                                     )
-                                )
                             )
                             realtime_required_margin = (
                                 margin_result.total_margin
@@ -527,6 +541,12 @@ class RealtimePnlService:
                         exchange_id=old.get("exchange_id", key[0]),
                         symbol=old.get("symbol", key[1]),
                         direction=old.get("direction", ""),
+                        instrument_type=old.get(
+                            "instrument_type", InstrumentType.FUTURES.value
+                        ),
+                        underlying_order_book_id=old.get(
+                            "underlying_order_book_id"
+                        ),
                         mark_price=mark_price,
                         cumulative_unrealized_pnl=Decimal("0.000000"),
                         daily_position_pnl=Decimal("0.000000"),

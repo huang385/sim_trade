@@ -46,6 +46,9 @@ PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY = "pnl:realtime:snapshot_sequence"
 PNL_ACCOUNT_REALTIME_VERSIONS_KEY = "pnl:realtime:account_versions"
 PNL_POSITION_REALTIME_VERSIONS_KEY = "pnl:realtime:position_versions"
 YMM_LIVE_DATA_STATUS_KEY = "market:source:ymm_live_data:status"
+# 下单前临时行情需求使用按成员过期的ZSET；成员包含账户和标准合约代码，
+# 行情Worker只读取仍未过期的代码并与订单、持仓订阅集合合并。
+MARKET_PRE_SUBSCRIPTIONS_KEY = "market:pre_subscriptions"
 
 # WebSocket实时投影、单实例租约和短期认证票据。
 REALTIME_EVENT_STREAM = settings.realtime_event_stream_name

@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     # 行情订阅、重连、本地队列和Redis派生数据配置。
     remote_market_data_subscription_refresh_seconds: float = 1.0
     remote_market_data_subscription_debounce_seconds: float = 3.0
+    # 期权首次卖出开仓需要先取得期权和标的行情。临时预订阅到期后，若
+    # 合约没有活动订单或持仓，行情Worker会按原有防抖流程自动退订。
+    market_pre_subscription_ttl_seconds: int = 60
+    market_pre_subscription_max_codes_per_account: int = 20
     remote_market_data_reconnect_initial_seconds: float = 1.0
     remote_market_data_reconnect_max_seconds: float = 30.0
     remote_market_data_queue_size: int = 10_000

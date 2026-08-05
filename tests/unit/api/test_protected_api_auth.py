@@ -21,6 +21,22 @@ from app.main import app
             {"json": {}},
         ),
         (
+            "post",
+            "/api/market-data/subscriptions/prepare",
+            {"json": {}},
+        ),
+        (
+            "get",
+            "/api/market-data/subscriptions/status",
+            {
+                "params": {
+                    "account_id": "A001",
+                    "exchange_id": "DCE",
+                    "symbol": "JD2609-C-4000",
+                }
+            },
+        ),
+        (
             "get",
             "/api/trades",
             {"params": {"account_id": "A001"}},

@@ -18,18 +18,18 @@ from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.position_repository import PositionRepository
 from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.account_risk_state_service import AccountRiskStateService
-from app.services.commodity_option_margin_calculator import (
-    CommodityFuturesOptionMarginCalculator,
-)
 from app.services.option_margin_calculator import (
     OptionMarginInput,
     OptionMarginRuleSnapshot,
+)
+from app.services.option_margin_calculator_resolver import (
+    OptionMarginCalculatorResolver,
 )
 
 
 class OptionMarginAdjustmentService:
     """
-    按500ms合并后的最新行情双向调整商品期权空头账面保证金。
+    按500ms合并后的最新行情双向调整期权空头账面保证金。
 
     该服务是资金事实的唯一调整入口之一。实时估值 Worker 只能生成派生
     快照；当实时所需保证金与账面占用不一致时，由本服务按
@@ -45,6 +45,7 @@ class OptionMarginAdjustmentService:
         account_repository: AccountRepository | None = None,
         position_repository: PositionRepository | None = None,
         instrument_repository: InstrumentRepository | None = None,
+        option_margin_resolver: OptionMarginCalculatorResolver | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.account_repository = account_repository or AccountRepository()
@@ -52,36 +53,51 @@ class OptionMarginAdjustmentService:
         self.instrument_repository = (
             instrument_repository or InstrumentRepository()
         )
+        self.option_margin_resolver = (
+            option_margin_resolver or OptionMarginCalculatorResolver()
+        )
 
     @staticmethod
-    def _rule(position) -> tuple[OptionMarginRuleSnapshot, Decimal, Decimal]:
+    def _rule(position) -> OptionMarginRuleSnapshot:
+        values = position.margin_rule_snapshot or {}
+        try:
+            return OptionMarginRuleSnapshot(
+                rule_id=int(values["rule_id"]),
+                rule_version=str(values["rule_version"]),
+                margin_algorithm=str(values["margin_algorithm"]),
+                margin_adjustment_rate=Decimal(
+                    values["margin_adjustment_rate"]
+                ),
+                minimum_guarantee_rate=Decimal(
+                    values["minimum_guarantee_rate"]
+                ),
+                out_of_money_deduction_rate=Decimal(
+                    values["out_of_money_deduction_rate"]
+                ),
+                minimum_underlying_margin_ratio=Decimal(
+                    values["minimum_underlying_margin_ratio"]
+                ),
+                extra_margin_rate=Decimal(values["extra_margin_rate"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DataAccessError(
+                "期权持仓保证金规则快照不完整",
+                error_code="OPTION_MARGIN_SNAPSHOT_INCOMPLETE",
+            ) from exc
+
+    @staticmethod
+    def _commodity_underlying_inputs(position) -> tuple[Decimal, Decimal]:
+        """读取商品期权专用快照；股指期权不会调用本方法。"""
+
         values = position.margin_rule_snapshot or {}
         try:
             return (
-                OptionMarginRuleSnapshot(
-                    rule_id=int(values["rule_id"]),
-                    rule_version=str(values["rule_version"]),
-                    margin_algorithm=str(values["margin_algorithm"]),
-                    margin_adjustment_rate=Decimal(
-                        values["margin_adjustment_rate"]
-                    ),
-                    minimum_guarantee_rate=Decimal(
-                        values["minimum_guarantee_rate"]
-                    ),
-                    out_of_money_deduction_rate=Decimal(
-                        values["out_of_money_deduction_rate"]
-                    ),
-                    minimum_underlying_margin_ratio=Decimal(
-                        values["minimum_underlying_margin_ratio"]
-                    ),
-                    extra_margin_rate=Decimal(values["extra_margin_rate"]),
-                ),
                 Decimal(values["underlying_margin_rate"]),
                 Decimal(values["underlying_multiplier"]),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise DataAccessError(
-                "期权持仓保证金规则快照不完整",
+                "商品期权标的保证金快照不完整",
                 error_code="OPTION_MARGIN_SNAPSHOT_INCOMPLETE",
             ) from exc
 
@@ -101,12 +117,14 @@ class OptionMarginAdjustmentService:
             if (
                 position is None
                 or position.account_id != account_id
-                or position.instrument_type
-                != InstrumentType.FUTURES_OPTION.value
+                or position.instrument_type not in {
+                    InstrumentType.FUTURES_OPTION.value,
+                    InstrumentType.INDEX_OPTION.value,
+                }
                 or position.direction != "SHORT"
             ):
                 raise DataAccessError(
-                    "目标不是有效的商品期权空头持仓",
+                    "目标不是有效的期权空头持仓",
                     error_code="OPTION_MARGIN_POSITION_INVALID",
                 )
             details = self.position_repository.list_open_details_for_update(
@@ -179,8 +197,28 @@ class OptionMarginAdjustmentService:
                     "期权保证金调整缺少有效行情",
                     error_code="OPTION_MARGIN_PRICE_UNAVAILABLE",
                 )
-            rule, underlying_rate, underlying_multiplier = self._rule(position)
-            required = CommodityFuturesOptionMarginCalculator().calculate(
+            rule = self._rule(position)
+            underlying_multiplier = Decimal("1")
+            underlying_margin_per_lot = Decimal("0.000000")
+            if position.instrument_type == InstrumentType.FUTURES_OPTION.value:
+                underlying_rate, underlying_multiplier = (
+                    self._commodity_underlying_inputs(position)
+                )
+                underlying_margin_per_lot = quantize_money(
+                    underlying_tick.last_price
+                    * underlying_multiplier
+                    * underlying_rate
+                )
+            else:
+                underlying_multiplier = Decimal(
+                    underlying.contract_multiplier
+                )
+            calculator = self.option_margin_resolver.resolve(
+                instrument_type=position.instrument_type,
+                exchange_id=instrument.exchange_id,
+                margin_algorithm=rule.margin_algorithm,
+            )
+            required = calculator.calculate(
                 OptionMarginInput(
                     option_type=OptionType(instrument.option_type),
                     strike_price=Decimal(instrument.strike_price),
@@ -192,11 +230,7 @@ class OptionMarginAdjustmentService:
                     price_mode=MarginPriceMode.SETTLEMENT,
                     calculated_at=utc_now(),
                     rule=rule,
-                    underlying_margin_per_lot=quantize_money(
-                        underlying_tick.last_price
-                        * underlying_multiplier
-                        * underlying_rate
-                    ),
+                    underlying_margin_per_lot=underlying_margin_per_lot,
                 )
             ).total_margin
             previous_required = Decimal(

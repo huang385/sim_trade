@@ -6,12 +6,15 @@ from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from redis.exceptions import RedisError
 
 from app.common.exceptions import (
     AppError,
+    BusinessRuleError,
     DataAccessError,
     ResourceConflictError,
     ResourceNotFoundError,
+    ServiceUnavailableError,
 )
 from app.common.decimal_utils import quantize_money
 from app.common.pagination_cursor import decode_cursor, encode_cursor
@@ -31,6 +34,7 @@ from app.enums.option_enums import (
     OptionType,
 )
 from app.models.order import Order
+from app.models.account import Account
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
@@ -57,7 +61,13 @@ from app.services.option_margin_calculator import (
 from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
-from app.services.option_market_price_service import OptionMarketPriceService
+from app.services.option_market_price_service import (
+    OptionMarginMarketPrices,
+    OptionMarketPriceService,
+)
+from app.infrastructure.market_pre_subscription_store import (
+    MarketPreSubscriptionStore,
+)
 from app.services.option_premium_calculator import OptionPremiumCalculator
 from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
@@ -67,6 +77,7 @@ from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
 from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.rule_query_service import (
+    OrderReferenceRules,
     RuleQueryService,
     get_rule_query_service,
 )
@@ -148,6 +159,7 @@ class OrderService:
         option_premium_calculator: OptionPremiumCalculator | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         option_market_price_service: OptionMarketPriceService | None = None,
+        market_pre_subscription_store: MarketPreSubscriptionStore | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -184,6 +196,63 @@ class OrderService:
             option_margin_resolver or OptionMarginCalculatorResolver()
         )
         self.option_market_price_service = option_market_price_service
+        self.market_pre_subscription_store = market_pre_subscription_store
+
+    def _get_option_margin_prices(
+        self,
+        *,
+        request: OrderCreateRequest,
+        rules: OrderReferenceRules,
+        authorized_account: Account,
+    ) -> OptionMarginMarketPrices:
+        """读取卖方保证金价格；首次缺行情时自动登记临时订阅需求。"""
+
+        if (
+            self.option_market_price_service is None
+            or rules.underlying_instrument is None
+        ):
+            raise DataAccessError(
+                "期权保证金行情上下文不完整",
+                error_code="OPTION_MARGIN_CONTEXT_INCOMPLETE",
+            )
+        try:
+            return self.option_market_price_service.get_margin_prices(
+                option_instrument=rules.instrument,
+                underlying_instrument=rules.underlying_instrument,
+                order_limit_price=request.limit_price,
+            )
+        except BusinessRuleError as exc:
+            if (
+                exc.error_code != "OPTION_MARKET_PRICE_UNAVAILABLE"
+                or self.market_pre_subscription_store is None
+            ):
+                raise
+            # 兼容尚未调用准备接口的旧客户端：首次卖出开仓发现行情缺失时，
+            # 自动写入“期权+标的”临时需求。请求本身不创建订单、不冻结资金，
+            # 客户端等待行情就绪后使用同一client_order_id安全重试即可。
+            self.option_permission_service.validate(
+                account=authorized_account,
+                instrument=rules.instrument,
+                direction=request.direction,
+                offset_flag=request.offset_flag,
+            )
+            try:
+                self.market_pre_subscription_store.request_codes(
+                    account_id=request.account_id,
+                    codes={
+                        rules.instrument.order_book_id,
+                        rules.underlying_instrument.order_book_id,
+                    },
+                )
+            except RedisError as redis_exc:
+                raise ServiceUnavailableError(
+                    "行情预订阅服务暂不可用",
+                    error_code="MARKET_PRE_SUBSCRIPTION_UNAVAILABLE",
+                ) from redis_exc
+            raise ServiceUnavailableError(
+                "期权和标的行情正在准备，请稍后重试下单",
+                error_code="OPTION_MARKET_DATA_PREPARING",
+            ) from exc
 
     def create_order(
         self,
@@ -373,24 +442,31 @@ class OrderService:
                     multiplier=commission_contract_multiplier,
                 )
             if (
-                instrument_type == InstrumentType.FUTURES_OPTION.value
+                is_option
                 and request.direction == OrderDirection.SELL
                 and is_open
             ):
                 if (
                     rules.option_margin_rule is None
                     or rules.underlying_instrument is None
-                    or rules.underlying_margin_rule is None
                     or self.option_market_price_service is None
                 ):
                     raise DataAccessError(
-                        "商品期权保证金计算上下文不完整",
+                        "期权保证金计算上下文不完整",
                         error_code="OPTION_MARGIN_CONTEXT_INCOMPLETE",
                     )
-                prices = self.option_market_price_service.get_margin_prices(
-                    option_instrument=rules.instrument,
-                    underlying_instrument=rules.underlying_instrument,
-                    order_limit_price=request.limit_price,
+                if (
+                    instrument_type == InstrumentType.FUTURES_OPTION.value
+                    and rules.underlying_margin_rule is None
+                ):
+                    raise DataAccessError(
+                        "商品期权标的保证金规则不完整",
+                        error_code="OPTION_MARGIN_CONTEXT_INCOMPLETE",
+                    )
+                prices = self._get_option_margin_prices(
+                    request=request,
+                    rules=rules,
+                    authorized_account=authorized_account,
                 )
                 option_rule = rules.option_margin_rule
                 rule_snapshot = OptionMarginRuleSnapshot(
@@ -413,17 +489,27 @@ class OrderService:
                         option_rule.extra_margin_rate
                     ),
                 )
-                underlying_margin_rate = max(
-                    Decimal(rules.underlying_margin_rule.long_margin_rate),
-                    Decimal(rules.underlying_margin_rule.short_margin_rate),
+                underlying_multiplier = Decimal(
+                    rules.underlying_instrument.contract_multiplier
                 )
-                underlying_margin_per_lot = quantize_money(
-                    prices.underlying_price
-                    * Decimal(
-                        rules.underlying_instrument.contract_multiplier
+                underlying_margin_rate = Decimal("0")
+                underlying_margin_per_lot = Decimal("0.000000")
+                # 商品期权公式需要标的期货每手保证金；股指期权公式直接
+                # 使用指数点位，因此不查询也不伪造标的保证金规则。
+                if instrument_type == InstrumentType.FUTURES_OPTION.value:
+                    underlying_margin_rate = max(
+                        Decimal(
+                            rules.underlying_margin_rule.long_margin_rate
+                        ),
+                        Decimal(
+                            rules.underlying_margin_rule.short_margin_rate
+                        ),
                     )
-                    * underlying_margin_rate
-                )
+                    underlying_margin_per_lot = quantize_money(
+                        prices.underlying_price
+                        * underlying_multiplier
+                        * underlying_margin_rate
+                    )
                 calculator = self.option_margin_resolver.resolve(
                     instrument_type=instrument_type,
                     exchange_id=rules.instrument.exchange_id,
@@ -440,9 +526,7 @@ class OrderService:
                         option_price=prices.option_price,
                         underlying_price=prices.underlying_price,
                         option_multiplier=commission_contract_multiplier,
-                        underlying_multiplier=Decimal(
-                            rules.underlying_instrument.contract_multiplier
-                        ),
+                        underlying_multiplier=underlying_multiplier,
                         volume=request.volume,
                         price_mode=MarginPriceMode.ORDER_FREEZE,
                         calculated_at=utc_now(),
@@ -461,22 +545,19 @@ class OrderService:
                 )
                 margin_option_price = margin_result.option_price
                 margin_rule_snapshot = rule_snapshot.to_json_mapping()
-                # 实时保证金需要重放标的期货每手保证金。把当次采用的
-                # 标的保证金率和乘数一并固化，后续 Tick 不回查历史规则。
-                margin_rule_snapshot.update(
-                    {
-                        "underlying_margin_rate": format(
-                            underlying_margin_rate, "f"
-                        ),
-                        "underlying_multiplier": format(
-                            Decimal(
-                                rules.underlying_instrument
-                                .contract_multiplier
+                if instrument_type == InstrumentType.FUTURES_OPTION.value:
+                    # 商品期权实时保证金需要重放标的期货每手保证金，
+                    # 因此固化当次使用的保证金率与乘数。
+                    margin_rule_snapshot.update(
+                        {
+                            "underlying_margin_rate": format(
+                                underlying_margin_rate, "f"
                             ),
-                            "f",
-                        ),
-                    }
-                )
+                            "underlying_multiplier": format(
+                                underlying_multiplier, "f"
+                            ),
+                        }
+                    )
                 margin_snapshot_schema_version = "1"
                 margin_calculation_version = (
                     margin_result.calculation_version
@@ -992,6 +1073,7 @@ def get_order_service() -> OrderService:
     from app.infrastructure.market_data.market_tick_store import (
         MarketTickStore,
     )
+    from app.core.config import settings
 
     return OrderService(
         order_repository=OrderRepository(),
@@ -1007,5 +1089,12 @@ def get_order_service() -> OrderService:
         close_allocator=PositionCloseAllocator(),
         option_market_price_service=OptionMarketPriceService(
             MarketTickStore(redis_client)
+        ),
+        market_pre_subscription_store=MarketPreSubscriptionStore(
+            redis_client,
+            ttl_seconds=settings.market_pre_subscription_ttl_seconds,
+            max_codes_per_account=(
+                settings.market_pre_subscription_max_codes_per_account
+            ),
         ),
     )

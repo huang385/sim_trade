@@ -152,10 +152,11 @@ class ActiveOrderIndex:
 
     @staticmethod
     def _underlying_dependency_key(order: Any) -> str:
-        """商品期权卖出开仓才需要监听标的行情变化。"""
+        """卖出开仓期权需要同时监听期权与标的行情变化。"""
 
         if (
-            str(getattr(order, "instrument_type", "")) == "FUTURES_OPTION"
+            str(getattr(order, "instrument_type", ""))
+            in {"FUTURES_OPTION", "INDEX_OPTION"}
             and str(getattr(order, "direction", "")) == "SELL"
             and str(getattr(order, "offset_flag", "")) == "OPEN"
             and getattr(order, "underlying_exchange_id", None)
@@ -276,7 +277,8 @@ class ActiveOrderIndex:
             )
         dependency_key = ""
         if (
-            detail.get("instrument_type") == "FUTURES_OPTION"
+            detail.get("instrument_type")
+            in {"FUTURES_OPTION", "INDEX_OPTION"}
             and detail.get("direction") == "SELL"
             and detail.get("offset_flag") == "OPEN"
             and detail.get("underlying_exchange_id")
@@ -369,6 +371,43 @@ class ActiveOrderIndex:
                 continue
             if order_book_id:
                 codes.add(order_book_id)
+        return codes
+
+    def list_margin_dependency_codes(self) -> set[str]:
+        """
+        批量读取活动卖出开仓期权依赖的标的订阅代码。
+
+        全部字段通过一个非事务Pipeline读取，不产生逐订单网络往返；订单
+        Hash仍由现有活动订单索引维护，不引入第二套订单事实结构。
+        """
+
+        order_ids = sorted(self.list_all_order_ids())
+        if not order_ids:
+            return set()
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for order_id in order_ids:
+            pipeline.hmget(
+                active_order_key(str(order_id)),
+                (
+                    "instrument_type",
+                    "direction",
+                    "offset_flag",
+                    "underlying_order_book_id",
+                ),
+            )
+        codes: set[str] = set()
+        for values in pipeline.execute():
+            instrument_type, direction, offset_flag, underlying_code = (
+                values or (None, None, None, None)
+            )
+            if (
+                str(instrument_type or "")
+                in {"FUTURES_OPTION", "INDEX_OPTION"}
+                and str(direction or "") == "SELL"
+                and str(offset_flag or "") == "OPEN"
+                and underlying_code
+            ):
+                codes.add(str(underlying_code))
         return codes
 
     def reconcile_active_contracts(self) -> int:

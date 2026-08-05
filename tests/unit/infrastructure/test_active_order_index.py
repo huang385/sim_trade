@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.infrastructure.active_order_index import ActiveOrderIndex
 
 
@@ -49,11 +51,14 @@ def test_remove_checks_contract_set_and_contract_member_in_same_lua():
     assert "active_order_contracts" in arguments
 
 
-def test_option_sell_open_adds_underlying_dependency_in_same_lua():
+@pytest.mark.parametrize("instrument_type", ["FUTURES_OPTION", "INDEX_OPTION"])
+def test_option_sell_open_adds_underlying_dependency_in_same_lua(
+    instrument_type,
+):
     redis_client = Mock()
     redis_client.eval.return_value = 1
     order = make_order()
-    order.instrument_type = "FUTURES_OPTION"
+    order.instrument_type = instrument_type
     order.direction = "SELL"
     order.offset_flag = "OPEN"
     order.underlying_exchange_id = "DCE"
@@ -69,6 +74,20 @@ def test_option_sell_open_adds_underlying_dependency_in_same_lua():
         "valuation:underlying_sell_open_orders:DCE:JD2609"
         in redis_client.eval.call_args.args
     )
+
+
+def test_index_option_sell_open_exposes_underlying_subscription_code():
+    redis_client = Mock()
+    redis_client.smembers.return_value = {"O-IO"}
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [
+        ["INDEX_OPTION", "SELL", "OPEN", "000300.SH"]
+    ]
+
+    assert ActiveOrderIndex(
+        redis_client
+    ).list_margin_dependency_codes() == {"000300.SH"}
+    pipeline.hmget.assert_called_once()
 
 
 def test_list_active_contract_codes_does_not_read_order_hashes():
