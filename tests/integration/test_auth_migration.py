@@ -97,8 +97,8 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            # 统一账户迁移之后追加YMM Live Data代码映射数据迁移。
-            assert revision == "20260805_0016"
+            # YMM Live Data映射之后追加统一账户风险监控与强平基础迁移。
+            assert revision == "20260805_0017"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "

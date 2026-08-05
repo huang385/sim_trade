@@ -245,6 +245,38 @@ class OrderRepository:
         return db.scalars(statement.order_by(Order.id)).all()
 
     @staticmethod
+    def list_active_open_by_account(
+        db: Session, account_id: str
+    ) -> Sequence[Order]:
+        """返回风险处置需要撤销的活动开仓单，不包含任何平仓委托。"""
+
+        return db.scalars(
+            select(Order)
+            .where(
+                Order.account_id == account_id,
+                Order.offset_flag == OffsetFlag.OPEN.value,
+                Order.order_type == OrderType.LIMIT.value,
+                Order.status.in_(
+                    (OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value)
+                ),
+                Order.remaining_volume > 0,
+            )
+            .order_by(Order.id)
+        ).all()
+
+    @staticmethod
+    def list_by_liquidation_task(
+        db: Session, task_id: str
+    ) -> Sequence[Order]:
+        """查询强平任务已创建的订单，用于重启恢复和幂等判断。"""
+
+        return db.scalars(
+            select(Order)
+            .where(Order.liquidation_task_id == task_id)
+            .order_by(Order.id)
+        ).all()
+
+    @staticmethod
     def create(
         db: Session,
         *,
@@ -286,6 +318,9 @@ class OrderRepository:
         fee_rule_id: int | None = None,
         fee_rule_version: str | None = None,
         fee_rule_snapshot: dict | None = None,
+        order_source: str = "USER",
+        liquidation_task_id: str | None = None,
+        reduce_only: bool = False,
     ) -> Order:
         """
         构造并加入一笔已接受订单。
@@ -337,6 +372,9 @@ class OrderRepository:
             margin_rule_snapshot=margin_rule_snapshot,
             margin_snapshot_schema_version=margin_snapshot_schema_version,
             margin_calculation_version=margin_calculation_version,
+            order_source=order_source,
+            liquidation_task_id=liquidation_task_id,
+            reduce_only=reduce_only,
             reject_code=None,
             reject_message=None,
             created_at=created_at,

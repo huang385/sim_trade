@@ -144,6 +144,9 @@ class OrderResponse(BaseModel):
     margin_option_price: Decimal | None = None
     margin_calculation_version: str | None = None
     margin_risk_state: str = "NORMAL"
+    order_source: str = "USER"
+    liquidation_task_id: str | None = None
+    reduce_only: bool = False
     fee_rule_id: int | None = None
     fee_rule_version: str | None = None
 

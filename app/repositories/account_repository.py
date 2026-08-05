@@ -94,6 +94,12 @@ class AccountRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_account_ids(db: Session) -> Sequence[str]:
+        """启动恢复扫描只读取账户编号，避免加载大批ORM资金对象。"""
+
+        return db.scalars(select(Account.account_id).order_by(Account.id)).all()
+
+    @staticmethod
     def list_by_user_id(
         db: Session,
         user_id: str,

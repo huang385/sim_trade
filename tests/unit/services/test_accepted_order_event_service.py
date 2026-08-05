@@ -241,3 +241,37 @@ def test_cancel_events_remove_all_active_indexes(event_type, status):
         event_id="EVT-1",
         processed_ttl_seconds=604800,
     )
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "RISK_WARNING",
+        "RISK_STATE_CHANGED",
+        "LIQUIDATION_STARTED",
+        "LIQUIDATION_ORDER_UPDATED",
+        "LIQUIDATION_COMPLETED",
+        "LIQUIDATION_FAILED",
+    ],
+)
+def test_risk_events_are_safely_acknowledged_without_order_lookup(event_type):
+    repository = Mock()
+    service = AcceptedOrderEventService(
+        order_repository=repository,
+        active_order_index=Mock(),
+        processed_ttl_seconds=60,
+    )
+    result = service.process(
+        Mock(),
+        {
+            "event_id": "R1",
+            "event_type": event_type,
+            "payload": json.dumps(
+                {
+                    "event_id": "R1",
+                    "event_type": event_type,
+                    "account_id": "A001",
+                }
+            ),
+        },
+    )
+    assert result.action == "IGNORED_TRADE_EVENT"
+    repository.get_by_order_id.assert_not_called()

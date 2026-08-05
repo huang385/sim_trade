@@ -160,6 +160,18 @@ class Settings(BaseSettings):
     valuation_persist_interval_ms: int = 1000
     valuation_persist_batch_size: int = 500
 
+    # 统一账户风险阈值采用进入/恢复分离的迟滞区间，避免边界行情导致状态抖动。
+    risk_warning_ratio: Decimal = Decimal("0.80")
+    risk_liquidation_ratio: Decimal = Decimal("1.00")
+    risk_recovery_ratio: Decimal = Decimal("0.75")
+    risk_monitor_interval_ms: int = 500
+    risk_monitor_batch_size: int = 100
+    risk_max_actions_per_cycle: int = 10
+    risk_liquidation_max_retries: int = 10
+    risk_worker_lease_ttl_seconds: int = 15
+    risk_worker_lease_renew_seconds: int = 5
+    risk_full_reconciliation_interval_seconds: int = 60
+
     # 订单事实事件独立消费组用于提交后立即失效账户和活动持仓缓存。
     pnl_trade_consumer_group: str = "group:pnl-trade-engine"
     pnl_trade_consumer_name: str | None = None

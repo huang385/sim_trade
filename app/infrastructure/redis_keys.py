@@ -62,6 +62,18 @@ WS_GATEWAY_CONSUMER_GROUP = settings.ws_gateway_consumer_group
 WS_GATEWAY_DEAD_LETTER_STREAM = settings.ws_gateway_dead_letter_stream
 WS_GATEWAY_LEASE_KEY = "ws:gateway:lease"
 
+# 实时风险Worker仅把Redis作为可重建触发器。账户事实仍以PostgreSQL为准。
+RISK_DIRTY_ACCOUNTS_KEY = "risk:dirty_accounts"
+RISK_DIRTY_ACCOUNT_VERSIONS_KEY = "risk:dirty_account_versions"
+RISK_DIRTY_SCAN_CURSOR_KEY = "risk:dirty_scan_cursor"
+RISK_WORKER_LEASE_KEY = "risk:worker:lease"
+
+
+def processed_risk_trigger_key(event_id: str) -> str:
+    """同一Outbox事实重复投递时只产生一次风险Dirty版本。"""
+
+    return f"risk:processed_trigger:{event_id}"
+
 
 def websocket_ticket_key(ticket_hash: str) -> str:
     """返回只保存Ticket摘要的短期Redis键。"""

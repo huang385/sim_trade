@@ -25,6 +25,8 @@ from app.infrastructure.redis_keys import (
     PNL_DIRTY_POSITIONS_KEY,
     PNL_DIRTY_POSITION_VERSIONS_KEY,
     PNL_POSITION_REALTIME_VERSIONS_KEY,
+    RISK_DIRTY_ACCOUNTS_KEY,
+    RISK_DIRTY_ACCOUNT_VERSIONS_KEY,
     pnl_account_key,
     pnl_account_positions_key,
     pnl_contract_positions_key,
@@ -44,6 +46,8 @@ from app.models.position_detail import PositionDetail
 from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade_position_allocation import TradePositionAllocation
 from app.models.app_user import AppUser
+from app.models.liquidation_task import LiquidationTask
+from app.models.risk_event import RiskEvent
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -287,6 +291,14 @@ def integration_context():
         db.execute(delete(Trade).where(Trade.account_id == context.account_id))
         db.execute(delete(Order).where(Order.account_id == context.account_id))
         db.execute(
+            delete(RiskEvent).where(RiskEvent.account_id == context.account_id)
+        )
+        db.execute(
+            delete(LiquidationTask).where(
+                LiquidationTask.account_id == context.account_id
+            )
+        )
+        db.execute(
             delete(FeeRule).where(
                 FeeRule.exchange_id == context.exchange_id,
                 FeeRule.symbol == context.symbol,
@@ -333,6 +345,8 @@ def integration_context():
         # Dirty 引用。否则真实 Worker 会把这些孤儿编号永久当作待落库任务。
         pipeline.srem(PNL_DIRTY_ACCOUNTS_KEY, context.account_id)
         pipeline.hdel(PNL_DIRTY_ACCOUNT_VERSIONS_KEY, context.account_id)
+        pipeline.srem(RISK_DIRTY_ACCOUNTS_KEY, context.account_id)
+        pipeline.hdel(RISK_DIRTY_ACCOUNT_VERSIONS_KEY, context.account_id)
         pipeline.srem(PNL_DIRTY_ACCOUNT_FACTS_KEY, context.account_id)
         pipeline.hdel(
             PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,

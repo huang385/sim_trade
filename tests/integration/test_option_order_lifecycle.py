@@ -34,11 +34,16 @@ from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.services.risk_monitor_service import RiskMonitorService
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
 )
-from tests.integration.conftest import make_order_service, make_request
+from tests.integration.conftest import (
+    make_cancellation_service,
+    make_order_service,
+    make_request,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -513,7 +518,16 @@ def test_commodity_option_four_directions_use_real_postgres(
                 market_tick_store=MarketTickStore(redis_client),
             )._recalculate_locked_account(db, account)
             db.commit()
-        assert complete is True
+            assert complete is True
+
+        # PnL持久化只更新完整估值事实，不越权推进风险状态机。真实运行中由
+        # 500ms风险Worker依次确认RECOVERED和NORMAL，这里显式执行两轮复核。
+        risk_monitor = RiskMonitorService(
+            session_factory=SessionLocal,
+            cancellation_service=make_cancellation_service(),
+        )
+        risk_monitor.process_account(integration_context.account_id)
+        risk_monitor.process_account(integration_context.account_id)
 
         with SessionLocal() as db:
             trades = db.scalars(

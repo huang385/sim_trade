@@ -61,11 +61,17 @@ from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
 )
+from app.services.risk_event_service import RiskEventService
+from app.services.risk_monitor_service import RiskMonitorService
 from app.workers.outbox_publisher_worker import OutboxPublisherWorker
 from app.workers.realtime_event_projection_worker import (
     RealtimeEventProjectionWorker,
 )
-from tests.integration.conftest import make_order_service, make_request
+from tests.integration.conftest import (
+    make_cancellation_service,
+    make_order_service,
+    make_request,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -610,6 +616,52 @@ def test_real_order_outbox_projection_reaches_websocket(integration_context):
                 assert account_event["payload"]["cash_balance"] == (
                     account_expected
                 )
+
+                # 风险状态、审计记录和Outbox同事务提交后，继续经过真实Redis
+                # 双Stream投影与Gateway账户授权路由到当前WebSocket连接。
+                with SessionLocal() as db:
+                    risk_account = db.scalar(
+                        select(Account).where(
+                            Account.account_id
+                            == integration_context.account_id
+                        )
+                    )
+                    risk_account.risk_ratio = Decimal("0.85000000")
+                    risk_account.risk_available_cash = Decimal("10000")
+                    risk_equity_expected = format(risk_account.equity, "f")
+                    db.commit()
+                risk_monitor = RiskMonitorService(
+                    session_factory=SessionLocal,
+                    cancellation_service=make_cancellation_service(),
+                    event_service=RiskEventService(
+                        outbox_repository=outbox_repository
+                    ),
+                )
+                assert risk_monitor.process_account(
+                    integration_context.account_id
+                ).state == "WARNING"
+                with SessionLocal() as db:
+                    risk_outbox = db.scalar(
+                        select(OutboxEvent).where(
+                            OutboxEvent.aggregate_type == "RISK",
+                            OutboxEvent.aggregate_id
+                            == integration_context.account_id,
+                            OutboxEvent.event_type == "RISK_WARNING",
+                        )
+                    )
+                assert risk_outbox is not None
+                assert publisher_worker._publish_one(risk_outbox.event_id) == "sent"
+                projected_event_ids.append(risk_outbox.event_id)
+                projected_aggregates.add(
+                    ("RISK", integration_context.account_id)
+                )
+                assert projection_worker.run_once() == 1
+                risk_event = websocket.receive_json()
+                assert risk_event["event_type"] == "RISK_WARNING"
+                assert risk_event["account_id"] == integration_context.account_id
+                assert risk_event["payload"]["risk_state"] == "WARNING"
+                assert risk_event["payload"]["business_version"] == "1"
+                assert risk_event["payload"]["equity"] == risk_equity_expected
 
                 # 写入真实Redis PnL Hash后，把同一绝对快照写入本测试隔离的
                 # 实时Stream，验证Gateway和客户端的PNL_UPDATED应用链路。

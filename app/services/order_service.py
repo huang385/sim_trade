@@ -53,6 +53,8 @@ from app.services.fee_calculator import (
     FeeCalculator,
 )
 from app.services.account_access_scope import AccountAccessScope
+from app.services.account_risk_state_service import AccountRiskStateService
+from app.enums.risk_enums import OrderSource
 from app.services.margin_calculator import MarginCalculator
 from app.services.option_margin_calculator import (
     OptionMarginInput,
@@ -260,6 +262,9 @@ class OrderService:
         request: OrderCreateRequest,
         *,
         access_scope: AccountAccessScope | None = None,
+        order_source: str = OrderSource.USER.value,
+        liquidation_task_id: str | None = None,
+        reduce_only: bool = False,
     ) -> Order:
         """
         创建并接受一笔限价开仓或平仓订单。
@@ -271,6 +276,15 @@ class OrderService:
         scope = access_scope or self.default_access_scope
         if scope is None:
             raise ValueError("创建订单必须显式提供账户授权范围")
+
+        # 强平元数据只允许受信任的内部调用传入，HTTP请求Schema不暴露这些字段。
+        if order_source == OrderSource.LIQUIDATION.value:
+            if not liquidation_task_id or not reduce_only:
+                raise ValueError("强平订单必须携带task_id并设置reduce_only")
+            if request.offset_flag == OffsetFlag.OPEN:
+                raise ValueError("强平订单不得使用OPEN")
+        elif liquidation_task_id is not None or reduce_only:
+            raise ValueError("普通用户订单不得伪造强平元数据")
 
         try:
             # 安全边界优先于规则错误：先以无锁查询确认账户存在和归属，
@@ -620,6 +634,13 @@ class OrderService:
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
             self.freeze_service.validate_account_tradable(account)
+            # OPEN会增加账户风险，必须在账户行锁内、各品种权限检查之前统一拦截。
+            # 这样期货、商品期权和股指期权都会返回同一套风险错误码；平仓订单
+            # 不经过该检查，因此在风险状态下仍可用于降低敞口。
+            if is_open:
+                AccountRiskStateService.ensure_open_allowed(
+                    getattr(account, "risk_state", "NORMAL")
+                )
             self.option_permission_service.validate(
                 account=account,
                 instrument=rules.instrument,
@@ -871,6 +892,9 @@ class OrderService:
                     margin_snapshot_schema_version
                 ),
                 margin_calculation_version=margin_calculation_version,
+                order_source=order_source,
+                liquidation_task_id=liquidation_task_id,
+                reduce_only=reduce_only,
             )
 
             # ORDER_ACCEPTED 事件与订单、账户冻结共用当前 Session。
@@ -909,6 +933,9 @@ class OrderService:
                         frozen_commission
                     ),
                     "frozen_position_volume": frozen_position_volume,
+                    "order_source": order_source,
+                    "liquidation_task_id": liquidation_task_id,
+                    "reduce_only": reduce_only,
                     "accepted_at": accepted_at.isoformat(),
                 },
                 created_at=accepted_at,

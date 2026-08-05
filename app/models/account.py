@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     Numeric,
     String,
 )
@@ -220,6 +221,15 @@ class Account(Base):
         String(32),
         nullable=False,
         default="NORMAL",
+    )
+
+    # 风险状态的账户内单调业务版本。每次状态转换在账户行锁内递增，
+    # WebSocket客户端据此拒绝迟到的旧风险事件。
+    risk_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
 
     # 当前交易日平仓成交相对 pnl_base_price 的累计盈亏

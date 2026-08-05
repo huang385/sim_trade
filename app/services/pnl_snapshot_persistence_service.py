@@ -11,6 +11,7 @@ from app.enums.option_enums import InstrumentType, MarginPriceMode, OptionType
 from app.enums.order_enums import PositionDirection
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
+from app.infrastructure.risk_store import RiskStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.order_repository import OrderRepository
@@ -81,10 +82,12 @@ class PnlSnapshotPersistenceService:
         order_repository: OrderRepository | None = None,
         calculator: PnlCalculator | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
+        risk_store: RiskStore | None = None,
     ):
         self.session_factory = session_factory
         self.pnl_store = pnl_store
         self.market_tick_store = market_tick_store
+        self.risk_store = risk_store
         self.account_repository = account_repository or AccountRepository()
         self.position_repository = position_repository or PositionRepository()
         self.instrument_repository = (
@@ -546,13 +549,23 @@ class PnlSnapshotPersistenceService:
         account.available_cash = valuation.available_cash
         account.risk_available_cash = valuation.risk_available_cash
         account.net_option_market_value = valuation.net_option_market_value
-        account.risk_state = AccountRiskStateService.resolve_full_evaluation(
+        evaluated_risk_state = AccountRiskStateService.resolve_full_evaluation(
             valuation_unavailable=order_valuation_unavailable,
             margin_deficit=(
                 order_margin_deficit
                 or valuation.risk_available_cash < Decimal("0")
             ),
         )
+        # PnL持久化只负责报告估值是否完整及是否出现资金缺口。WARNING、强平中
+        # 和恢复过渡状态由独立风险Worker在账户行锁内推进，不能被一次行情落库
+        # 直接覆盖。VALUATION_UNAVAILABLE在完整估值恢复后先回到NORMAL，随后
+        # 风险Worker按最新指标重新决定NORMAL/WARNING/MARGIN_DEFICIT。
+        if evaluated_risk_state == AccountRiskState.VALUATION_UNAVAILABLE.value:
+            account.risk_state = evaluated_risk_state
+        elif account.risk_state == AccountRiskState.VALUATION_UNAVAILABLE.value:
+            account.risk_state = evaluated_risk_state
+        elif account.risk_state == AccountRiskState.NORMAL.value:
+            account.risk_state = evaluated_risk_state
         account.risk_ratio = self._risk(
             valuation.effective_required_margin,
             valuation.equity,
@@ -566,6 +579,26 @@ class PnlSnapshotPersistenceService:
         # 活动订单估值不可用时保留Account Dirty，等待行情/规则恢复后重试；
         # 保证金不足是已完成的可靠估值结果，可清除本版本Dirty。
         return not order_valuation_unavailable
+
+    def recalculate_account(self, account_id: str) -> bool:
+        """立即重算一个账户的完整PostgreSQL估值，供撤单后风险复核复用。"""
+
+        with self.session_factory() as db:
+            try:
+                account = self.account_repository.get_by_account_id_for_update(
+                    db, account_id
+                )
+                if account is None:
+                    db.rollback()
+                    return False
+                complete = self._recalculate_locked_account(db, account)
+                db.commit()
+                if self.risk_store is not None:
+                    self.risk_store.mark_dirty(account_id)
+                return complete
+            except Exception:
+                db.rollback()
+                raise
 
     def persist_batch(self, batch_size: int) -> PnlPersistenceResult:
         dirty_positions = self.pnl_store.list_dirty_positions(batch_size)
@@ -627,6 +660,10 @@ class PnlSnapshotPersistenceService:
                     complete = self._recalculate_locked_account(db, account)
                     db.commit()
                     accounts_persisted += 1
+                    # PostgreSQL估值事实提交后再触发风险复核。若Redis暂时失败，当前
+                    # PnL Dirty不会被清除，后续重试可恢复通知，避免已落库但漏监控。
+                    if self.risk_store is not None:
+                        self.risk_store.mark_dirty(account_id)
                     if not complete:
                         continue
                     successful_positions.extend(

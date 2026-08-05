@@ -188,6 +188,34 @@ def test_create_open_order_success(direction, expected_margin):
     db.refresh.assert_called_once_with(created_order)
 
 
+@pytest.mark.parametrize(
+    "risk_state",
+    ["MARGIN_DEFICIT", "LIQUIDATION_PENDING", "LIQUIDATING", "VALUATION_UNAVAILABLE"],
+)
+def test_all_open_products_use_unified_account_risk_block(risk_state):
+    db = Mock()
+    order_repository = Mock()
+    account_repository = Mock()
+    rule_query_service = Mock()
+    account = make_account(risk_state=risk_state)
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    account_repository.get_by_account_id.return_value = account
+    account_repository.get_by_account_id_for_update.return_value = account
+    rule_query_service.get_order_rules.return_value = make_rules()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+    )
+
+    with pytest.raises(BusinessRuleError) as exc_info:
+        service.create_order(db=db, request=make_request())
+
+    assert exc_info.value.error_code == "ACCOUNT_RISK_OPEN_BLOCKED"
+    order_repository.create.assert_not_called()
+    db.rollback.assert_called_once()
+
+
 def test_duplicate_client_order_id_returns_existing_without_freeze():
     db = Mock()
     existing = make_existing_order()

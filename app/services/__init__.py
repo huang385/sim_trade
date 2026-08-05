@@ -92,6 +92,9 @@ from app.services.option_market_pre_subscription_service import (
     OptionMarketPreSubscriptionService,
     get_option_market_pre_subscription_service,
 )
+from app.services.liquidation_service import LiquidationService
+from app.services.risk_event_service import RiskEventService
+from app.services.risk_monitor_service import RiskMonitorService
 
 
 __all__ = [
@@ -152,4 +155,7 @@ __all__ = [
     "OptionTradingPermissionService",
     "OptionMarketPreSubscriptionService",
     "get_option_market_pre_subscription_service",
+    "LiquidationService",
+    "RiskEventService",
+    "RiskMonitorService",
 ]

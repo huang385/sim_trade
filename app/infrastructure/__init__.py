@@ -9,6 +9,7 @@ from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,
 )
+from app.infrastructure.risk_store import RiskStore
 
 __all__ = [
     "ORDER_EVENT_STREAM",
@@ -18,4 +19,5 @@ __all__ = [
     "MarketTickStreamConsumer",
     "RealtimePnlStore",
     "MarketPreSubscriptionStore",
+    "RiskStore",
 ]

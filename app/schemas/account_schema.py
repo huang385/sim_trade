@@ -61,6 +61,7 @@ class AccountResponse(BaseModel):
     net_option_market_value: Decimal = Decimal("0")
     risk_available_cash: Decimal = Decimal("0")
     risk_state: str = "NORMAL"
+    risk_version: int = 0
 
     realized_pnl: Decimal
     unrealized_pnl: Decimal

@@ -7,6 +7,7 @@ from app.common.exceptions import ResourceNotFoundError
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.position_repository import PositionRepository
+from app.repositories.risk_repository import RiskRepository
 from app.schemas.account_schema import AccountResponse
 from app.schemas.pnl_schema import (
     AccountRealtimePnlResponse,
@@ -40,6 +41,7 @@ class RealtimePnlQueryService:
         pnl_store: RealtimePnlStore,
         account_repository: AccountRepository | None = None,
         position_repository: PositionRepository | None = None,
+        risk_repository: RiskRepository | None = None,
     ):
         self.pnl_store = pnl_store
         self.account_repository = (
@@ -48,6 +50,7 @@ class RealtimePnlQueryService:
         self.position_repository = (
             position_repository or PositionRepository()
         )
+        self.risk_repository = risk_repository or RiskRepository()
 
     @staticmethod
     def _account_pnl_response(
@@ -74,6 +77,10 @@ class RealtimePnlQueryService:
                 equity=_decimal(values, "equity"),
                 available_cash=_decimal(values, "available_cash"),
                 risk_ratio=_decimal(values, "risk_ratio"),
+                risk_available_cash=Decimal(
+                    values.get("risk_available_cash", values["available_cash"])
+                ),
+                risk_state=values.get("risk_state", "NORMAL"),
                 updated_at=values["updated_at"],
                 data_source=values.get("data_source", "REDIS_REALTIME"),
             )
@@ -87,6 +94,10 @@ class RealtimePnlQueryService:
             equity=account.equity,
             available_cash=account.available_cash,
             risk_ratio=account.risk_ratio,
+            risk_available_cash=getattr(
+                account, "risk_available_cash", account.available_cash
+            ),
+            risk_state=getattr(account, "risk_state", "NORMAL"),
             updated_at=account.updated_at,
             data_source="POSTGRES_SNAPSHOT",
         )
@@ -238,6 +249,11 @@ class RealtimePnlQueryService:
                 normalized,
             )
         )
+        tasks = (
+            self.risk_repository.list_tasks_by_account(db, normalized, limit=1)
+            if hasattr(db, "scalars")
+            else []
+        )
         try:
             account_values, position_values = (
                 self.pnl_store.get_account_with_positions(
@@ -271,4 +287,15 @@ class RealtimePnlQueryService:
                 )
                 for position in positions
             ],
+            latest_liquidation_task=(
+                {
+                    "task_id": tasks[0].task_id,
+                    "status": tasks[0].status,
+                    "version": tasks[0].version,
+                    "last_error": tasks[0].last_error,
+                    "last_order_id": tasks[0].last_order_id,
+                }
+                if tasks
+                else None
+            ),
         )

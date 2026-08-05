@@ -24,6 +24,8 @@ const state = {
     pnl: null,
     orders: [],
     trades: [],
+    riskBusinessVersion: "0",
+    liquidationTask: null,
     websocketSubscribedAccounts: new Set(),
 };
 
@@ -73,6 +75,9 @@ const elements = {
     detailUsedCommission: document.querySelector("#detail-used-commission"),
     detailFrozenCommission: document.querySelector("#detail-frozen-commission"),
     detailAccountType: document.querySelector("#detail-account-type"),
+    detailRiskAvailable: document.querySelector("#detail-risk-available"),
+    detailRiskState: document.querySelector("#detail-risk-state"),
+    detailLiquidationTask: document.querySelector("#detail-liquidation-task"),
     orderForm: document.querySelector("#order-form"),
     submitOrder: document.querySelector("#submit-order"),
     exchangeId: document.querySelector("#exchange-id"),
@@ -495,6 +500,48 @@ function applyRealtimeEvent(event) {
         renderAccount(state.account, state.pnl);
         return;
     }
+    const postgresRiskEvents = new Set([
+        "RISK_WARNING",
+        "RISK_STATE_CHANGED",
+        "LIQUIDATION_STARTED",
+        "LIQUIDATION_ORDER_UPDATED",
+        "LIQUIDATION_COMPLETED",
+        "LIQUIDATION_FAILED",
+    ]);
+    if (postgresRiskEvents.has(event.event_type)
+        && event.payload?.risk_version !== undefined
+        && state.account && state.pnl) {
+        const values = event.payload;
+        if (compareIntegerVersion(
+            values.risk_version,
+            state.riskBusinessVersion,
+        ) < 0) return;
+        state.riskBusinessVersion = String(values.risk_version);
+        state.account = {
+            ...state.account,
+            risk_state: values.risk_state,
+            risk_version: values.risk_version,
+        };
+        state.pnl = {
+            ...state.pnl,
+            risk_state: values.risk_state,
+            risk_ratio: values.risk_ratio,
+            risk_available_cash: values.risk_available_cash,
+        };
+        if (values.task_id) {
+            state.liquidationTask = {
+                task_id: values.task_id,
+                status: event.event_type,
+                order_id: values.order_id || null,
+            };
+        }
+        renderAccount(state.account, state.pnl);
+        showToast(
+            `风险通知：${values.risk_state}（${values.trigger_reason}）`,
+            event.event_type === "RISK_WARNING" ? "warning" : "error",
+        );
+        return;
+    }
     if (event.event_type === "RISK_STATE_CHANGED" && state.account && state.pnl) {
         const values = event.payload || {};
         const version = values.realtime_snapshot_version;
@@ -680,6 +727,15 @@ function renderAccount(account, pnl) {
         formatMoney(account.frozen_commission);
     elements.detailAccountType.textContent =
         `${account.account_type} / ${account.status}`;
+    elements.detailRiskAvailable.textContent = formatMoney(
+        pnl.risk_available_cash,
+    );
+    elements.detailRiskState.textContent =
+        `${pnl.risk_state || account.risk_state || "NORMAL"}`
+        + ` / v${account.risk_version || state.riskBusinessVersion || "0"}`;
+    elements.detailLiquidationTask.textContent = state.liquidationTask
+        ? `${state.liquidationTask.task_id.slice(-12)} · ${state.liquidationTask.status}`
+        : "无活动任务";
 }
 
 function renderPositions(positions) {
@@ -897,6 +953,8 @@ async function refreshRealtime() {
         state.positions = positionPnl;
         state.account = snapshot.account;
         state.pnl = snapshot.pnl;
+        state.liquidationTask = snapshot.latest_liquidation_task || null;
+        state.riskBusinessVersion = String(snapshot.account.risk_version || "0");
         renderAccount(snapshot.account, snapshot.pnl);
         renderPositions(positionPnl);
         setConnection(true, "后端与实时快照已连接");

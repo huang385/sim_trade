@@ -82,6 +82,12 @@ class AcceptedOrderEventService:
         "POSITION_UPDATED",
         "POSITION_CLOSED",
         "ACCOUNT_FACT_UPDATED",
+        "RISK_WARNING",
+        "RISK_STATE_CHANGED",
+        "LIQUIDATION_STARTED",
+        "LIQUIDATION_ORDER_UPDATED",
+        "LIQUIDATION_COMPLETED",
+        "LIQUIDATION_FAILED",
         # 兼容升级前已存在的账户事实消息。
         "ACCOUNT_UPDATED",
     }
@@ -133,12 +139,7 @@ class AcceptedOrderEventService:
 
         required_fields = (
             ("account_id",)
-            if event_type in {
-                "POSITION_UPDATED",
-                "POSITION_CLOSED",
-                "ACCOUNT_FACT_UPDATED",
-                "ACCOUNT_UPDATED",
-            }
+            if event_type in AcceptedOrderEventService.PASSTHROUGH_EVENT_TYPES
             else ("order_id", "account_id", "exchange_id", "symbol")
         )
         missing = [

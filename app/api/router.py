@@ -12,6 +12,7 @@ from app.api.auth_api import router as auth_router
 from app.api.admin_user_api import router as admin_user_router
 from app.api.websocket_ticket_api import router as websocket_ticket_router
 from app.api.market_data_api import router as market_data_router
+from app.api.risk_api import router as risk_router
 
 
 api_router = APIRouter()
@@ -44,3 +45,4 @@ api_router.include_router(position_router)
 
 # 账户和持仓实时盈亏只读接口
 api_router.include_router(pnl_router)
+api_router.include_router(risk_router)

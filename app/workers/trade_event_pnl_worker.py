@@ -9,6 +9,7 @@ from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
+from app.infrastructure.risk_store import RiskStore
 from app.infrastructure.redis_keys import pnl_trade_event_failure_key
 from app.services.trade_created_pnl_service import (
     TradeCreatedPnlService,
@@ -123,6 +124,7 @@ def build_worker() -> TradeEventPnlWorker:
     store = RealtimePnlStore(redis_client)
     service = TradeCreatedPnlService(
         pnl_store=store,
+        risk_store=RiskStore(redis_client),
         processed_ttl_seconds=settings.pnl_trade_failure_ttl_seconds,
     )
     consumer = OrderStreamConsumer(

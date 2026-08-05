@@ -4,6 +4,7 @@ from typing import Mapping
 
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.services.active_position_cache import ActivePositionCache
+from app.infrastructure.risk_store import RiskStore
 
 
 class TradeCreatedPnlValidationError(ValueError):
@@ -46,11 +47,13 @@ class TradeCreatedPnlService:
         pnl_store: RealtimePnlStore,
         cache: ActivePositionCache | None = None,
         processed_ttl_seconds: int = 604800,
+        risk_store: RiskStore | None = None,
         **_legacy_dependencies,
     ):
         self.cache = cache
         self.pnl_store = pnl_store
         self.processed_ttl_seconds = processed_ttl_seconds
+        self.risk_store = risk_store
 
     @classmethod
     def _parse(
@@ -141,6 +144,13 @@ class TradeCreatedPnlService:
             dirty_kind = "ACCOUNT_FACT"
         if version is None:
             return TradeCreatedPnlResult(action="DUPLICATE")
+        if self.risk_store is not None:
+            # 与PnL使用不同幂等键域；任一步Redis失败都会让Stream消息保留Pending重试。
+            self.risk_store.mark_dirty_once(
+                account_id=account_id,
+                event_id=event_id,
+                ttl_seconds=self.processed_ttl_seconds,
+            )
         # 仅让同进程测试或未来合并部署立即失效；跨进程可靠通知依赖Redis版本。
         if self.cache is not None:
             if dirty_kind == "CONTRACT_STRUCTURE":

@@ -60,6 +60,21 @@ class PositionRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_liquidation_candidates(db: Session, account_id: str):
+        """一次查询返回强平选择所需的活动持仓和合约事实。"""
+
+        return db.execute(
+            select(Position, Instrument)
+            .join(Instrument, Instrument.order_book_id == Position.order_book_id)
+            .where(
+                Position.account_id == account_id,
+                Position.total_volume > 0,
+                Position.available_volume > 0,
+            )
+            .order_by(Position.id)
+        ).all()
+
+    @staticmethod
     def list_active_by_account_for_update(
         db: Session,
         account_id: str,

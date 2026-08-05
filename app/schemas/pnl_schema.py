@@ -85,6 +85,8 @@ class AccountRealtimePnlResponse(BaseModel):
     equity: Decimal
     available_cash: Decimal
     risk_ratio: Decimal
+    risk_available_cash: Decimal = Decimal("0")
+    risk_state: str = "NORMAL"
     updated_at: datetime
     data_source: str
 
@@ -107,3 +109,4 @@ class AccountTradingSnapshotResponse(BaseModel):
     account: AccountResponse
     pnl: AccountRealtimePnlResponse
     positions: list[PositionTradingSnapshotResponse]
+    latest_liquidation_task: dict | None = None

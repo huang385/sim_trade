@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -311,6 +312,19 @@ class Order(Base):
         nullable=False,
         default="NORMAL",
         server_default="NORMAL",
+    )
+
+    # USER表示普通用户委托；LIQUIDATION表示由风险Worker生成的强平委托。
+    order_source: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="USER", server_default="USER"
+    )
+    liquidation_task_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    # reduce_only是数据库事实约束标记，结算时仍需重新锁定持仓并校验，
+    # 不能仅凭创建订单时的持仓快照防止反向开仓。
+    reduce_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
 
     # 拒绝原因代码；ACCEPTED订单为空

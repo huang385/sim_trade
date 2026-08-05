@@ -19,6 +19,12 @@ SOURCE_EVENT_MAPPING = {
     "ACCOUNT_FACT_UPDATED": RealtimeEventType.ACCOUNT_FACT_UPDATED,
     # 兼容升级前数据库中尚未发布的旧账户事实Outbox。
     "ACCOUNT_UPDATED": RealtimeEventType.ACCOUNT_FACT_UPDATED,
+    "RISK_WARNING": RealtimeEventType.RISK_WARNING,
+    "RISK_STATE_CHANGED": RealtimeEventType.RISK_STATE_CHANGED,
+    "LIQUIDATION_STARTED": RealtimeEventType.LIQUIDATION_STARTED,
+    "LIQUIDATION_ORDER_UPDATED": RealtimeEventType.LIQUIDATION_ORDER_UPDATED,
+    "LIQUIDATION_COMPLETED": RealtimeEventType.LIQUIDATION_COMPLETED,
+    "LIQUIDATION_FAILED": RealtimeEventType.LIQUIDATION_FAILED,
 }
 
 
@@ -45,6 +51,10 @@ class RealtimeEventProjectionService:
         aggregate_type = str(fields.get("aggregate_type") or "").strip().upper()
         aggregate_id = str(fields.get("aggregate_id") or "").strip()
         business_version = str(fields.get("business_version") or "").strip()
+        if aggregate_type == "RISK":
+            # 风险聚合使用Account.risk_version，而不是Outbox全局主键；同一账户
+            # 的状态版本连续单调，客户端和Redis投影可可靠拒绝迟到旧事件。
+            business_version = str(payload.get("risk_version") or "").strip()
         account_id = str(payload.get("account_id") or "").strip()
         if not event_id or not account_id:
             raise ValueError("订单事件缺少event_id或account_id")
@@ -59,6 +69,8 @@ class RealtimeEventProjectionService:
             entity_id = str(payload.get("position_id") or "").strip()
         elif source_type in {"ACCOUNT_FACT_UPDATED", "ACCOUNT_UPDATED"}:
             entity_id = account_id
+        elif aggregate_type == "RISK":
+            entity_id = str(payload.get("task_id") or account_id).strip()
         else:
             entity_id = str(payload.get("order_id") or "").strip()
         # 客户端收到的绝对事实中直接携带业务版本，便于独立于传输游标

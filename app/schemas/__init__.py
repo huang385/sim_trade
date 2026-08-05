@@ -61,6 +61,11 @@ from app.schemas.user_schema import (
     UserStatusUpdateRequest,
     UserSummary,
 )
+from app.schemas.risk_schema import (
+    LiquidationTaskResponse,
+    RiskEventResponse,
+    RiskSnapshotResponse,
+)
 
 
 __all__ = [
@@ -102,4 +107,7 @@ __all__ = [
     "UserResponse",
     "UserStatusUpdateRequest",
     "UserSummary",
+    "LiquidationTaskResponse",
+    "RiskEventResponse",
+    "RiskSnapshotResponse",
 ]

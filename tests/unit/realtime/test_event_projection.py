@@ -121,3 +121,29 @@ def test_stale_business_version_is_not_published_again():
     )
 
     assert store.publish_projected_once(event) is None
+def test_risk_projection_uses_account_risk_version_not_outbox_id():
+    payload = {
+        "event_id": "RISK-1",
+        "event_type": "RISK_STATE_CHANGED",
+        "account_id": "A001",
+        "risk_state": "MARGIN_DEFICIT",
+        "risk_ratio": "1.10000000",
+        "risk_available_cash": "-10.000000",
+        "risk_version": 7,
+        "trigger_reason": "RISK_LIMIT_EXCEEDED",
+        "occurred_at": "2026-08-05T10:00:00+08:00",
+    }
+    event = RealtimeEventProjectionService.project(
+        source_message_id="100-0",
+        fields={
+            "event_id": "RISK-1",
+            "event_type": "RISK_STATE_CHANGED",
+            "aggregate_type": "RISK",
+            "aggregate_id": "A001",
+            "business_version": "999",
+            "payload": json.dumps(payload),
+        },
+    )
+    assert event.business_version == "7"
+    assert event.account_id == "A001"
+    assert event.payload["risk_available_cash"] == "-10.000000"

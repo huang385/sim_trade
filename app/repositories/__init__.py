@@ -11,6 +11,7 @@ from app.repositories.margin_rule_repository import MarginRuleRepository
 from app.repositories.fee_rule_repository import FeeRuleRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
+from app.repositories.risk_repository import RiskRepository
 from app.repositories.trade_repository import TradeRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.position_freeze_allocation_repository import (
@@ -35,6 +36,7 @@ __all__ = [
     "FeeRuleRepository",
     "OrderRepository",
     "OutboxRepository",
+    "RiskRepository",
     "TradeRepository",
     "PositionRepository",
     "PositionFreezeAllocationRepository",

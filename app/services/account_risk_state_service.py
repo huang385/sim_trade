@@ -1,20 +1,106 @@
+from dataclasses import dataclass
+from decimal import Decimal
+
 from app.enums.account_enums import AccountRiskState
 
 
+@dataclass(frozen=True)
+class RiskDecision:
+    """纯Decimal风险判断结果，不依赖数据库、Redis或HTTP。"""
+
+    state: str
+    reason: str
+
+
 class AccountRiskStateService:
-    """统一账户风险状态优先级以及局部流程的写入边界。"""
+    """统一账户风险状态机和阈值迟滞规则。"""
+
+    OPEN_BLOCKED_STATES = frozenset(
+        {
+            AccountRiskState.MARGIN_DEFICIT.value,
+            AccountRiskState.LIQUIDATION_PENDING.value,
+            AccountRiskState.LIQUIDATING.value,
+            AccountRiskState.VALUATION_UNAVAILABLE.value,
+        }
+    )
+
+    @staticmethod
+    def validate_thresholds(
+        *, warning_ratio: Decimal, liquidation_ratio: Decimal, recovery_ratio: Decimal
+    ) -> None:
+        if any(
+            not isinstance(value, Decimal)
+            for value in (warning_ratio, liquidation_ratio, recovery_ratio)
+        ):
+            raise TypeError("风险阈值必须使用Decimal")
+        if not Decimal("0") <= recovery_ratio < warning_ratio < liquidation_ratio:
+            raise ValueError("风险阈值必须满足0 <= recovery < warning < liquidation")
+
+    @classmethod
+    def evaluate(
+        cls,
+        *,
+        current_state: str,
+        valuation_available: bool,
+        equity: Decimal,
+        risk_available_cash: Decimal,
+        risk_ratio: Decimal,
+        warning_ratio: Decimal,
+        liquidation_ratio: Decimal,
+        recovery_ratio: Decimal,
+    ) -> RiskDecision:
+        """按可靠估值、资金缺口和迟滞阈值计算下一风险状态。"""
+
+        cls.validate_thresholds(
+            warning_ratio=warning_ratio,
+            liquidation_ratio=liquidation_ratio,
+            recovery_ratio=recovery_ratio,
+        )
+        values = (equity, risk_available_cash, risk_ratio)
+        if any(not isinstance(value, Decimal) for value in values):
+            raise TypeError("风险指标必须使用Decimal")
+        if not valuation_available:
+            return RiskDecision(
+                AccountRiskState.VALUATION_UNAVAILABLE.value,
+                "VALUATION_UNAVAILABLE",
+            )
+        if (
+            equity <= Decimal("0")
+            or risk_available_cash < Decimal("0")
+            or risk_ratio >= liquidation_ratio
+        ):
+            if current_state in {
+                AccountRiskState.LIQUIDATION_PENDING.value,
+                AccountRiskState.LIQUIDATING.value,
+            }:
+                return RiskDecision(current_state, "RISK_LIMIT_STILL_EXCEEDED")
+            return RiskDecision(
+                AccountRiskState.MARGIN_DEFICIT.value,
+                "EQUITY_NON_POSITIVE"
+                if equity <= Decimal("0")
+                else "RISK_LIMIT_EXCEEDED",
+            )
+        # WARNING及强平状态只有降至更低的恢复阈值才解除，形成迟滞区间。
+        was_abnormal = current_state != AccountRiskState.NORMAL.value
+        if risk_ratio >= warning_ratio or (was_abnormal and risk_ratio > recovery_ratio):
+            return RiskDecision(AccountRiskState.WARNING.value, "RISK_WARNING_RATIO")
+        if current_state in {
+            AccountRiskState.WARNING.value,
+            AccountRiskState.MARGIN_DEFICIT.value,
+            AccountRiskState.LIQUIDATION_PENDING.value,
+            AccountRiskState.LIQUIDATING.value,
+            AccountRiskState.VALUATION_UNAVAILABLE.value,
+        }:
+            return RiskDecision(AccountRiskState.RECOVERED.value, "RISK_RECOVERED")
+        if current_state == AccountRiskState.RECOVERED.value:
+            return RiskDecision(AccountRiskState.NORMAL.value, "RECOVERY_CONFIRMED")
+        return RiskDecision(AccountRiskState.NORMAL.value, "RISK_NORMAL")
 
     @staticmethod
     def resolve_full_evaluation(
-        *,
-        valuation_unavailable: bool,
-        margin_deficit: bool,
+        *, valuation_unavailable: bool, margin_deficit: bool
     ) -> str:
-        """
-        只供账户级完整估值使用，可安全恢复 NORMAL。
-
-        状态优先级固定为：估值不可用 > 保证金不足 > 正常。
-        """
+        """兼容估值链路：局部估值只提升严重状态，不负责预警和强平编排。"""
 
         if valuation_unavailable:
             return AccountRiskState.VALUATION_UNAVAILABLE.value
@@ -29,21 +115,26 @@ class AccountRiskStateService:
         valuation_unavailable: bool = False,
         margin_deficit: bool = False,
     ) -> str:
-        """
-        局部持仓、订单或成交事务只能提高或保持风险，不能恢复 NORMAL。
+        """局部更新不能把尚未完整复核的风险状态错误恢复为NORMAL。"""
 
-        风险来源真正解除后，由完整账户估值锁定并核对全部持仓、明细、
-        行情、规则和活动订单，再调用 ``resolve_full_evaluation`` 恢复。
-        """
+        if valuation_unavailable or current_state == AccountRiskState.VALUATION_UNAVAILABLE.value:
+            return AccountRiskState.VALUATION_UNAVAILABLE.value
+        if margin_deficit or current_state in {
+            AccountRiskState.MARGIN_DEFICIT.value,
+            AccountRiskState.LIQUIDATION_PENDING.value,
+            AccountRiskState.LIQUIDATING.value,
+        }:
+            return current_state if current_state != AccountRiskState.NORMAL.value else AccountRiskState.MARGIN_DEFICIT.value
+        return current_state
 
-        return AccountRiskStateService.resolve_full_evaluation(
-            valuation_unavailable=(
-                valuation_unavailable
-                or current_state
-                == AccountRiskState.VALUATION_UNAVAILABLE.value
-            ),
-            margin_deficit=(
-                margin_deficit
-                or current_state == AccountRiskState.MARGIN_DEFICIT.value
-            ),
-        )
+    @classmethod
+    def ensure_open_allowed(cls, risk_state: str) -> None:
+        """所有产品的OPEN订单共用同一风险拦截边界。"""
+
+        if risk_state in cls.OPEN_BLOCKED_STATES:
+            from app.common.exceptions import BusinessRuleError
+
+            raise BusinessRuleError(
+                "账户当前风险状态禁止增加风险",
+                error_code="ACCOUNT_RISK_OPEN_BLOCKED",
+            )

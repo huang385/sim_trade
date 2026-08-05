@@ -10,6 +10,7 @@ from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
+from app.infrastructure.risk_store import RiskStore
 from app.services.pnl_snapshot_persistence_service import (
     PnlPersistenceResult,
     PnlSnapshotPersistenceService,
@@ -143,6 +144,7 @@ def build_worker() -> PnlSnapshotPersistenceWorker:
             redis_client,
             stream_name=settings.market_tick_stream_name,
         ),
+        risk_store=RiskStore(redis_client),
     )
     return PnlSnapshotPersistenceWorker(
         service=service,
