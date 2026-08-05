@@ -171,12 +171,14 @@ def build_service(*, account=None, position=None, details=None, latest=None):
         ("SHFE", "AGOPT"): market_values("AGOPT", "100"),
         ("SHFE", "AG"): market_values("AG", "100"),
     }
+    fact_events = Mock()
     return (
         OptionMarginAdjustmentService(
             market_tick_store=market_store,
             account_repository=account_repository,
             position_repository=position_repository,
             instrument_repository=instrument_repository,
+            realtime_fact_events=fact_events,
         ),
         account,
         position,
@@ -204,6 +206,8 @@ def test_adjust_recalculates_risk_instead_of_using_stale_risk_cash():
     ]
     db.commit.assert_called_once_with()
     db.rollback.assert_not_called()
+    service.realtime_fact_events.create_account_updated.assert_called_once()
+    service.realtime_fact_events.create_position_updated.assert_called_once()
 
 
 def test_index_option_short_margin_uses_cffex_formula_and_releases_downward():
@@ -352,6 +356,8 @@ def test_adjust_releases_margin_immediately_when_requirement_decreases():
     ]
     db.commit.assert_called_once_with()
     db.rollback.assert_not_called()
+    service.realtime_fact_events.create_account_updated.assert_called_once()
+    service.realtime_fact_events.create_position_updated.assert_called_once()
 
 
 def test_adjust_has_no_release_threshold_even_for_smallest_money_delta():
@@ -453,6 +459,57 @@ def test_adjust_deficit_updates_risk_snapshot_without_booking_margin():
         Decimal("1050.000000"),
     ]
     db.commit.assert_called_once_with()
+    service.realtime_fact_events.create_account_updated.assert_not_called()
+    service.realtime_fact_events.create_position_updated.assert_called_once()
+
+
+def test_outbox_failure_rolls_back_margin_adjustment_transaction():
+    service, _account, _position, _details = build_service()
+    service.realtime_fact_events.create_account_updated.side_effect = (
+        RuntimeError("outbox unavailable")
+    )
+    db = Mock()
+
+    with pytest.raises(RuntimeError, match="outbox unavailable"):
+        service.adjust(db, account_id="A1", position_id="P1")
+
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once_with()
+    service.realtime_fact_events.create_position_updated.assert_not_called()
+
+
+def test_replayed_same_margin_does_not_create_duplicate_fact_events():
+    account = make_account(
+        used_margin=Decimal("2100"),
+        option_used_margin=Decimal("2100"),
+        option_realtime_required_margin=Decimal("2100"),
+    )
+    position = make_position(
+        used_margin=Decimal("2100"),
+        realtime_required_margin=Decimal("2100"),
+    )
+    details = [
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1050"),
+            realtime_required_margin=Decimal("1050"),
+        ),
+        SimpleNamespace(
+            remaining_volume=1,
+            remaining_margin=Decimal("1050"),
+            realtime_required_margin=Decimal("1050"),
+        ),
+    ]
+    service, _account, _position, _details = build_service(
+        account=account,
+        position=position,
+        details=details,
+    )
+
+    service.adjust(Mock(), account_id="A1", position_id="P1")
+
+    service.realtime_fact_events.create_account_updated.assert_not_called()
+    service.realtime_fact_events.create_position_updated.assert_not_called()
 
 
 def test_adjust_rejects_inconsistent_position_details_and_rolls_back():

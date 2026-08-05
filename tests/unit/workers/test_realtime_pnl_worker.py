@@ -556,7 +556,7 @@ def test_account_fact_redis_write_failure_does_not_clear_dirty():
     assert worker._lease_acquired is False
 
 
-def test_option_margin_adjustment_marks_account_fact_dirty_before_ack():
+def test_option_margin_adjustment_relies_on_transactional_outbox_before_ack():
     store = FakePnlStore()
 
     class MarginService(FakeService):
@@ -597,20 +597,10 @@ def test_option_margin_adjustment_marks_account_fact_dirty_before_ack():
     worker.run_once(force_flush=True)
 
     assert adjustment.calls == [("DB", "A001", "P001")]
-    assert store.account_fact_marks == [
-        (
-            "OPTION_MARGIN_ADJUSTED:JD2609-1:P001",
-            "A001",
-            604800,
-        )
-    ]
-    assert service.active_position_cache.invalidations == [
-        {
-            "account_id": "A001",
-            "exchange_id": "DCE",
-            "symbol": "JD2609",
-        }
-    ]
+    # 调整Service已经在PostgreSQL事务内创建事实Outbox；Worker不能再
+    # 生成第二个Redis Dirty版本，否则同一事实会被重复推进。
+    assert store.account_fact_marks == []
+    assert service.active_position_cache.invalidations == []
     assert consumer.acked_batches == [["1-0"]]
 
 
@@ -632,6 +622,8 @@ def test_underlying_tick_revalues_all_orders_even_if_one_order_fails():
                 order_id=order_id,
                 action="ADDED",
                 required_margin="1200.000000",
+                margin_risk_state="NORMAL",
+                frozen_margin="1200.000000",
             )
 
     class ActiveOrderIndex:
@@ -642,6 +634,10 @@ def test_underlying_tick_revalues_all_orders_even_if_one_order_fails():
         @staticmethod
         def list_underlying_sell_open_order_ids(*_key):
             return {"B-GOOD"}
+
+        @staticmethod
+        def update_margin_risk_snapshot(**_kwargs):
+            return None
 
     class SessionContext:
         def __enter__(self):
@@ -665,13 +661,7 @@ def test_underlying_tick_revalues_all_orders_even_if_one_order_fails():
         ("DB", "A-BAD"),
         ("DB", "B-GOOD"),
     ]
-    assert store.account_fact_marks == [
-        (
-            "OPTION_ORDER_MARGIN:B-GOOD:ADDED:1200.000000",
-            "A001",
-            604800,
-        )
-    ]
+    assert store.account_fact_marks == []
     assert consumer.acked_batches == []
     assert ("DCE", "JD2609") in worker._buffer
 

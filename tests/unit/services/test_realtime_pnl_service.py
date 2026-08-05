@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 import json
 
@@ -211,6 +212,40 @@ def test_tick_writes_absolute_position_and_account_snapshots():
         "daily_position_pnl"
     ] == "400.000000"
     assert store.accounts["A001"]["daily_pnl"] == "544.000000"
+
+
+def test_futures_position_is_not_scheduled_for_option_margin_adjustment():
+    cache = FakeCache()
+    futures_position = replace(
+        cache.position,
+        persisted_used_margin=Decimal("10000"),
+    )
+    cycle = ActivePositionCycleSnapshot(
+        by_contract=MappingProxyType(
+            {("SHFE", "RB2610"): (futures_position,)}
+        ),
+        by_account=MappingProxyType({"A001": (futures_position,)}),
+        accounts=MappingProxyType({"A001": cache.account}),
+        cache_version="FUTURES-MARGIN",
+        refresh_count=1,
+    )
+
+    result = RealtimePnlService(
+        active_position_cache=cache,
+        pnl_store=FakeStore(),
+    ).process_batch(
+        requests=[
+            ContractPnlRequest(
+                exchange_id="SHFE",
+                symbol="RB2610",
+                tick=RealtimePnlService.parse_tick(make_fields()),
+            )
+        ],
+        cycle_snapshot=cycle,
+        dirty_version="FUTURES-MARGIN-CYCLE",
+    )
+
+    assert result.margin_adjustment_positions == ()
 
 
 def test_duplicate_tick_overwrites_same_absolute_values():

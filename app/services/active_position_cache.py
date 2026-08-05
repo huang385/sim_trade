@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.repositories.account_repository import AccountRepository
@@ -138,6 +139,30 @@ class ActivePositionCache:
         self._pending_contract_keys: set[ContractKey] = set()
         self._account_fact_versions: dict[str, str] = {}
         self._contract_fact_versions: dict[ContractKey, str] = {}
+
+    @staticmethod
+    def _configure_consistent_read_transaction(db: Session) -> None:
+        """
+        在第一条业务SQL前建立PostgreSQL一致性只读快照。
+
+        PostgreSQL的READ COMMITTED会让同一Session中的连续SELECT看到不同
+        提交点。活动持仓行和其Outbox事实版本必须来自同一个MVCC快照，
+        因此生产库使用REPEATABLE READ + READ ONLY。SQLite没有对应事务
+        语法，单元测试和轻量本地环境保持原有行为。
+        """
+
+        get_bind = getattr(db, "get_bind", None)
+        if get_bind is None:
+            return
+        bind = get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+        # connection()必须是当前Session第一次取得数据库连接的动作；隔离
+        # 级别不能在任何Account、Position或Outbox查询之后再修改。
+        db.connection(
+            execution_options={"isolation_level": "REPEATABLE READ"}
+        )
+        db.execute(text("SET TRANSACTION READ ONLY"))
 
     @staticmethod
     def _account_snapshot(
@@ -390,6 +415,7 @@ class ActivePositionCache:
         extra_account_ids: set[str],
     ) -> None:
         with self.session_factory() as db:
+            self._configure_consistent_read_transaction(db)
             rows = self.position_repository.list_active_calculation_rows(db)
             active_account_ids = {row[3].account_id for row in rows}
             missing_account_ids = extra_account_ids - active_account_ids
@@ -443,6 +469,7 @@ class ActivePositionCache:
         """
 
         with self.session_factory() as db:
+            self._configure_consistent_read_transaction(db)
             rows = (
                 self.position_repository
                 .list_active_calculation_rows_by_contracts(

@@ -427,6 +427,7 @@ function applyRealtimeEvent(event) {
         const factFields = [
             "cash_balance",
             "used_margin",
+            "option_used_margin",
             "frozen_margin",
             "frozen_cash",
             "frozen_commission",

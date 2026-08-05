@@ -71,6 +71,7 @@ class AcceptedOrderEventService:
         "ORDER_ACCEPTED",
         "ORDER_PARTIALLY_FILLED",
         "ORDER_FILLED",
+        "ORDER_MARGIN_UPDATED",
         "ORDER_CANCELLED",
         "ORDER_PARTIALLY_CANCELLED",
     }
@@ -235,7 +236,9 @@ class AcceptedOrderEventService:
             symbol=order.symbol,
             action=(
                 "UPDATED"
-                if written and event.event_type == "ORDER_PARTIALLY_FILLED"
+                if written
+                and event.event_type
+                in {"ORDER_PARTIALLY_FILLED", "ORDER_MARGIN_UPDATED"}
                 else "REGISTERED"
                 if written
                 else "DUPLICATE"

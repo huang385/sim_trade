@@ -83,6 +83,17 @@ def test_partial_fill_event_updates_active_index_from_database_truth():
     active_index.add_active_order.assert_called_once()
 
 
+def test_order_margin_event_updates_active_index_from_database_truth():
+    service, _, active_index = make_service(make_order())
+    fields = make_fields(event_type="ORDER_MARGIN_UPDATED")
+    fields["event_type"] = "ORDER_MARGIN_UPDATED"
+
+    result = service.process(Mock(), fields)
+
+    assert result.action == "UPDATED"
+    active_index.add_active_order.assert_called_once()
+
+
 def test_filled_event_removes_all_active_indexes():
     service, _, active_index = make_service(
         make_order(status="FILLED", remaining_volume=0)

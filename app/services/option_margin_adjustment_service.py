@@ -15,6 +15,7 @@ from app.enums.option_enums import (
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
+from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.account_risk_state_service import AccountRiskStateService
@@ -25,6 +26,7 @@ from app.services.option_margin_calculator import (
 from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
 class OptionMarginAdjustmentService:
@@ -46,6 +48,7 @@ class OptionMarginAdjustmentService:
         position_repository: PositionRepository | None = None,
         instrument_repository: InstrumentRepository | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
+        realtime_fact_events: RealtimeFactEventService | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.account_repository = account_repository or AccountRepository()
@@ -55,6 +58,10 @@ class OptionMarginAdjustmentService:
         )
         self.option_margin_resolver = (
             option_margin_resolver or OptionMarginCalculatorResolver()
+        )
+        self.realtime_fact_events = (
+            realtime_fact_events
+            or RealtimeFactEventService(repository=OutboxRepository())
         )
 
     @staticmethod
@@ -334,9 +341,20 @@ class OptionMarginAdjustmentService:
                 position.margin_price_mode = MarginPriceMode.SETTLEMENT.value
                 position.margin_underlying_price = underlying_tick.last_price
                 position.margin_option_price = option_tick.last_price
-                position.margin_calculated_at = utc_now()
-                account.updated_at = utc_now()
-                position.updated_at = utc_now()
+                adjusted_at = utc_now()
+                position.margin_calculated_at = adjusted_at
+                account.updated_at = adjusted_at
+                position.updated_at = adjusted_at
+                # 资金不足时没有增加Account.used_margin，因此不能虚构
+                # ACCOUNT_FACT_UPDATED；但持仓实时要求已经变化，仍需通过
+                # POSITION_UPDATED可靠触发后续风险重算和页面绝对值更新。
+                if required != previous_required:
+                    self.realtime_fact_events.create_position_updated(
+                        db,
+                        position=position,
+                        occurred_at=adjusted_at,
+                        fact_reason="OPTION_MARGIN_ADJUSTMENT",
+                    )
                 db.commit()
                 return account
 
@@ -411,9 +429,30 @@ class OptionMarginAdjustmentService:
             position.margin_price_mode = MarginPriceMode.SETTLEMENT.value
             position.margin_underlying_price = underlying_tick.last_price
             position.margin_option_price = option_tick.last_price
-            position.margin_calculated_at = utc_now()
-            account.updated_at = utc_now()
-            position.updated_at = utc_now()
+            adjusted_at = utc_now()
+            position.margin_calculated_at = adjusted_at
+            account.updated_at = adjusted_at
+            position.updated_at = adjusted_at
+            # Account、Position和两条事实Outbox共用当前事务。任一Outbox
+            # 创建失败都会进入统一rollback，不能留下只改数据库未通知的
+            # 半完成保证金状态。
+            if margin_delta != Decimal("0"):
+                self.realtime_fact_events.create_account_updated(
+                    db,
+                    account=account,
+                    occurred_at=adjusted_at,
+                    fact_reason="OPTION_MARGIN_ADJUSTMENT",
+                )
+            if (
+                margin_delta != Decimal("0")
+                or required != previous_required
+            ):
+                self.realtime_fact_events.create_position_updated(
+                    db,
+                    position=position,
+                    occurred_at=adjusted_at,
+                    fact_reason="OPTION_MARGIN_ADJUSTMENT",
+                )
             db.commit()
             return account
         except Exception:

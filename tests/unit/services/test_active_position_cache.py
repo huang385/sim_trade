@@ -14,6 +14,25 @@ class FakeSession:
         return False
 
 
+class TrackingPostgresSession(FakeSession):
+    """记录一致性事务配置和查询顺序的PostgreSQL Session替身。"""
+
+    def __init__(self, events):
+        self.events = events
+        self.dialect = SimpleNamespace(name="postgresql")
+
+    def get_bind(self):
+        self.events.append("get_bind")
+        return SimpleNamespace(dialect=self.dialect)
+
+    def connection(self, *, execution_options):
+        self.events.append(("connection", execution_options))
+        return self
+
+    def execute(self, statement):
+        self.events.append(("execute", str(statement)))
+
+
 class EmptyPositionRepository:
     def __init__(self):
         self.calls = 0
@@ -54,6 +73,42 @@ class EmptyOutboxRepository:
 
     def list_latest_fact_versions(self, _db, **_kwargs):
         return dict(self.versions)
+
+
+class TrackingPositionRepository(EmptyPositionRepository):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def list_active_calculation_rows(self, db):
+        self.events.append(("full_rows", id(db)))
+        return super().list_active_calculation_rows(db)
+
+    def list_active_calculation_rows_by_contracts(self, db, contract_keys):
+        self.events.append(("contract_rows", id(db)))
+        return super().list_active_calculation_rows_by_contracts(
+            db, contract_keys
+        )
+
+
+class TrackingAccountRepository(EmptyAccountRepository):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def list_by_account_ids(self, db, account_ids):
+        self.events.append(("accounts", id(db)))
+        return super().list_by_account_ids(db, account_ids)
+
+
+class TrackingOutboxRepository(EmptyOutboxRepository):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def list_latest_fact_versions(self, db, **kwargs):
+        self.events.append(("outbox", id(db)))
+        return super().list_latest_fact_versions(db, **kwargs)
 
 
 def make_account(account_id="A001", frozen_margin="0"):
@@ -267,3 +322,71 @@ def test_cycle_snapshot_carries_postgres_outbox_fact_versions():
     assert cycle.get_by_contract("DCE", "JD2609")[0].source_fact_version == (
         "80"
     )
+
+
+def test_full_reload_uses_one_repeatable_read_only_transaction():
+    events = []
+    session = TrackingPostgresSession(events)
+    positions = TrackingPositionRepository(events)
+    accounts = TrackingAccountRepository(events)
+    outbox = TrackingOutboxRepository(events)
+    cache = ActivePositionCache(
+        session_factory=lambda: session,
+        position_repository=positions,
+        account_repository=accounts,
+        outbox_repository=outbox,
+        refresh_ms=60_000,
+    )
+
+    cache.get_cycle_snapshot(extra_account_ids={"A001"})
+
+    assert events[:3] == [
+        "get_bind",
+        ("connection", {"isolation_level": "REPEATABLE READ"}),
+        ("execute", "SET TRANSACTION READ ONLY"),
+    ]
+    query_events = [item for item in events if isinstance(item, tuple)][2:]
+    assert [item[0] for item in query_events] == [
+        "full_rows",
+        "accounts",
+        "outbox",
+    ]
+    assert {item[1] for item in query_events} == {id(session)}
+
+
+def test_incremental_refresh_uses_one_repeatable_read_only_transaction():
+    events = []
+    sessions = []
+
+    def session_factory():
+        session = TrackingPostgresSession(events)
+        sessions.append(session)
+        return session
+
+    cache = ActivePositionCache(
+        session_factory=session_factory,
+        position_repository=TrackingPositionRepository(events),
+        account_repository=TrackingAccountRepository(events),
+        outbox_repository=TrackingOutboxRepository(events),
+        refresh_ms=60_000,
+    )
+    cache.get_cycle_snapshot()
+    events.clear()
+
+    cache.get_cycle_snapshot(
+        refresh_account_versions={"A001": "2"},
+        refresh_contract_versions={("DCE", "JD2609"): "2"},
+    )
+
+    assert events[:3] == [
+        "get_bind",
+        ("connection", {"isolation_level": "REPEATABLE READ"}),
+        ("execute", "SET TRANSACTION READ ONLY"),
+    ]
+    query_events = [item for item in events if isinstance(item, tuple)][2:]
+    assert [item[0] for item in query_events] == [
+        "contract_rows",
+        "accounts",
+        "outbox",
+    ]
+    assert {item[1] for item in query_events} == {id(sessions[-1])}

@@ -903,8 +903,18 @@ class RealtimePnlService:
         for key in successful:
             for position in current_by_key[key]:
                 model = position_models.get(position.position_id)
+                position_type = InstrumentType(position.instrument_type)
+                is_short_option = (
+                    position_type
+                    in {
+                        InstrumentType.FUTURES_OPTION,
+                        InstrumentType.INDEX_OPTION,
+                    }
+                    and position.direction == PositionDirection.SHORT.value
+                )
                 if (
-                    model is not None
+                    is_short_option
+                    and model is not None
                     and model.realtime_required_margin
                     != position.persisted_used_margin
                 ):

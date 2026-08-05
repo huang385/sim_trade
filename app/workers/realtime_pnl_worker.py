@@ -594,33 +594,9 @@ class RealtimePnlWorker:
                             account_id=account_id,
                             position_id=position_id,
                         )
-                    request = request_by_key[key]
-                    source_version = (
-                        request.tick.source_event_id
-                        if request.tick is not None
-                        else request.dirty_version or "DIRTY"
-                    )
-                    # 账面保证金已经在 PostgreSQL 事务中更新。通过独立的
-                    # 账户事实 Dirty 通知下一轮刷新缓存并重写 Redis 账户
-                    # 快照，避免页面继续使用最长 60 秒前的 used_margin 和
-                    # available_cash。事件编号稳定，Pending 重放不会重复递增。
-                    self.pnl_store.mark_account_fact_dirty_once(
-                        event_id=(
-                            "OPTION_MARGIN_ADJUSTED:"
-                            f"{source_version}:{position_id}"
-                        ),
-                        account_id=account_id,
-                        processed_ttl_seconds=(
-                            settings.order_event_processed_ttl_seconds
-                        ),
-                    )
-                    # 同步失效本进程中的账户和目标合约快照。否则60秒缓存期
-                    # 内仍会拿旧used_margin重复发起同一笔双向调整。
-                    self.service.active_position_cache.invalidate(
-                        account_id=account_id,
-                        exchange_id=key[0],
-                        symbol=key[1],
-                    )
+                    # 调整事务已经原子创建ACCOUNT_FACT_UPDATED和
+                    # POSITION_UPDATED。统一由Outbox消费链路生成跨进程Dirty，
+                    # 这里不再生成第二套人工版本，避免同一事实重复推进。
                 except Exception:
                     adjustment_failed.add(key)
                     logger.exception(
@@ -654,37 +630,6 @@ class RealtimePnlWorker:
                                     db,
                                     order_id=order_id,
                                 )
-                            )
-                        if (
-                            order_adjustment.account_id
-                            and order_adjustment.action
-                            in {
-                                "ADDED",
-                                "MARGIN_DEFICIT",
-                                "VALUATION_UNAVAILABLE",
-                                "RECOVERED",
-                                "SUFFICIENT",
-                            }
-                        ):
-                            self.pnl_store.mark_account_fact_dirty_once(
-                                event_id=(
-                                    "OPTION_ORDER_MARGIN:"
-                                    f"{order_adjustment.order_id}:"
-                                    f"{order_adjustment.action}"
-                                    + (
-                                        ""
-                                        if order_adjustment.action
-                                        == "SUFFICIENT"
-                                        else (
-                                            ":"
-                                            f"{order_adjustment.required_margin}"
-                                        )
-                                    )
-                                ),
-                                account_id=order_adjustment.account_id,
-                                processed_ttl_seconds=(
-                                    settings.order_event_processed_ttl_seconds
-                                ),
                             )
                         if order_adjustment.account_id:
                             self.active_order_index.update_margin_risk_snapshot(

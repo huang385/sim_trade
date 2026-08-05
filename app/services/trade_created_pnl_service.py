@@ -35,6 +35,9 @@ class TradeCreatedPnlService:
         "ORDER_ACCEPTED",
         "ORDER_CANCELLED",
         "ORDER_PARTIALLY_CANCELLED",
+        "ORDER_MARGIN_UPDATED",
+        "POSITION_UPDATED",
+        "POSITION_CLOSED",
     }
 
     def __init__(
@@ -90,6 +93,13 @@ class TradeCreatedPnlService:
             raise TradeCreatedPnlValidationError(
                 "账户事实事件缺少event_id"
             )
+        if (
+            event_type in {"POSITION_UPDATED", "POSITION_CLOSED"}
+            and payload.get("fact_reason") != "OPTION_MARGIN_ADJUSTMENT"
+        ):
+            # 普通成交已经由同事务的TRADE_CREATED触发结构Dirty；只处理
+            # 期权保证金重估专属持仓事实，避免一笔成交重复刷新两次。
+            return None
         return event_type, event_id, payload
 
     def process(
@@ -105,9 +115,13 @@ class TradeCreatedPnlService:
         event_type, event_id, payload = parsed
 
         account_id = str(payload["account_id"]).strip()
-        exchange_id = str(payload["exchange_id"]).strip().upper()
-        symbol = str(payload["symbol"]).strip().upper()
-        if event_type == "TRADE_CREATED":
+        exchange_id = str(payload.get("exchange_id") or "").strip().upper()
+        symbol = str(payload.get("symbol") or "").strip().upper()
+        if event_type in {
+            "TRADE_CREATED",
+            "POSITION_UPDATED",
+            "POSITION_CLOSED",
+        }:
             version = self.pnl_store.mark_contract_dirty_once(
                 event_id=event_id,
                 exchange_id=exchange_id,

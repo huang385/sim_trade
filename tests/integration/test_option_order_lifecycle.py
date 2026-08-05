@@ -14,10 +14,16 @@ from app.models.account import Account
 from app.models.fee_rule_item import FeeRuleItem
 from app.models.instrument import Instrument
 from app.models.option_margin_rule import OptionMarginRule
+from app.models.order import Order
+from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.trade import Trade
+from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.market_tick_schema import MarketTick
 from app.services.option_market_price_service import OptionMarginMarketPrices
+from app.services.option_margin_adjustment_service import (
+    OptionMarginAdjustmentService,
+)
 from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
 )
@@ -27,6 +33,7 @@ from app.services.option_trading_permission_service import (
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
 )
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
@@ -68,6 +75,14 @@ class _FixedIndexOptionPrices:
             option_price=Decimal("100"),
             underlying_price=Decimal("4000"),
         )
+
+
+class _FailingOutboxRepository(OutboxRepository):
+    """故障注入：模拟事务内事实Outbox无法创建。"""
+
+    @staticmethod
+    def create_event(*_args, **_kwargs):
+        raise RuntimeError("injected outbox failure")
 
 
 def _settle(order_id: str, event_id: str, price: str, volume: int):
@@ -246,6 +261,118 @@ def test_commodity_option_four_directions_use_real_postgres(
         assert _settle(
             sell_open.order_id, "OPT-SELL-OPEN", "100", 2
         ).action == "SETTLED"
+
+        # 期权空头持仓保证金上调必须把账户和持仓绝对事实与资金修改放在
+        # 同一个PostgreSQL事务中，供已连接WebSocket增量更新。
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "3600",
+        )
+        _put_live_tick(
+            integration_context.exchange_id,
+            option_symbol,
+            "120",
+        )
+        with SessionLocal() as db:
+            short_position = db.scalar(
+                select(Position).where(
+                    Position.account_id == integration_context.account_id,
+                    Position.order_book_id == option_symbol,
+                    Position.direction == "SHORT",
+                )
+            )
+            position_id = short_position.position_id
+        with SessionLocal() as db:
+            OptionMarginAdjustmentService(
+                market_tick_store=MarketTickStore(redis_client)
+            ).adjust(
+                db,
+                account_id=integration_context.account_id,
+                position_id=position_id,
+            )
+        with SessionLocal() as db:
+            margin_events = db.scalars(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.aggregate_id.in_(
+                        (integration_context.account_id, position_id)
+                    ),
+                    OutboxEvent.event_type.in_(
+                        ("ACCOUNT_FACT_UPDATED", "POSITION_UPDATED")
+                    ),
+                )
+                .order_by(OutboxEvent.id.desc())
+                .limit(2)
+            ).all()
+        assert {event.event_type for event in margin_events} == {
+            "ACCOUNT_FACT_UPDATED",
+            "POSITION_UPDATED",
+        }
+        by_type = {event.event_type: event.payload for event in margin_events}
+        assert Decimal(
+            by_type["ACCOUNT_FACT_UPDATED"]["used_margin"]
+        ) > Decimal("0")
+        assert Decimal(
+            by_type["POSITION_UPDATED"]["used_margin"]
+        ) > Decimal("0")
+
+        # 真实Session故障注入：Outbox创建失败后，账户和持仓修改必须由
+        # Service统一rollback，不能留下只有数据库事实没有事件的状态。
+        with SessionLocal() as db:
+            before_account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            before_position = db.scalar(
+                select(Position).where(Position.position_id == position_id)
+            )
+            before_values = (
+                before_account.used_margin,
+                before_account.option_used_margin,
+                before_position.used_margin,
+                before_position.realtime_required_margin,
+            )
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "3700",
+        )
+        _put_live_tick(
+            integration_context.exchange_id,
+            option_symbol,
+            "130",
+        )
+        failing_facts = RealtimeFactEventService(
+            repository=_FailingOutboxRepository()
+        )
+        with SessionLocal() as db:
+            with pytest.raises(RuntimeError, match="injected outbox failure"):
+                OptionMarginAdjustmentService(
+                    market_tick_store=MarketTickStore(redis_client),
+                    realtime_fact_events=failing_facts,
+                ).adjust(
+                    db,
+                    account_id=integration_context.account_id,
+                    position_id=position_id,
+                )
+        with SessionLocal() as db:
+            rolled_back_account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            rolled_back_position = db.scalar(
+                select(Position).where(Position.position_id == position_id)
+            )
+            assert (
+                rolled_back_account.used_margin,
+                rolled_back_account.option_used_margin,
+                rolled_back_position.used_margin,
+                rolled_back_position.realtime_required_margin,
+            ) == before_values
+
         buy_close = create("BUY", "CLOSE_TODAY", "90")
         assert _settle(
             buy_close.order_id, "OPT-BUY-CLOSE", "90", 2
@@ -254,13 +381,99 @@ def test_commodity_option_four_directions_use_real_postgres(
         # 真实制造活动卖出开仓订单保证金缺口，验证PG风险来源、最终成交
         # 拦截以及行情恢复后的完整账户估值恢复，不注入任何保证金替身。
         deficit_order = create("SELL", "OPEN", "100")
+        adjustment_service = OptionOrderMarginAdjustmentService(
+            market_tick_store=MarketTickStore(redis_client)
+        )
+        # 当前行情高于接单冻结快照但资金仍充足，先验证补冻后的账户和
+        # 订单绝对事实Outbox与数据库修改原子提交。
+        with SessionLocal() as db:
+            added = adjustment_service.adjust(
+                db,
+                order_id=deficit_order.order_id,
+            )
+        assert added.action == "ADDED"
+        with SessionLocal() as db:
+            added_events = db.scalars(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.aggregate_id.in_(
+                        (
+                            deficit_order.order_id,
+                            integration_context.account_id,
+                        )
+                    ),
+                    OutboxEvent.event_type.in_(
+                        (
+                            "ORDER_MARGIN_UPDATED",
+                            "ACCOUNT_FACT_UPDATED",
+                        )
+                    ),
+                )
+                .order_by(OutboxEvent.id.desc())
+                .limit(2)
+            ).all()
+        assert {event.event_type for event in added_events} == {
+            "ORDER_MARGIN_UPDATED",
+            "ACCOUNT_FACT_UPDATED",
+        }
+        order_margin_payload = next(
+            event.payload
+            for event in added_events
+            if event.event_type == "ORDER_MARGIN_UPDATED"
+        )
+        assert Decimal(order_margin_payload["frozen_margin"]) == (
+            added.frozen_margin
+        )
+
+        # 活动订单补冻也验证真实事务回滚；失败后订单和账户冻结额必须
+        # 保持上一次成功提交值，并且不会产生半条成功事实。
+        with SessionLocal() as db:
+            before_order = db.scalar(
+                select(Order).where(Order.order_id == deficit_order.order_id)
+            )
+            before_account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            before_frozen = (
+                before_order.frozen_margin,
+                before_account.frozen_margin,
+            )
+        _put_live_tick(
+            integration_context.exchange_id,
+            integration_context.symbol,
+            "3800",
+        )
+        _put_live_tick(
+            integration_context.exchange_id,
+            option_symbol,
+            "140",
+        )
+        with SessionLocal() as db:
+            with pytest.raises(RuntimeError, match="injected outbox failure"):
+                OptionOrderMarginAdjustmentService(
+                    market_tick_store=MarketTickStore(redis_client),
+                    realtime_fact_events=failing_facts,
+                ).adjust(db, order_id=deficit_order.order_id)
+        with SessionLocal() as db:
+            rolled_back_order = db.scalar(
+                select(Order).where(Order.order_id == deficit_order.order_id)
+            )
+            rolled_back_account = db.scalar(
+                select(Account).where(
+                    Account.account_id == integration_context.account_id
+                )
+            )
+            assert (
+                rolled_back_order.frozen_margin,
+                rolled_back_account.frozen_margin,
+            ) == before_frozen
+
         _put_live_tick(
             integration_context.exchange_id,
             integration_context.symbol,
             "1000000",
-        )
-        adjustment_service = OptionOrderMarginAdjustmentService(
-            market_tick_store=MarketTickStore(redis_client)
         )
         with SessionLocal() as db:
             deficit = adjustment_service.adjust(

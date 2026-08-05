@@ -13,6 +13,7 @@ from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.repositories.account_repository import AccountRepository
 from app.repositories.instrument_repository import InstrumentRepository
 from app.repositories.order_repository import OrderRepository
+from app.repositories.outbox_repository import OutboxRepository
 from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.option_margin_adjustment_service import (
     OptionMarginAdjustmentService,
@@ -21,6 +22,7 @@ from app.services.option_margin_calculator import OptionMarginInput
 from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,7 @@ class OptionOrderMarginAdjustmentService:
         account_repository: AccountRepository | None = None,
         instrument_repository: InstrumentRepository | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
+        realtime_fact_events: RealtimeFactEventService | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.order_repository = order_repository or OrderRepository()
@@ -67,6 +70,10 @@ class OptionOrderMarginAdjustmentService:
         )
         self.option_margin_resolver = (
             option_margin_resolver or OptionMarginCalculatorResolver()
+        )
+        self.realtime_fact_events = (
+            realtime_fact_events
+            or RealtimeFactEventService(repository=OutboxRepository())
         )
 
     @classmethod
@@ -364,12 +371,42 @@ class OptionOrderMarginAdjustmentService:
                     "活动期权订单的账户或合约不存在",
                     error_code="OPTION_ORDER_CONTEXT_INCOMPLETE",
                 )
+            previous_order_fact = (
+                quantize_money(order.frozen_margin),
+                order.margin_risk_state,
+            )
+            previous_account_frozen_margin = quantize_money(
+                account.frozen_margin
+            )
             result = self.ensure_locked(
                 db,
                 order=order,
                 account=account,
                 instrument=instrument,
             )
+            occurred_at = order.updated_at
+            current_order_fact = (
+                quantize_money(order.frozen_margin),
+                order.margin_risk_state,
+            )
+            if current_order_fact != previous_order_fact:
+                # ORDER_MARGIN_UPDATED经现有投影转换为ORDER_UPDATED，使用
+                # Outbox主键作为订单聚合单调版本，迟到事件不会覆盖新事实。
+                self.realtime_fact_events.create_order_margin_updated(
+                    db,
+                    order=order,
+                    occurred_at=occurred_at,
+                )
+            if (
+                quantize_money(account.frozen_margin)
+                != previous_account_frozen_margin
+            ):
+                self.realtime_fact_events.create_account_updated(
+                    db,
+                    account=account,
+                    occurred_at=occurred_at,
+                    fact_reason="OPTION_ORDER_MARGIN_ADJUSTMENT",
+                )
             db.commit()
             return result
         except Exception:

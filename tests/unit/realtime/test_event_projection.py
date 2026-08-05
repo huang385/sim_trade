@@ -71,6 +71,33 @@ def test_projection_publish_is_atomic_and_idempotent():
     assert redis_client.eval.call_args_list[0].args[-1] == "2"
 
 
+def test_order_margin_source_projects_to_absolute_order_update():
+    event = RealtimeEventProjectionService.project(
+        source_message_id="11-0",
+        fields={
+            "event_id": "E-MARGIN",
+            "event_type": "ORDER_MARGIN_UPDATED",
+            "aggregate_type": "ORDER",
+            "aggregate_id": "O001",
+            "business_version": "9",
+            "payload": json.dumps(
+                {
+                    "event_id": "E-MARGIN",
+                    "account_id": "A001",
+                    "order_id": "O001",
+                    "frozen_margin": "12000.000000",
+                    "margin_risk_state": "NORMAL",
+                    "updated_at": "2026-08-03T12:00:01+00:00",
+                }
+            ),
+        },
+    )
+
+    assert event.event_type == RealtimeEventType.ORDER_UPDATED
+    assert event.payload["frozen_margin"] == "12000.000000"
+    assert event.payload["business_version"] == "9"
+
+
 def test_stale_business_version_is_not_published_again():
     redis_client = Mock()
     redis_client.eval.return_value = "STALE"

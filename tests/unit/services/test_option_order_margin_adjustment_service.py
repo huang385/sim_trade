@@ -2,6 +2,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.common.exceptions import DataAccessError
 from app.enums.option_enums import MarginPriceMode
 from app.services.option_order_margin_adjustment_service import (
@@ -20,6 +22,9 @@ def make_order(**overrides):
     values = {
         "order_id": "O-OPTION-1",
         "account_id": "A001",
+        "order_book_id": "JD2609-C-4000",
+        "exchange_id": "DCE",
+        "symbol": "JD2609-C-4000",
         "status": "ACCEPTED",
         "remaining_volume": 2,
         "instrument_type": "FUTURES_OPTION",
@@ -62,11 +67,26 @@ def margin_result(total: str):
 
 
 def make_service(total: str = "1500"):
+    fact_events = Mock()
     service = OptionOrderMarginAdjustmentService(
-        market_tick_store=Mock()
+        market_tick_store=Mock(),
+        realtime_fact_events=fact_events,
     )
     service._calculate_required = Mock(return_value=margin_result(total))
     return service
+
+
+def prepare_adjust(service, order, account):
+    service.order_repository = Mock()
+    service.order_repository.get_by_order_id_for_update.return_value = order
+    service.account_repository = Mock()
+    service.account_repository.get_by_account_id_for_update.return_value = (
+        account
+    )
+    service.instrument_repository = Mock()
+    service.instrument_repository.get_by_order_book_id.return_value = (
+        SimpleNamespace()
+    )
 
 
 def test_active_sell_open_order_adds_margin_difference():
@@ -175,6 +195,71 @@ def test_missing_market_marks_valuation_unavailable_without_freeze():
     assert order.margin_risk_state == "VALUATION_UNAVAILABLE"
     assert account.risk_state == "VALUATION_UNAVAILABLE"
     assert order.frozen_margin == Decimal("1000")
+
+
+def test_adjust_adds_account_and_order_facts_in_same_transaction():
+    service = make_service("1500")
+    order = make_order()
+    account = make_account()
+    prepare_adjust(service, order, account)
+    db = Mock()
+
+    result = service.adjust(db, order_id=order.order_id)
+
+    assert result.action == "ADDED"
+    service.realtime_fact_events.create_order_margin_updated.assert_called_once()
+    service.realtime_fact_events.create_account_updated.assert_called_once()
+    db.commit.assert_called_once_with()
+    db.rollback.assert_not_called()
+
+
+def test_adjust_deficit_emits_order_fact_but_no_success_account_fact():
+    service = make_service("1500")
+    order = make_order()
+    account = make_account(
+        available_cash=Decimal("100"),
+        risk_available_cash=Decimal("100"),
+    )
+    prepare_adjust(service, order, account)
+    db = Mock()
+
+    result = service.adjust(db, order_id=order.order_id)
+
+    assert result.action == "MARGIN_DEFICIT"
+    service.realtime_fact_events.create_order_margin_updated.assert_called_once()
+    service.realtime_fact_events.create_account_updated.assert_not_called()
+    db.commit.assert_called_once_with()
+
+
+def test_adjust_outbox_failure_rolls_back_order_and_account_transaction():
+    service = make_service("1500")
+    order = make_order()
+    account = make_account()
+    prepare_adjust(service, order, account)
+    service.realtime_fact_events.create_order_margin_updated.side_effect = (
+        RuntimeError("outbox unavailable")
+    )
+    db = Mock()
+
+    with pytest.raises(RuntimeError, match="outbox unavailable"):
+        service.adjust(db, order_id=order.order_id)
+
+    db.commit.assert_not_called()
+    db.rollback.assert_called_once_with()
+    service.realtime_fact_events.create_account_updated.assert_not_called()
+
+
+def test_sufficient_replay_does_not_create_duplicate_order_fact():
+    service = make_service("800")
+    order = make_order()
+    account = make_account()
+    prepare_adjust(service, order, account)
+
+    result = service.adjust(Mock(), order_id=order.order_id)
+
+    assert result.action == "SUFFICIENT"
+    service.realtime_fact_events.create_order_margin_updated.assert_not_called()
+    service.realtime_fact_events.create_account_updated.assert_not_called()
 
 
 def test_settlement_blocks_trade_when_final_margin_check_fails():

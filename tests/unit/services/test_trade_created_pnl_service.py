@@ -99,6 +99,7 @@ def test_non_fact_event_is_skipped_without_dirty_or_snapshot_write():
         "ORDER_ACCEPTED",
         "ORDER_CANCELLED",
         "ORDER_PARTIALLY_CANCELLED",
+        "ORDER_MARGIN_UPDATED",
     ],
 )
 def test_order_events_mark_only_account_facts_dirty(event_type):
@@ -132,3 +133,50 @@ def test_order_events_mark_only_account_facts_dirty(event_type):
             "processed_ttl_seconds": 604800,
         }
     ]
+
+
+def test_account_fact_event_does_not_duplicate_source_business_dirty():
+    store = FakeStore()
+    result = TradeCreatedPnlService(
+        cache=FakeCache(),
+        pnl_store=store,
+    ).process(
+        stream_message_id="3-0",
+        fields={
+            "event_id": "E003",
+            "event_type": "ACCOUNT_FACT_UPDATED",
+            "payload": json.dumps(
+                {"event_id": "E003", "account_id": "A001"}
+            ),
+        },
+    )
+
+    assert result.action == "SKIPPED"
+    assert store.account_dirty == []
+    assert store.contract_dirty == []
+
+
+def test_position_fact_event_refreshes_only_affected_contract():
+    store = FakeStore()
+    result = TradeCreatedPnlService(
+        cache=FakeCache(),
+        pnl_store=store,
+    ).process(
+        stream_message_id="4-0",
+        fields={
+            "event_id": "E004",
+            "event_type": "POSITION_UPDATED",
+            "payload": json.dumps(
+                {
+                    "event_id": "E004",
+                    "account_id": "A001",
+                    "exchange_id": "DCE",
+                    "symbol": "JD2609-C-4000",
+                    "fact_reason": "OPTION_MARGIN_ADJUSTMENT",
+                }
+            ),
+        },
+    )
+
+    assert result.dirty_kind == "CONTRACT_STRUCTURE"
+    assert store.contract_dirty[0]["event_id"] == "E004"

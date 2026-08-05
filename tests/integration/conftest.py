@@ -262,6 +262,20 @@ def integration_context():
                     PositionFreezeAllocation.order_id.in_(order_ids)
                 )
             )
+        position_ids = [row.position_id for row in position_rows]
+        if position_ids:
+            db.execute(
+                delete(OutboxEvent).where(
+                    OutboxEvent.aggregate_type == "POSITION",
+                    OutboxEvent.aggregate_id.in_(position_ids),
+                )
+            )
+        db.execute(
+            delete(OutboxEvent).where(
+                OutboxEvent.aggregate_type == "ACCOUNT",
+                OutboxEvent.aggregate_id == context.account_id,
+            )
+        )
         db.execute(
             delete(PositionDetail).where(
                 PositionDetail.account_id == context.account_id
