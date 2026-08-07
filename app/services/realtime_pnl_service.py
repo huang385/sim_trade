@@ -189,12 +189,14 @@ class RealtimePnlService:
                 result.cumulative_unrealized_pnl
             ),
             daily_position_pnl=result.daily_position_pnl,
+            cash_unrealized_pnl=result.cash_unrealized_pnl,
             instrument_type=snapshot.instrument_type,
             underlying_order_book_id=snapshot.underlying_order_book_id,
             option_market_value=option_market_value,
             realtime_required_margin=realtime_required_margin,
             event_time=tick.event_time,
             source_event_id=tick.source_event_id,
+            trading_day=tick.trading_day,
             updated_at=updated_at,
             source_position_fact_version=snapshot.source_fact_version,
         )
@@ -265,7 +267,15 @@ class RealtimePnlService:
             position.symbol.strip().upper(),
         )
         tick = latest_by_key.get(key)
-        if tick is not None and tick.last_price is not None and tick.last_price > 0:
+        if (
+            tick is not None
+            and tick.last_price is not None
+            and tick.last_price > 0
+            and (
+                position.trading_day is None
+                or tick.trading_day == position.trading_day
+            )
+        ):
             return self.calculator.calculate_position(
                 mark_price=tick.last_price,
                 snapshot=position,
@@ -275,6 +285,11 @@ class RealtimePnlService:
                 position.persisted_unrealized_pnl
             ),
             daily_position_pnl=position.persisted_daily_position_pnl,
+            cash_unrealized_pnl=(
+                position.persisted_daily_position_pnl
+                if position.uses_settlement_basis
+                else position.persisted_unrealized_pnl
+            ),
         )
 
     def process_batch(
@@ -352,6 +367,25 @@ class RealtimePnlService:
                 request.tick is None
                 or request.tick.last_price is None
                 or request.tick.last_price <= 0
+                or any(
+                    (
+                        position.trading_day is not None
+                        and request.tick.trading_day
+                        != position.trading_day
+                    )
+                    or cycle_snapshot.get_account(position.account_id) is None
+                    or (
+                        cycle_snapshot.get_account(
+                            position.account_id
+                        ).trading_day
+                        is not None
+                        and request.tick.trading_day
+                        != cycle_snapshot.get_account(
+                            position.account_id
+                        ).trading_day
+                    )
+                    for position in positions
+                )
             ):
                 valuation_unavailable_accounts.update(
                     position.account_id for position in positions
@@ -396,6 +430,11 @@ class RealtimePnlService:
                                 underlying_tick is None
                                 or underlying_tick.last_price is None
                                 or underlying_tick.last_price <= 0
+                                or (
+                                    position.trading_day is not None
+                                    and underlying_tick.trading_day
+                                    != position.trading_day
+                                )
                                 or position.strike_price is None
                                 or position.option_type is None
                             ):
@@ -476,15 +515,25 @@ class RealtimePnlService:
                         "daily_position_pnl",
                         position.persisted_daily_position_pnl,
                     )
+                    old_cash = self._decimal(
+                        old,
+                        "cash_unrealized_pnl",
+                        (
+                            position.persisted_daily_position_pnl
+                            if position.uses_settlement_basis
+                            else position.persisted_unrealized_pnl
+                        ),
+                    )
                     delta = local_deltas.setdefault(
                         position.account_id,
-                        [Decimal("0"), Decimal("0")],
+                        [Decimal("0"), Decimal("0"), Decimal("0")],
                     )
                     delta[0] += (
                         result.cumulative_unrealized_pnl
                         - old_cumulative
                     )
                     delta[1] += result.daily_position_pnl - old_daily
+                    delta[2] += result.cash_unrealized_pnl - old_cash
                     contract_accounts.add(position.account_id)
                     if position.position_id not in old_ids:
                         local_additions.append(
@@ -513,12 +562,18 @@ class RealtimePnlService:
                         "daily_position_pnl",
                         Decimal("0"),
                     )
+                    old_cash = self._decimal(
+                        old,
+                        "cash_unrealized_pnl",
+                        old_cumulative,
+                    )
                     delta = local_deltas.setdefault(
                         account_id,
-                        [Decimal("0"), Decimal("0")],
+                        [Decimal("0"), Decimal("0"), Decimal("0")],
                     )
                     delta[0] -= old_cumulative
                     delta[1] -= old_daily
+                    delta[2] -= old_cash
                     contract_accounts.add(account_id)
                     event_time = (
                         request.tick.event_time
@@ -550,6 +605,7 @@ class RealtimePnlService:
                         mark_price=mark_price,
                         cumulative_unrealized_pnl=Decimal("0.000000"),
                         daily_position_pnl=Decimal("0.000000"),
+                        cash_unrealized_pnl=Decimal("0.000000"),
                         event_time=event_time,
                         source_event_id=(
                             request.tick.source_event_id
@@ -557,6 +613,7 @@ class RealtimePnlService:
                             else f"DIRTY-{request.dirty_version or '0'}"
                         ),
                         updated_at=updated_at,
+                        trading_day=old.get("trading_day"),
                     )
                     local_removals.append(
                         (
@@ -573,10 +630,11 @@ class RealtimePnlService:
                 for account_id, values in local_deltas.items():
                     delta = account_deltas.setdefault(
                         account_id,
-                        [Decimal("0"), Decimal("0")],
+                        [Decimal("0"), Decimal("0"), Decimal("0")],
                     )
                     delta[0] += values[0]
                     delta[1] += values[1]
+                    delta[2] += values[2]
                 active_index_additions.extend(local_additions)
                 closed_index_removals.extend(local_removals)
                 affected_accounts.update(contract_accounts)
@@ -700,6 +758,7 @@ class RealtimePnlService:
                 continue
             if account_id in full_accounts:
                 cumulative = Decimal("0")
+                valuation_futures = Decimal("0")
                 daily_position = Decimal("0")
                 long_option_market_value = Decimal("0")
                 short_option_market_value = Decimal("0")
@@ -720,6 +779,15 @@ class RealtimePnlService:
                                     "daily_position_pnl",
                                     position.persisted_daily_position_pnl,
                                 ),
+                                cash_unrealized_pnl=self._decimal(
+                                    old,
+                                    "cash_unrealized_pnl",
+                                    (
+                                        position.persisted_daily_position_pnl
+                                        if position.uses_settlement_basis
+                                        else position.persisted_unrealized_pnl
+                                    ),
+                                ),
                             )
                         else:
                             result = self._calculate_missing_position(
@@ -729,6 +797,7 @@ class RealtimePnlService:
                     position_type = InstrumentType(
                         position.instrument_type
                     )
+                    cumulative += result.cumulative_unrealized_pnl
                     if position_type in {
                         InstrumentType.FUTURES_OPTION,
                         InstrumentType.INDEX_OPTION,
@@ -768,7 +837,7 @@ class RealtimePnlService:
                                 required_margin
                             )
                     else:
-                        cumulative += result.cumulative_unrealized_pnl
+                        valuation_futures += result.cash_unrealized_pnl
                     daily_position += result.daily_position_pnl
                 reconciled_accounts += 1
                 previous = old_accounts.get(account_id, {})
@@ -794,7 +863,7 @@ class RealtimePnlService:
                 old = old_accounts[account_id]
                 delta = account_deltas.get(
                     account_id,
-                    [Decimal("0"), Decimal("0")],
+                    [Decimal("0"), Decimal("0"), Decimal("0")],
                 )
                 cumulative = self._decimal(
                     old,
@@ -806,6 +875,15 @@ class RealtimePnlService:
                     "daily_position_pnl",
                     account.daily_position_pnl,
                 ) + delta[1]
+                valuation_futures = self._decimal(
+                    old,
+                    "futures_unrealized_pnl",
+                    self._decimal(
+                        old,
+                        "cumulative_unrealized_pnl",
+                        account.unrealized_pnl,
+                    ),
+                ) + delta[2]
                 long_option_market_value = self._decimal(
                     old,
                     "long_option_market_value",
@@ -823,6 +901,7 @@ class RealtimePnlService:
                 )
 
             cumulative = quantize_money(cumulative)
+            valuation_futures = quantize_money(valuation_futures)
             daily_position = quantize_money(daily_position)
             long_option_market_value = quantize_money(
                 long_option_market_value
@@ -840,7 +919,7 @@ class RealtimePnlService:
             )
             valuation = AccountValuationCalculator.calculate(
                 cash_balance=account.cash_balance,
-                futures_unrealized_pnl=cumulative,
+                futures_unrealized_pnl=valuation_futures,
                 long_option_market_value=long_option_market_value,
                 short_option_market_value=short_option_market_value,
                 used_margin=account.used_margin,
@@ -877,9 +956,14 @@ class RealtimePnlService:
                     daily_close_pnl=account.daily_close_pnl,
                     daily_commission=account.daily_commission,
                     daily_pnl=daily_pnl,
+                    cumulative_net_pnl=quantize_money(
+                        account.realized_pnl
+                        + cumulative
+                        - account.used_commission
+                    ),
                     equity=valuation.equity,
                     available_cash=valuation.available_cash,
-                    futures_unrealized_pnl=cumulative,
+                    futures_unrealized_pnl=valuation_futures,
                     option_realtime_required_margin=(
                         option_realtime_required_margin
                     ),
@@ -896,6 +980,7 @@ class RealtimePnlService:
                     ),
                     updated_at=updated_at,
                     source_account_fact_version=account.source_fact_version,
+                    trading_day=account.trading_day,
                 )
             )
 
@@ -967,6 +1052,7 @@ class RealtimePnlService:
                         positions=models,
                         accounts=account_models,
                         dirty_version=dirty_version,
+                        expected_cache_version=cycle_snapshot.cache_version,
                         active_positions=active_positions,
                         closed_positions=closed_positions,
                     )
@@ -978,6 +1064,7 @@ class RealtimePnlService:
                         positions=models,
                         accounts=account_models,
                         dirty_version=dirty_version,
+                        expected_cache_version=cycle_snapshot.cache_version,
                         active_positions=active_positions,
                         closed_positions=closed_positions,
                     )

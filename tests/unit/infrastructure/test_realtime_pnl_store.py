@@ -3,6 +3,7 @@ from decimal import Decimal
 import json
 from unittest.mock import Mock
 
+import pytest
 from redis.exceptions import WatchError
 
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
@@ -133,7 +134,7 @@ def test_lease_guarded_cycle_write_rejects_without_pipeline_write():
 
     assert (accepted, positions, accounts) == (False, 0, 0)
     redis_client.pipeline.assert_not_called()
-    assert redis_client.eval.call_args.args[-2] == "worker-old"
+    assert redis_client.eval.call_args.args[-3] == "worker-old"
 
 
 def test_contract_position_ids_many_uses_one_pipeline():
@@ -332,7 +333,7 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
     )
 
     args = redis_client.eval.call_args.args
-    assert args[1] == 1
+    assert args[1] == 2
     assert args[2] == "pnl:realtime:snapshot_sequence"
     script = args[0]
     assert "HSET_REALTIME_SNAPSHOT" in script
@@ -379,6 +380,25 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
         "risk_available_cash": "89000",
         "updated_at": now.isoformat(),
     }
+
+
+def test_cycle_write_rejects_changed_position_cache_version():
+    redis_client = Mock()
+    redis_client.eval.return_value = 0
+    store = RealtimePnlStore(redis_client)
+
+    with pytest.raises(RuntimeError, match="持仓事实版本已变化"):
+        store.write_cycle_snapshots(
+            positions=[],
+            accounts=[],
+            dirty_version="old-cycle",
+            active_positions=[],
+            closed_positions=[],
+            expected_cache_version="8",
+        )
+
+    args = redis_client.eval.call_args.args
+    assert args[-2] == "8"
 
 
 def test_versioned_snapshot_batch_read_uses_one_pipeline():
@@ -597,3 +617,25 @@ def test_rebuild_active_indexes_does_not_overwrite_newer_version():
     pipeline.multi.assert_not_called()
     pipeline.execute.assert_not_called()
     pipeline.reset.assert_called_once()
+
+
+def test_daily_settlement_rebuild_clears_accounts_without_positions():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = []
+    store = RealtimePnlStore(redis_client)
+    store.bump_position_cache_version = Mock(return_value="9")
+    store.rebuild_active_indexes = Mock(return_value=True)
+    store.mark_contract_dirty = Mock()
+
+    store.rebuild_after_daily_settlement(
+        active_positions=[],
+        affected_positions=[],
+        affected_account_ids=["A-EMPTY"],
+    )
+
+    pipeline.delete.assert_called_once_with("pnl:account:A-EMPTY")
+    store.rebuild_active_indexes.assert_called_once_with(
+        expected_cache_version="9",
+        positions=[],
+    )

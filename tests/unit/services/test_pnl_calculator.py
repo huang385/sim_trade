@@ -58,6 +58,26 @@ def test_position_pnl_separates_open_and_daily_base(
 
     assert result.cumulative_unrealized_pnl == Decimal(cumulative)
     assert result.daily_position_pnl == Decimal(daily)
+    assert result.cash_unrealized_pnl == Decimal(cumulative)
+
+
+def test_post_settlement_cash_valuation_uses_daily_basis_without_changing_audit_pnl():
+    snapshot = make_snapshot()
+    snapshot = PositionPnlSnapshot(
+        **{
+            **snapshot.__dict__,
+            "uses_settlement_basis": True,
+        }
+    )
+
+    result = PnlCalculator.calculate_position(
+        mark_price=Decimal("3520"),
+        snapshot=snapshot,
+    )
+
+    assert result.cumulative_unrealized_pnl == Decimal("2400.000000")
+    assert result.daily_position_pnl == Decimal("400.000000")
+    assert result.cash_unrealized_pnl == Decimal("400.000000")
 
 
 def test_multiple_details_only_sum_remaining_volume():

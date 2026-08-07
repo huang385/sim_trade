@@ -31,6 +31,7 @@ from app.services.pnl_calculator import (
     PositionPnlResult,
     PositionPnlSnapshot,
 )
+from app.services.settlement_gate_service import SettlementGateService
 
 
 RISK_QUANT = Decimal("0.00000001")
@@ -83,6 +84,7 @@ class PnlSnapshotPersistenceService:
         calculator: PnlCalculator | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         risk_store: RiskStore | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         self.session_factory = session_factory
         self.pnl_store = pnl_store
@@ -98,6 +100,9 @@ class PnlSnapshotPersistenceService:
         self.option_margin_resolver = (
             option_margin_resolver or OptionMarginCalculatorResolver()
         )
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
+        )
 
     @staticmethod
     def _risk(used_margin: Decimal, equity: Decimal) -> Decimal:
@@ -109,7 +114,11 @@ class PnlSnapshotPersistenceService:
         )
 
     @staticmethod
-    def _mark_price(values: dict[str, str]) -> Decimal | None:
+    def _mark_price(
+        values: dict[str, str],
+        *,
+        expected_trading_day,
+    ) -> Decimal | None:
         """只把能够完整反序列化的正数行情交给资金计算。"""
 
         if not values:
@@ -122,6 +131,11 @@ class PnlSnapshotPersistenceService:
             if (
                 values.get("source") != "YMM_LIVE_DATA"
                 or values.get("ingest_type") != "LIVE_CALLBACK"
+                or (
+                    expected_trading_day is not None
+                    and values.get("trading_day")
+                    != expected_trading_day.isoformat()
+                )
             ):
                 return None
             try:
@@ -129,7 +143,14 @@ class PnlSnapshotPersistenceService:
             except Exception:
                 return None
             return price if price.is_finite() and price > 0 else None
-        if tick.last_price is None or tick.last_price <= 0:
+        if (
+            tick.last_price is None
+            or tick.last_price <= 0
+            or (
+                expected_trading_day is not None
+                and tick.trading_day != expected_trading_day
+            )
+        ):
             return None
         return tick.last_price
 
@@ -163,6 +184,14 @@ class PnlSnapshotPersistenceService:
                 for item in details
                 if item.remaining_volume > 0
             ),
+            uses_settlement_basis=any(
+                getattr(position, "trading_day", None) is not None
+                and getattr(item, "open_trading_day", None) is not None
+                and position.trading_day > item.open_trading_day
+                for item in details
+                if item.remaining_volume > 0
+            ),
+            trading_day=getattr(position, "trading_day", None),
         )
         return self.calculator.calculate_position(
             mark_price=mark_price,
@@ -292,6 +321,19 @@ class PnlSnapshotPersistenceService:
             db,
             account.account_id,
         )
+        if any(
+            getattr(position, "trading_day", None) is not None
+            and getattr(account, "trading_day", None) is not None
+            and position.trading_day != account.trading_day
+            for position in positions
+        ):
+            account.risk_state = AccountRiskState.VALUATION_UNAVAILABLE.value
+            account.updated_at = utc_now()
+            logger.warning(
+                "账户与持仓交易日不一致 account_id=%s",
+                account.account_id,
+            )
+            return False
         position_ids = [position.position_id for position in positions]
         details = (
             self.position_repository
@@ -368,7 +410,12 @@ class PnlSnapshotPersistenceService:
                     instrument.exchange_id.strip().upper(),
                     instrument.symbol.strip().upper(),
                 )
-                mark_price = self._mark_price(latest.get(key, {}))
+                mark_price = self._mark_price(
+                    latest.get(key, {}),
+                    expected_trading_day=getattr(
+                        account, "trading_day", None
+                    ),
+                )
                 if mark_price is None:
                     raise ValueError("持仓行情不可用")
                 instrument_type = InstrumentType(position.instrument_type)
@@ -399,7 +446,10 @@ class PnlSnapshotPersistenceService:
                                     underlying.symbol.strip().upper(),
                                 ),
                                 {},
-                            )
+                            ),
+                            expected_trading_day=getattr(
+                                account, "trading_day", None
+                            ),
                         )
                     updates.append(
                         self._calculate_option_update(
@@ -471,6 +521,7 @@ class PnlSnapshotPersistenceService:
         )
 
         futures_unrealized = Decimal("0")
+        cumulative_economic_pnl = Decimal("0")
         daily_position_pnl = Decimal("0")
         long_option_value = Decimal("0")
         short_option_value = Decimal("0")
@@ -499,6 +550,9 @@ class PnlSnapshotPersistenceService:
                 detail.updated_at = now
 
             position_type = InstrumentType(position.instrument_type)
+            cumulative_economic_pnl += (
+                update.pnl.cumulative_unrealized_pnl
+            )
             if position_type in {
                 InstrumentType.FUTURES_OPTION,
                 InstrumentType.INDEX_OPTION,
@@ -511,7 +565,7 @@ class PnlSnapshotPersistenceService:
                         update.realtime_required_margin
                     )
             else:
-                futures_unrealized += update.pnl.cumulative_unrealized_pnl
+                futures_unrealized += update.pnl.cash_unrealized_pnl
             daily_position_pnl += update.pnl.daily_position_pnl
 
         account.unrealized_pnl = quantize_money(futures_unrealized)
@@ -520,6 +574,11 @@ class PnlSnapshotPersistenceService:
             account.daily_position_pnl
             + account.daily_close_pnl
             - account.daily_commission
+        )
+        account.cumulative_net_pnl = quantize_money(
+            Decimal(getattr(account, "realized_pnl", Decimal("0")))
+            + cumulative_economic_pnl
+            - Decimal(getattr(account, "used_commission", Decimal("0")))
         )
         account.long_option_market_value = quantize_money(long_option_value)
         account.short_option_market_value = quantize_money(short_option_value)
@@ -585,6 +644,7 @@ class PnlSnapshotPersistenceService:
 
         with self.session_factory() as db:
             try:
+                self.settlement_gate_service.ensure_trading_open(db)
                 account = self.account_repository.get_by_account_id_for_update(
                     db, account_id
                 )
@@ -643,6 +703,7 @@ class PnlSnapshotPersistenceService:
         for account_id in account_ids:
             try:
                 with self.session_factory() as db:
+                    self.settlement_gate_service.ensure_trading_open(db)
                     account = (
                         self.account_repository.get_by_account_id_for_update(
                             db,

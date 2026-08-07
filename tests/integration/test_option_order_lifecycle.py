@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
@@ -11,6 +11,7 @@ from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.redis_keys import market_latest_key
 from app.matching.models import MatchResult
 from app.models.account import Account
+from app.models.daily_settlement import DailySettlementBatch
 from app.models.fee_rule_item import FeeRuleItem
 from app.models.instrument import Instrument
 from app.models.option_margin_rule import OptionMarginRule
@@ -116,13 +117,22 @@ def _settle(order_id: str, event_id: str, price: str, volume: int):
 
 def _put_live_tick(exchange_id: str, symbol: str, price: str) -> None:
     now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        latest_settled_day = db.scalar(
+            select(func.max(DailySettlementBatch.trading_day)).where(
+                DailySettlementBatch.status == "COMPLETED"
+            )
+        )
+    tick_trading_day = now.date()
+    if latest_settled_day is not None and tick_trading_day <= latest_settled_day:
+        tick_trading_day = latest_settled_day + timedelta(days=1)
     tick = MarketTick(
         source_event_id=f"IT-TICK-{uuid4().hex}",
         ingest_type="LIVE_CALLBACK",
         order_book_id=symbol,
         exchange_id=exchange_id,
         symbol=symbol,
-        trading_day=now.date(),
+        trading_day=tick_trading_day,
         event_time=now,
         local_recv_time=now,
         sequence_id=1,

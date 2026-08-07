@@ -253,6 +253,14 @@ class Account(Base):
         default=Decimal("0"),
     )
 
+    # 后端统一累计经济净盈亏，前端不得再自行拼接。
+    cumulative_net_pnl: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
+    )
+
     # 成交后已经实际扣除的手续费
     used_commission: Mapped[Decimal] = mapped_column(
         Numeric(24, 6),

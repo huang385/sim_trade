@@ -74,6 +74,9 @@ class RealtimePnlQueryService:
                 daily_close_pnl=_decimal(values, "daily_close_pnl"),
                 daily_commission=_decimal(values, "daily_commission"),
                 daily_pnl=_decimal(values, "daily_pnl"),
+                cumulative_net_pnl=Decimal(
+                    values.get("cumulative_net_pnl", "0")
+                ),
                 equity=_decimal(values, "equity"),
                 available_cash=_decimal(values, "available_cash"),
                 risk_ratio=_decimal(values, "risk_ratio"),
@@ -91,6 +94,9 @@ class RealtimePnlQueryService:
             daily_close_pnl=account.daily_close_pnl,
             daily_commission=account.daily_commission,
             daily_pnl=account.daily_pnl,
+            cumulative_net_pnl=getattr(
+                account, "cumulative_net_pnl", Decimal("0")
+            ),
             equity=account.equity,
             available_cash=account.available_cash,
             risk_ratio=account.risk_ratio,

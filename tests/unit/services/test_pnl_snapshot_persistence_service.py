@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -6,6 +7,21 @@ from unittest.mock import Mock, call
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
 )
+
+
+def test_old_trading_day_market_price_is_rejected():
+    assert (
+        PnlSnapshotPersistenceService._mark_price(
+            {
+                "source": "YMM_LIVE_DATA",
+                "ingest_type": "LIVE_CALLBACK",
+                "trading_day": "2026-08-06",
+                "last_price": "100",
+            },
+            expected_trading_day=date(2026, 8, 7),
+        )
+        is None
+    )
 
 
 def make_position(

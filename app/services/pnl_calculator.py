@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 from app.common.decimal_utils import quantize_money
@@ -44,6 +45,10 @@ class PositionPnlSnapshot:
     margin_rule_snapshot: tuple[tuple[str, str], ...] = ()
     # 本轮实际读取的PostgreSQL持仓事实Outbox版本。
     source_fact_version: str = "0"
+    # 账户现金是否已经吸收过至少一次逐日盯市。仅影响账户权益口径，累计
+    # 浮盈展示仍始终相对原始开仓价。
+    uses_settlement_basis: bool = False
+    trading_day: date | None = None
 
     @property
     def underlying_key(self) -> tuple[str, str] | None:
@@ -61,6 +66,7 @@ class PositionPnlResult:
 
     cumulative_unrealized_pnl: Decimal
     daily_position_pnl: Decimal
+    cash_unrealized_pnl: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -75,8 +81,10 @@ class PnlCalculator:
     """
     期货盘中盈亏纯计算器。
 
-    本类只执行Decimal运算，不访问PostgreSQL、Redis或系统时间。累计口径
-    使用原始开仓价，当日口径使用可由未来日终结算更新的pnl_base_price。
+    本类只执行Decimal运算，不访问PostgreSQL、Redis或系统时间。累计展示
+    口径始终使用原始开仓价；当日及账户资金估值口径使用最近一次现金盯市
+    后的pnl_base_price。首个交易日两者相同，日终后分离以避免现金和浮盈
+    重复计入权益。
     """
 
     @staticmethod
@@ -139,9 +147,14 @@ class PnlCalculator:
                 (mark_price - detail.pnl_base_price) * quantity * sign
             )
 
+        cumulative = quantize_money(cumulative)
+        daily = quantize_money(daily)
         return PositionPnlResult(
-            cumulative_unrealized_pnl=quantize_money(cumulative),
-            daily_position_pnl=quantize_money(daily),
+            cumulative_unrealized_pnl=cumulative,
+            daily_position_pnl=daily,
+            cash_unrealized_pnl=(
+                daily if snapshot.uses_settlement_basis else cumulative
+            ),
         )
 
     @classmethod
@@ -157,30 +170,37 @@ class PnlCalculator:
     ) -> ClosePnlResult:
         """计算一笔平仓相对原始开仓价和当日基准价的两套结果。"""
 
-        snapshot = PositionPnlSnapshot(
-            position_id="",
-            account_id="",
-            order_book_id="",
-            exchange_id="",
-            symbol="",
-            direction=position_direction,
-            contract_multiplier=contract_multiplier,
-            persisted_unrealized_pnl=Decimal("0"),
-            persisted_daily_position_pnl=Decimal("0"),
-            details=(
-                PnlDetailSnapshot(
-                    position_detail_id="",
-                    open_price=open_price,
-                    pnl_base_price=pnl_base_price,
-                    remaining_volume=volume,
-                ),
-            ),
-        )
-        result = cls.calculate_position(
-            mark_price=close_price,
-            snapshot=snapshot,
-        )
+        for name, value in (
+            ("平仓价", close_price),
+            ("原始开仓价", open_price),
+            ("盈亏基准价", pnl_base_price),
+            ("合约乘数", contract_multiplier),
+        ):
+            cls._validate_decimal(name, value)
+        try:
+            direction = PositionDirection(position_direction)
+        except ValueError as exc:
+            raise BusinessValidationError(
+                "不支持的持仓方向",
+                error_code="INVALID_POSITION_DIRECTION",
+            ) from exc
+        if (
+            close_price <= 0
+            or open_price <= 0
+            or pnl_base_price <= 0
+            or contract_multiplier <= 0
+            or volume <= 0
+        ):
+            raise BusinessValidationError(
+                "平仓盈亏输入不合法", error_code="INVALID_PNL_INPUT"
+            )
+        sign = Decimal("1") if direction == PositionDirection.LONG else Decimal("-1")
+        quantity = Decimal(volume) * contract_multiplier
         return ClosePnlResult(
-            realized_pnl=result.cumulative_unrealized_pnl,
-            daily_close_pnl=result.daily_position_pnl,
+            realized_pnl=quantize_money(
+                (close_price - open_price) * quantity * sign
+            ),
+            daily_close_pnl=quantize_money(
+                (close_price - pnl_base_price) * quantity * sign
+            ),
         )

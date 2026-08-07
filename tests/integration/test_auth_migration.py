@@ -87,8 +87,8 @@ def _run_alembic(database_name: str, *arguments: str) -> None:
     )
 
 
-def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
-    """全新环境可以从Base升级到Head，并有可执行的完整降级路径。"""
+def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
+    """空库可升级；含资金历史的新Head明确拒绝自动删除事实。"""
 
     with _temporary_database() as database_name:
         _run_alembic(database_name, "upgrade", "head")
@@ -97,8 +97,8 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            # YMM Live Data映射之后追加统一账户风险监控与强平基础迁移。
-            assert revision == "20260805_0017"
+            # 风险监控迁移之后追加手工日终结算事实表。
+            assert revision == "20260806_0019"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -106,15 +106,21 @@ def test_empty_database_can_upgrade_to_head_and_downgrade_to_base():
             ).fetchone()[0]
             assert nullable == "NO"
 
-        _run_alembic(database_name, "downgrade", "base")
+        with pytest.raises(subprocess.CalledProcessError):
+            _run_alembic(database_name, "downgrade", "base")
         with psycopg.connect(_admin_dsn(database=database_name)) as db:
-            remaining_core_tables = db.execute(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_schema = 'public' "
-                "AND table_name IN "
-                "('account', 'app_user', 'auth_refresh_session')"
+            revision = db.execute(
+                "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            assert remaining_core_tables == 0
+            settlement_tables = db.execute(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name IN "
+                "('daily_settlement_batch', 'instrument_settlement_price', "
+                "'daily_account_settlement', 'daily_position_settlement', "
+                "'option_expiry_settlement_detail')"
+            ).fetchone()[0]
+            assert revision == "20260806_0019"
+            assert settlement_tables == 5
 
 
 def test_option_migrations_enforce_underlying_type_and_rule_scope():

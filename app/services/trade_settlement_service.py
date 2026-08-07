@@ -53,6 +53,7 @@ from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.services.settlement_gate_service import SettlementGateService
 
 
 @dataclass(frozen=True)
@@ -140,6 +141,7 @@ class TradeSettlementService:
         position_id_factory: Callable[[], str] | None = None,
         position_detail_id_factory: Callable[[], str] | None = None,
         event_id_factory: Callable[[], str] | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         # 所有依赖都允许从构造函数注入，便于单元测试精确模拟某一步失败，
         # 同时生产环境默认使用真实Repository和UUID编号工厂。
@@ -178,6 +180,9 @@ class TradeSettlementService:
         )
         self.realtime_fact_events = RealtimeFactEventService(
             repository=self.outbox_repository,
+        )
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
         )
 
     @staticmethod
@@ -387,6 +392,9 @@ class TradeSettlementService:
             return SettlementResult(None, command.order_id, "NOT_MATCHED")
 
         try:
+            # 在取得订单行锁前先进入结算共享锁域。排他日终会等待所有已开始
+            # 成交事务提交，并阻止新的成交跨越持久化屏障。
+            self.settlement_gate_service.ensure_trading_open(db)
             # 固定先锁订单，再锁账户、持仓，降低并发结算时的死锁概率。
             order = self.order_repository.get_by_order_id_for_update(
                 db, command.order_id
@@ -394,6 +402,10 @@ class TradeSettlementService:
             if order is None:
                 db.rollback()
                 return SettlementResult(None, command.order_id, "ORDER_NOT_FOUND")
+
+            self.settlement_gate_service.ensure_trading_open(
+                db, trading_day=getattr(order, "trading_day", None)
+            )
 
             existing = self.trade_repository.get_by_order_market_event(
                 db,

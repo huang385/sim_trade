@@ -190,6 +190,12 @@ return snapshot_version
 """
 
 WRITE_CYCLE_SCRIPT = """
+local current_cache_version = tostring(
+    redis.call('GET', KEYS[2]) or '0'
+)
+if ARGV[1] ~= '' and current_cache_version ~= ARGV[1] then
+    return 0
+end
 local snapshot_version = tostring(redis.call('INCR', KEYS[1]))
 """ + APPLY_CYCLE_OPERATIONS_BODY
 
@@ -200,8 +206,14 @@ WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then
     return 0
 end
+local current_cache_version = tostring(
+    redis.call('GET', KEYS[3]) or '0'
+)
+if ARGV[2] ~= '' and current_cache_version ~= ARGV[2] then
+    return 0
+end
 local snapshot_version = tostring(redis.call('INCR', KEYS[2]))
-""" + APPLY_CYCLE_OPERATIONS_BODY
+""" + APPLY_CYCLE_OPERATIONS_BODY.replace("ARGV[2]", "ARGV[3]")
 
 
 def _redis_value(value) -> str:
@@ -523,6 +535,7 @@ class RealtimePnlStore:
         dirty_version: str,
         additions: list[tuple[str, str, str, str]],
         removals: list[tuple[str, str, str, str]],
+        mark_dirty: bool = True,
     ) -> list[list[str]]:
         """
         生成一个PnL周期的Redis绝对写入命令。
@@ -542,17 +555,18 @@ class RealtimePnlStore:
             for field, value in _mapping(item).items():
                 hash_operation.extend((field, value))
             operations.append(hash_operation)
-            operations.append(
-                ["SADD", PNL_DIRTY_POSITIONS_KEY, item.position_id]
-            )
-            operations.append(
-                [
-                    "HSET",
-                    PNL_DIRTY_POSITION_VERSIONS_KEY,
-                    item.position_id,
-                    dirty_version,
-                ]
-            )
+            if mark_dirty:
+                operations.append(
+                    ["SADD", PNL_DIRTY_POSITIONS_KEY, item.position_id]
+                )
+                operations.append(
+                    [
+                        "HSET",
+                        PNL_DIRTY_POSITION_VERSIONS_KEY,
+                        item.position_id,
+                        dirty_version,
+                    ]
+                )
             event_type = (
                 "OPTION_VALUATION_UPDATED"
                 if item.instrument_type in {"FUTURES_OPTION", "INDEX_OPTION"}
@@ -597,17 +611,18 @@ class RealtimePnlStore:
             for field, value in _mapping(item).items():
                 hash_operation.extend((field, value))
             operations.append(hash_operation)
-            operations.append(
-                ["SADD", PNL_DIRTY_ACCOUNTS_KEY, item.account_id]
-            )
-            operations.append(
-                [
-                    "HSET",
-                    PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
-                    item.account_id,
-                    dirty_version,
-                ]
-            )
+            if mark_dirty:
+                operations.append(
+                    ["SADD", PNL_DIRTY_ACCOUNTS_KEY, item.account_id]
+                )
+                operations.append(
+                    [
+                        "HSET",
+                        PNL_DIRTY_ACCOUNT_VERSIONS_KEY,
+                        item.account_id,
+                        dirty_version,
+                    ]
+                )
             account_event_id = (
                 f"ACCOUNT:{dirty_version}:{item.account_id}:"
                 f"{item.updated_at.isoformat()}"
@@ -735,6 +750,8 @@ class RealtimePnlStore:
         dirty_version: str,
         active_positions: Iterable[tuple[str, str, str, str]],
         closed_positions: Iterable[tuple[str, str, str, str]],
+        expected_cache_version: str | None = None,
+        mark_dirty: bool = True,
     ) -> tuple[int, int]:
         """
         一个500ms批次内原子写快照、Dirty标记和必要的静态索引变化。
@@ -752,18 +769,24 @@ class RealtimePnlStore:
             dirty_version=dirty_version,
             additions=list(active_positions),
             removals=list(closed_positions),
+            mark_dirty=mark_dirty,
         )
-        self.redis_client.eval(
+        written = self.redis_client.eval(
             WRITE_CYCLE_SCRIPT,
-            1,
+            2,
             PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
-            "",
+            PNL_POSITION_CACHE_VERSION_KEY,
+            str(expected_cache_version or ""),
             json.dumps(
                 operations,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
         )
+        if not written:
+            raise RuntimeError(
+                "持仓事实版本已变化，拒绝写入旧交易日实时PnL快照"
+            )
         return len(position_items), len(account_items)
 
     def write_cycle_snapshots_if_lease_owned(
@@ -775,6 +798,8 @@ class RealtimePnlStore:
         dirty_version: str,
         active_positions: Iterable[tuple[str, str, str, str]],
         closed_positions: Iterable[tuple[str, str, str, str]],
+        expected_cache_version: str | None = None,
+        mark_dirty: bool = True,
     ) -> tuple[bool, int, int]:
         """
         仅在当前实例仍持有租约时原子写入一个PnL周期的全部Redis变化。
@@ -791,15 +816,18 @@ class RealtimePnlStore:
             dirty_version=dirty_version,
             additions=list(active_positions),
             removals=list(closed_positions),
+            mark_dirty=mark_dirty,
         )
 
         written = bool(
             self.redis_client.eval(
                 WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT,
-                2,
+                3,
                 self.worker_lease_key,
                 PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
+                PNL_POSITION_CACHE_VERSION_KEY,
                 lease_owner,
+                str(expected_cache_version or ""),
                 json.dumps(
                     operations,
                     ensure_ascii=False,
@@ -1427,3 +1455,62 @@ class RealtimePnlStore:
             finally:
                 pipeline.reset()
         return False
+
+    def rebuild_after_daily_settlement(
+        self,
+        *,
+        active_positions,
+        affected_positions,
+        affected_account_ids=(),
+        position_snapshots: Iterable[PositionRealtimePnl] = (),
+        account_snapshots: Iterable[AccountRealtimePnl] = (),
+        dirty_version: str = "DAILY_SETTLEMENT",
+    ) -> None:
+        """按日终事实直接写入下一交易日零当日盈亏基准快照。
+
+        本方法只操作可重建派生键，不触碰行情 Stream、Consumer Group、
+        Pending 消息或 Outbox。任何 Redis 异常由调用方记录为缓存待恢复，
+        不能反向重做已经提交的数据库资金过账。
+        """
+
+        active = [tuple(item) for item in active_positions]
+        affected = [tuple(item) for item in affected_positions]
+        position_items = list(position_snapshots)
+        account_items = list(account_snapshots)
+        account_ids = sorted(
+            {str(item[0]) for item in affected}
+            | {str(account_id) for account_id in affected_account_ids}
+        )
+        position_ids = sorted({str(item[3]) for item in affected})
+        pipeline = self.redis_client.pipeline(transaction=True)
+        snapshot_keys = [pnl_account_key(account_id) for account_id in account_ids]
+        snapshot_keys.extend(pnl_position_key(position_id) for position_id in position_ids)
+        if snapshot_keys:
+            pipeline.delete(*snapshot_keys)
+        for account_id, exchange_id, symbol, position_id, expired_closed in affected:
+            if expired_closed:
+                pipeline.srem(
+                    pnl_contract_positions_key(exchange_id, symbol),
+                    position_id,
+                )
+                pipeline.srem(
+                    pnl_account_positions_key(account_id),
+                    position_id,
+                )
+        pipeline.execute()
+
+        cache_version = self.bump_position_cache_version()
+        if not self.rebuild_active_indexes(
+            expected_cache_version=cache_version,
+            positions=active,
+        ):
+            raise RuntimeError("日终期间持仓版本再次变化，PnL索引重建未完成")
+        self.write_cycle_snapshots(
+            positions=position_items,
+            accounts=account_items,
+            dirty_version=dirty_version,
+            active_positions=active,
+            closed_positions=[],
+            expected_cache_version=cache_version,
+            mark_dirty=False,
+        )

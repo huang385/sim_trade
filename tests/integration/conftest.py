@@ -1,12 +1,12 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import os
 from uuid import uuid4
 
 import pytest
 from redis.exceptions import RedisError
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.database import SessionLocal
@@ -35,6 +35,7 @@ from app.infrastructure.redis_keys import (
     pnl_position_key,
 )
 from app.models.account import Account
+from app.models.daily_settlement import DailySettlementBatch
 from app.models.fee_rule import FeeRule
 from app.models.instrument import Instrument
 from app.models.margin_rule import MarginRule
@@ -56,7 +57,7 @@ from app.services.fee_calculator import FeeCalculator
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_cancellation_service import OrderCancellationService
-from app.services.order_service import OrderService
+from app.services.order_service import OrderService, get_order_service
 from app.services.order_validation_service import OrderValidationService
 from app.services.rule_query_service import get_rule_query_service
 from app.services.account_authorization_service import (
@@ -131,12 +132,21 @@ def integration_api_auth(request):
 @pytest.fixture
 def integration_context():
     suffix = uuid4().hex[:10].upper()
+    with SessionLocal() as db:
+        latest_settled_day = db.scalar(
+            select(func.max(DailySettlementBatch.trading_day)).where(
+                DailySettlementBatch.status == "COMPLETED"
+            )
+        )
+    trading_day = date.today()
+    if latest_settled_day is not None and trading_day <= latest_settled_day:
+        trading_day = latest_settled_day + timedelta(days=1)
     context = IntegrationContext(
         account_id=f"ITA{suffix}",
         user_id=f"ITU{suffix}",
         exchange_id="ITEX",
         symbol=f"IT{suffix}",
-        trading_day=date.today(),
+        trading_day=trading_day,
     )
 
     try:
@@ -219,7 +229,17 @@ def integration_context():
     except SQLAlchemyError as exc:
         pytest.skip(f"PostgreSQL不可用或尚未执行迁移: {exc}")
 
+    previous_order_override = app.dependency_overrides.get(
+        get_order_service
+    )
+    app.dependency_overrides[get_order_service] = lambda: make_order_service(
+        context
+    )
     yield context
+    if previous_order_override is None:
+        app.dependency_overrides.pop(get_order_service, None)
+    else:
+        app.dependency_overrides[get_order_service] = previous_order_override
 
     # 只删除该测试生成的精确编号数据，不影响用户已有账户、规则和订单。
     with SessionLocal() as db:

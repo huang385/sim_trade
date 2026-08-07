@@ -54,6 +54,7 @@ from app.services.fee_calculator import (
 )
 from app.services.account_access_scope import AccountAccessScope
 from app.services.account_risk_state_service import AccountRiskStateService
+from app.services.settlement_gate_service import SettlementGateService
 from app.enums.risk_enums import OrderSource
 from app.services.margin_calculator import MarginCalculator
 from app.services.option_margin_calculator import (
@@ -162,6 +163,7 @@ class OrderService:
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         option_market_price_service: OptionMarketPriceService | None = None,
         market_pre_subscription_store: MarketPreSubscriptionStore | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -199,6 +201,9 @@ class OrderService:
         )
         self.option_market_price_service = option_market_price_service
         self.market_pre_subscription_store = market_pre_subscription_store
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
+        )
 
     def _get_option_margin_prices(
         self,
@@ -343,6 +348,12 @@ class OrderService:
             # 当前阶段使用接单当天作为交易日。
             # 后续接入交易日历后，只需替换 trading_day_provider。
             trading_day = self.trading_day_provider()
+            # advisory事务共享锁必须在任何资金或订单写入前取得。日终进程
+            # 持有同键排他锁时，本事务会等待；等待结束后再检查数据库批次，
+            # 从而消除“检查时未结算、随后并发落单”的竞态。
+            self.settlement_gate_service.ensure_trading_open(
+                db, trading_day=trading_day
+            )
 
             # 统一查询合约、当前保证金规则和当前手续费规则。
             # 三类参考数据必须全部存在并属于当前交易日。

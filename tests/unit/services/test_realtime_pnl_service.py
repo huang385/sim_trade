@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 import json
 
@@ -150,6 +151,7 @@ class FakeStore:
         dirty_version,
         active_positions,
         closed_positions,
+        expected_cache_version=None,
     ):
         self.index_additions.append(list(active_positions))
         self.index_removals.append(list(closed_positions))
@@ -212,6 +214,22 @@ def test_tick_writes_absolute_position_and_account_snapshots():
         "daily_position_pnl"
     ] == "400.000000"
     assert store.accounts["A001"]["daily_pnl"] == "544.000000"
+
+
+def test_old_trading_day_tick_cannot_overwrite_new_day_position():
+    cache = FakeCache()
+    next_day = date(2026, 7, 28)
+    cache.position = replace(cache.position, trading_day=next_day)
+    cache.account = replace(cache.account, trading_day=next_day)
+    store = FakeStore()
+
+    result = RealtimePnlService(
+        active_position_cache=cache,
+        pnl_store=store,
+    ).process(stream_message_id="old-day-1", fields=make_fields())
+
+    assert result.failed_contracts == frozenset({("SHFE", "RB2610")})
+    assert "P001" not in store.positions
 
 
 def test_futures_position_is_not_scheduled_for_option_margin_adjustment():

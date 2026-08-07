@@ -27,6 +27,7 @@ from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.services.settlement_gate_service import SettlementGateService
 
 
 class OptionMarginAdjustmentService:
@@ -49,6 +50,7 @@ class OptionMarginAdjustmentService:
         instrument_repository: InstrumentRepository | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         realtime_fact_events: RealtimeFactEventService | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.account_repository = account_repository or AccountRepository()
@@ -62,6 +64,9 @@ class OptionMarginAdjustmentService:
         self.realtime_fact_events = (
             realtime_fact_events
             or RealtimeFactEventService(repository=OutboxRepository())
+        )
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
         )
 
     @staticmethod
@@ -110,6 +115,7 @@ class OptionMarginAdjustmentService:
 
     def adjust(self, db: Session, *, account_id: str, position_id: str):
         try:
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )

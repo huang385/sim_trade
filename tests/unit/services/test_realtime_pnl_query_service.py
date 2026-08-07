@@ -43,6 +43,7 @@ def test_account_query_prefers_redis_realtime_snapshot():
                 "daily_close_pnl": "150.000000",
                 "daily_commission": "6.000000",
                 "daily_pnl": "444.000000",
+                "cumulative_net_pnl": "1444.000000",
                 "equity": "101300.000000",
                 "available_cash": "90000.000000",
                 "risk_ratio": "0.10000000",
@@ -55,6 +56,7 @@ def test_account_query_prefers_redis_realtime_snapshot():
 
     assert result.unrealized_pnl == Decimal("1300.000000")
     assert result.daily_pnl == Decimal("444.000000")
+    assert result.cumulative_net_pnl == Decimal("1444.000000")
     assert result.data_source == "REDIS_REALTIME"
 
 

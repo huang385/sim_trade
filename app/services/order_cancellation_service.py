@@ -33,6 +33,7 @@ from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.services.settlement_gate_service import SettlementGateService
 
 
 def generate_cancel_event_id() -> str:
@@ -76,6 +77,7 @@ class OrderCancellationService:
         event_id_factory: Callable[[], str] = generate_cancel_event_id,
         time_provider: Callable[[], datetime] = utc_now,
         default_access_scope: AccountAccessScope | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         self.order_repository = order_repository or OrderRepository()
         self.account_repository = account_repository or AccountRepository()
@@ -91,6 +93,9 @@ class OrderCancellationService:
         )
         self.time_provider = time_provider
         self.default_access_scope = default_access_scope
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
+        )
 
     def cancel_order(
         self,
@@ -99,6 +104,7 @@ class OrderCancellationService:
         order_id: str,
         request: OrderCancelRequest,
         access_scope: AccountAccessScope | None = None,
+        settlement_internal: bool = False,
     ) -> Order:
         """
         锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。
@@ -114,6 +120,8 @@ class OrderCancellationService:
         normalized_order_id = order_id.strip()
         normalized_account_id = request.account_id.strip()
         try:
+            if not settlement_internal:
+                self.settlement_gate_service.ensure_trading_open(db)
             # 固定锁顺序第一步：先锁订单。普通用户在同一条SQL中通过
             # Account.user_id限制所有权，并使用FOR UPDATE OF orders只锁
             # 订单行；管理员才使用不带用户范围的订单锁。

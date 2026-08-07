@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     # PostgreSQL活动订单游标分页重建批次大小
     active_order_rebuild_batch_size: int = 500
 
+    # 日终只接受目标交易日的有限正数 last_price。命令通常紧随最后一个
+    # 交易时段执行，一小时窗口足以覆盖不同品种收盘时间且拒绝任意旧行情。
+    # 日终通常在各品种收盘后一段时间启动。四小时窗口允许使用当天的
+    # 最后一笔收盘行情，同时DailySettlementService仍强制校验交易日一致，
+    # 并拒绝超过60秒的未来时间，不能回退到上一交易日旧行情。
+    daily_settlement_tick_max_age_seconds: int = 14400
+
     # YMM Live Data客户端。Token和可选自定义地址只允许通过.env或环境变量提供。
     # mode使用官方SDK定义的lan、TS或local；若管理员要求直连，也可提供base_url。
     remote_market_data_base_url: str = ""

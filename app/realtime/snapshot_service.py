@@ -131,6 +131,9 @@ class SnapshotService:
                 Decimal(account.daily_close_pnl)
                 - Decimal(account.daily_commission)
             ),
+            cumulative_net_pnl=Decimal(
+                getattr(account, "cumulative_net_pnl", Decimal("0"))
+            ),
             equity=valuation.equity,
             available_cash=valuation.available_cash,
             futures_unrealized_pnl=quantize_money(zero),
@@ -147,6 +150,7 @@ class SnapshotService:
             updated_at=account.updated_at,
             data_source="POSTGRES_ZERO_POSITION",
             source_account_fact_version="0",
+            trading_day=getattr(account, "trading_day", None),
         )
         return {
             key: (

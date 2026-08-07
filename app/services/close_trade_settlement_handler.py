@@ -889,7 +889,7 @@ class CloseTradeSettlementHandler:
             )
         else:
             account.cash_balance = quantize_money(
-                account.cash_balance + realized_pnl - actual_commission
+                account.cash_balance + daily_close_pnl - actual_commission
             )
             # 下单时预计手续费已经从可用资金扣除。成交时先释放本次预计值，
             # 再扣实际手续费，同时返还保证金并计入平仓盈亏。
@@ -898,7 +898,7 @@ class CloseTradeSettlementHandler:
                 + released_frozen_commission
                 - actual_commission
                 + released_margin
-                + realized_pnl
+                + daily_close_pnl
             )
             account.equity = quantize_money(
                 account.cash_balance + account.unrealized_pnl

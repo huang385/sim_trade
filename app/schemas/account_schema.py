@@ -69,6 +69,7 @@ class AccountResponse(BaseModel):
     daily_close_pnl: Decimal
     daily_commission: Decimal
     daily_pnl: Decimal
+    cumulative_net_pnl: Decimal = Decimal("0")
 
     used_commission: Decimal
     frozen_commission: Decimal

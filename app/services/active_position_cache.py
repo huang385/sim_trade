@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Callable, Mapping
@@ -39,6 +40,10 @@ class AccountPnlSnapshot:
     short_option_market_value: Decimal = Decimal("0")
     risk_available_cash: Decimal = Decimal("0")
     risk_state: str = "NORMAL"
+    realized_pnl: Decimal = Decimal("0")
+    used_commission: Decimal = Decimal("0")
+    cumulative_net_pnl: Decimal = Decimal("0")
+    trading_day: date | None = None
     # 与Position快照相同，记录本轮实际参与估值的账户事实Outbox版本。
     source_fact_version: str = "0"
 
@@ -208,6 +213,16 @@ class ActivePositionCache:
                 getattr(account, "risk_available_cash", Decimal("0"))
             ),
             risk_state=getattr(account, "risk_state", "NORMAL"),
+            realized_pnl=Decimal(
+                getattr(account, "realized_pnl", Decimal("0"))
+            ),
+            used_commission=Decimal(
+                getattr(account, "used_commission", Decimal("0"))
+            ),
+            cumulative_net_pnl=Decimal(
+                getattr(account, "cumulative_net_pnl", Decimal("0"))
+            ),
+            trading_day=getattr(account, "trading_day", None),
             source_fact_version=(fact_versions or {}).get(
                 ("ACCOUNT", account.account_id),
                 "0",
@@ -259,6 +274,7 @@ class ActivePositionCache:
                     "detail_multipliers": [],
                     "detail_rule_snapshots": [],
                     "underlying": underlying,
+                    "uses_settlement_basis": False,
                 },
             )
             item["details"].append(
@@ -277,6 +293,14 @@ class ActivePositionCache:
                     getattr(detail, "margin_rule_id", None),
                     getattr(detail, "margin_rule_version", None),
                     getattr(detail, "margin_rule_snapshot", None) or {},
+                )
+            )
+            item["uses_settlement_basis"] = bool(
+                item["uses_settlement_basis"]
+                or (
+                    getattr(position, "trading_day", None) is not None
+                    and getattr(detail, "open_trading_day", None) is not None
+                    and position.trading_day > detail.open_trading_day
                 )
             )
             accounts[account.account_id] = (
@@ -378,6 +402,8 @@ class ActivePositionCache:
                     ("POSITION", position.position_id),
                     "0",
                 ),
+                uses_settlement_basis=bool(item["uses_settlement_basis"]),
+                trading_day=getattr(position, "trading_day", None),
             )
             key = (
                 position.exchange_id.strip().upper(),

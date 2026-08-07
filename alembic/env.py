@@ -17,6 +17,23 @@ if config.config_file_name is not None:
 config.set_main_option("sqlalchemy.url", settings.database_url)
 target_metadata = Base.metadata
 
+# 交易日历和产品时段由独立参考数据同步链路管理，本项目只读复用。自动
+# 比对必须忽略它们，否则 Alembic 会错误建议删除这两张已有事实表。
+EXTERNALLY_MANAGED_TABLES = {
+    "trading_calendar",
+    "product_trading_schedule",
+}
+
+
+def include_name(name, type_, parent_names):
+    if (
+        type_ == "table"
+        and name in EXTERNALLY_MANAGED_TABLES
+        and parent_names.get("schema_name") in {None, "public"}
+    ):
+        return False
+    return True
+
 
 def run_migrations_offline() -> None:
     """在不创建数据库连接的情况下输出迁移 SQL。"""
@@ -27,6 +44,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -45,6 +63,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_name=include_name,
         )
         with context.begin_transaction():
             context.run_migrations()

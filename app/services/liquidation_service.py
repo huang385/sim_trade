@@ -19,6 +19,7 @@ from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_service import OrderService
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.risk_event_service import RiskEventService
+from app.services.settlement_gate_service import SettlementGateService
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,7 @@ class LiquidationService:
         position_repository: PositionRepository | None = None,
         risk_repository: RiskRepository | None = None,
         event_service: RiskEventService | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
         max_retries: int = 10,
     ):
         self.session_factory = session_factory
@@ -76,6 +78,9 @@ class LiquidationService:
             risk_repository=self.risk_repository
         )
         self.max_retries = max(max_retries, 1)
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
+        )
 
     @staticmethod
     def _required_improvement(account) -> Decimal:
@@ -156,6 +161,7 @@ class LiquidationService:
                 return None
             account_id = task_hint.account_id
             db.rollback()
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )
@@ -272,6 +278,7 @@ class LiquidationService:
                 return
             account_id = task_hint.account_id
             db.rollback()
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )
@@ -382,6 +389,7 @@ class LiquidationService:
                 return
             account_id = task_hint.account_id
             db.rollback()
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )
@@ -428,6 +436,7 @@ class LiquidationService:
                 return
             account_id = task_hint.account_id
             db.rollback()
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )
@@ -461,6 +470,7 @@ class LiquidationService:
                 return
             account_id = task_hint.account_id
             db.rollback()
+            self.settlement_gate_service.ensure_trading_open(db)
             account = self.account_repository.get_by_account_id_for_update(
                 db, account_id
             )

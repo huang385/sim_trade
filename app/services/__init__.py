@@ -95,6 +95,11 @@ from app.services.option_market_pre_subscription_service import (
 from app.services.liquidation_service import LiquidationService
 from app.services.risk_event_service import RiskEventService
 from app.services.risk_monitor_service import RiskMonitorService
+from app.services.daily_settlement_service import (
+    DailySettlementError,
+    DailySettlementResult,
+    DailySettlementService,
+)
 
 
 __all__ = [
@@ -158,4 +163,7 @@ __all__ = [
     "LiquidationService",
     "RiskEventService",
     "RiskMonitorService",
+    "DailySettlementService",
+    "DailySettlementResult",
+    "DailySettlementError",
 ]

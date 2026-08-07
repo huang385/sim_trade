@@ -17,6 +17,7 @@ from app.services.account_access_scope import AccountAccessScope
 from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.order_cancellation_service import OrderCancellationService
 from app.services.risk_event_service import RiskEventService
+from app.services.settlement_gate_service import SettlementGateService
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
 )
@@ -49,6 +50,7 @@ class RiskMonitorService:
         risk_repository: RiskRepository | None = None,
         event_service: RiskEventService | None = None,
         revaluation_service: PnlSnapshotPersistenceService | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         self.session_factory = session_factory
         self.cancellation_service = cancellation_service
@@ -59,6 +61,9 @@ class RiskMonitorService:
             risk_repository=self.risk_repository
         )
         self.revaluation_service = revaluation_service
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
+        )
 
     @staticmethod
     def _valuation_available(account) -> bool:
@@ -107,6 +112,7 @@ class RiskMonitorService:
     def _evaluate_and_commit(self, account_id: str) -> tuple[str, bool, str]:
         with self.session_factory() as db:
             try:
+                self.settlement_gate_service.ensure_trading_open(db)
                 account = self.account_repository.get_by_account_id_for_update(
                     db, account_id
                 )
@@ -148,6 +154,7 @@ class RiskMonitorService:
     def _create_task(self, account_id: str, reason: str) -> str:
         with self.session_factory() as db:
             try:
+                self.settlement_gate_service.ensure_trading_open(db)
                 account = self.account_repository.get_by_account_id_for_update(
                     db, account_id
                 )
@@ -190,6 +197,7 @@ class RiskMonitorService:
             except IntegrityError:
                 db.rollback()
                 with self.session_factory() as retry_db:
+                    self.settlement_gate_service.ensure_trading_open(retry_db)
                     existing = self.risk_repository.get_active_task_for_update(
                         retry_db, account_id
                     )

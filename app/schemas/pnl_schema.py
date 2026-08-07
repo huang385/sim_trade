@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 from pydantic import BaseModel
@@ -18,12 +18,15 @@ class PositionRealtimePnl(BaseModel):
     mark_price: Decimal
     cumulative_unrealized_pnl: Decimal
     daily_position_pnl: Decimal
+    # 仅供统一账户权益计算；前端累计浮盈仍使用上面的原始开仓价口径。
+    cash_unrealized_pnl: Decimal = Decimal("0")
     instrument_type: str = "FUTURES"
     underlying_order_book_id: str | None = None
     option_market_value: Decimal = Decimal("0")
     realtime_required_margin: Decimal = Decimal("0")
     event_time: datetime
     source_event_id: str
+    trading_day: date | None = None
     updated_at: datetime
     data_source: str = "REDIS_REALTIME"
     # 由Redis Lua在成功写入周期内设置；Python资金计算不参与版本生成。
@@ -40,6 +43,7 @@ class AccountRealtimePnl(BaseModel):
     daily_close_pnl: Decimal
     daily_commission: Decimal
     daily_pnl: Decimal
+    cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
     available_cash: Decimal
     futures_unrealized_pnl: Decimal = Decimal("0")
@@ -54,6 +58,7 @@ class AccountRealtimePnl(BaseModel):
     data_source: str = "REDIS_REALTIME"
     realtime_snapshot_version: str | None = None
     source_account_fact_version: str | None = None
+    trading_day: date | None = None
 
 
 class PositionRealtimePnlResponse(BaseModel):
@@ -82,6 +87,7 @@ class AccountRealtimePnlResponse(BaseModel):
     daily_close_pnl: Decimal
     daily_commission: Decimal
     daily_pnl: Decimal
+    cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
     available_cash: Decimal
     risk_ratio: Decimal

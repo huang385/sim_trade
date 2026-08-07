@@ -24,6 +24,7 @@ from app.repositories.user_repository import UserRepository
 from app.repositories.auth_refresh_session_repository import (
     AuthRefreshSessionRepository,
 )
+from app.repositories.daily_settlement_repository import DailySettlementRepository
 
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "TradePositionAllocationRepository",
     "UserRepository",
     "AuthRefreshSessionRepository",
+    "DailySettlementRepository",
 ]

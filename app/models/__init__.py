@@ -34,6 +34,13 @@ from app.models.app_user import AppUser
 from app.models.auth_refresh_session import AuthRefreshSession
 from app.models.liquidation_task import LiquidationTask
 from app.models.risk_event import RiskEvent
+from app.models.daily_settlement import (
+    DailyAccountSettlement,
+    DailyPositionSettlement,
+    DailySettlementBatch,
+    InstrumentSettlementPrice,
+    OptionExpirySettlementDetail,
+)
 
 
 __all__ = [
@@ -58,4 +65,9 @@ __all__ = [
     "AuthRefreshSession",
     "LiquidationTask",
     "RiskEvent",
+    "DailySettlementBatch",
+    "InstrumentSettlementPrice",
+    "DailyAccountSettlement",
+    "DailyPositionSettlement",
+    "OptionExpirySettlementDetail",
 ]

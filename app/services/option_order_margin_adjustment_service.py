@@ -23,6 +23,7 @@ from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.services.settlement_gate_service import SettlementGateService
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class OptionOrderMarginAdjustmentService:
         instrument_repository: InstrumentRepository | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         realtime_fact_events: RealtimeFactEventService | None = None,
+        settlement_gate_service: SettlementGateService | None = None,
     ):
         self.market_tick_store = market_tick_store
         self.order_repository = order_repository or OrderRepository()
@@ -74,6 +76,9 @@ class OptionOrderMarginAdjustmentService:
         self.realtime_fact_events = (
             realtime_fact_events
             or RealtimeFactEventService(repository=OutboxRepository())
+        )
+        self.settlement_gate_service = (
+            settlement_gate_service or SettlementGateService()
         )
 
     @classmethod
@@ -352,6 +357,7 @@ class OptionOrderMarginAdjustmentService:
         """独立事务重估一笔活动订单；不适用订单幂等返回。"""
 
         try:
+            self.settlement_gate_service.ensure_trading_open(db)
             order = self.order_repository.get_by_order_id_for_update(
                 db, order_id
             )
