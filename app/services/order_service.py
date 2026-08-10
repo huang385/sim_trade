@@ -153,7 +153,8 @@ class OrderService:
         position_repository: PositionRepository | None = None,
         allocation_repository: PositionFreezeAllocationRepository | None = None,
         close_allocator: PositionCloseAllocator | None = None,
-        trading_day_provider: Callable[[], date] = date.today,
+        trading_day_provider: Callable[[], date] | None = None,
+        trading_day_service=None,
         order_id_factory: Callable[[], str] = generate_order_id,
         event_id_factory: Callable[[], str] = generate_event_id,
         allocation_id_factory: Callable[[], str] = generate_allocation_id,
@@ -181,6 +182,7 @@ class OrderService:
         )
         self.close_allocator = close_allocator or PositionCloseAllocator()
         self.trading_day_provider = trading_day_provider
+        self.trading_day_service = trading_day_service
         self.order_id_factory = order_id_factory
         self.event_id_factory = event_id_factory
         self.realtime_fact_events = RealtimeFactEventService(
@@ -345,9 +347,23 @@ class OrderService:
                 db.commit()
                 return existing
 
-            # 当前阶段使用接单当天作为交易日。
-            # 后续接入交易日历后，只需替换 trading_day_provider。
-            trading_day = self.trading_day_provider()
+            resolved_instrument = None
+            if self.trading_day_provider is not None:
+                # 测试和离线工具可注入确定性交易日；生产入口不使用自然日。
+                trading_day = self.trading_day_provider()
+            else:
+                if self.trading_day_service is None:
+                    raise RuntimeError("交易日服务未配置")
+                resolved_instrument = self.rule_query_service.get_instrument(
+                    db,
+                    exchange_id=request.exchange_id,
+                    symbol=request.symbol,
+                )
+                trading_day = self.trading_day_service.resolve_for_order(
+                    db,
+                    instrument=resolved_instrument,
+                    offset_flag=request.offset_flag,
+                )
             # advisory事务共享锁必须在任何资金或订单写入前取得。日终进程
             # 持有同键排他锁时，本事务会等待；等待结束后再检查数据库批次，
             # 从而消除“检查时未结算、随后并发落单”的竞态。
@@ -357,14 +373,17 @@ class OrderService:
 
             # 统一查询合约、当前保证金规则和当前手续费规则。
             # 三类参考数据必须全部存在并属于当前交易日。
-            rules = self.rule_query_service.get_order_rules(
-                db=db,
-                exchange_id=request.exchange_id,
-                symbol=request.symbol,
-                trading_day=trading_day,
-                direction=request.direction.value,
-                offset_flag=request.offset_flag.value,
-            )
+            rule_arguments = {
+                "db": db,
+                "exchange_id": request.exchange_id,
+                "symbol": request.symbol,
+                "trading_day": trading_day,
+                "direction": request.direction.value,
+                "offset_flag": request.offset_flag.value,
+            }
+            if resolved_instrument is not None:
+                rule_arguments["instrument"] = resolved_instrument
+            rules = self.rule_query_service.get_order_rules(**rule_arguments)
 
             # 校验订单类型、开平标志、价格档位和数量范围。
             self.validation_service.validate_order(
@@ -645,6 +664,11 @@ class OrderService:
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
             self.freeze_service.validate_account_tradable(account)
+            if account.trading_day != trading_day:
+                raise BusinessRuleError(
+                    "账户交易日与当前交易时段不一致，请先完成日终结算",
+                    error_code="ACCOUNT_TRADING_DAY_MISMATCH",
+                )
             # OPEN会增加账户风险，必须在账户行锁内、各品种权限检查之前统一拦截。
             # 这样期货、商品期权和股指期权都会返回同一套风险错误码；平仓订单
             # 不经过该检查，因此在风险状态下仍可用于降低敞口。
@@ -1112,6 +1136,7 @@ def get_order_service() -> OrderService:
         MarketTickStore,
     )
     from app.core.config import settings
+    from app.services.trading_day_service import get_trading_day_service
 
     return OrderService(
         order_repository=OrderRepository(),
@@ -1125,6 +1150,7 @@ def get_order_service() -> OrderService:
         position_repository=PositionRepository(),
         allocation_repository=PositionFreezeAllocationRepository(),
         close_allocator=PositionCloseAllocator(),
+        trading_day_service=get_trading_day_service(),
         option_market_price_service=OptionMarketPriceService(
             MarketTickStore(redis_client)
         ),

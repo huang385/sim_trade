@@ -81,6 +81,7 @@ def make_rules(**overrides):
 def make_account(**overrides):
     values = {
         "status": "NORMAL",
+        "trading_day": TRADING_DAY,
         "available_cash": Decimal("100000"),
         "frozen_margin": Decimal("0"),
         "frozen_commission": Decimal("0"),

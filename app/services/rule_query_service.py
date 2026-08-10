@@ -63,6 +63,33 @@ class RuleQueryService:
             fee_item_repository or FeeRuleItemRepository()
         )
 
+    @staticmethod
+    def _validate_instrument(instrument: Instrument) -> Instrument:
+        if not instrument.is_active:
+            raise BusinessRuleError("合约当前不可交易")
+        if instrument.instrument_type == InstrumentType.INDEX.value:
+            raise BusinessRuleError(
+                "指数合约不能提交交易订单",
+                error_code="INDEX_NOT_TRADEABLE",
+            )
+        return instrument
+
+    def get_instrument(
+        self,
+        db: Session,
+        *,
+        exchange_id: str,
+        symbol: str,
+    ) -> Instrument:
+        instrument = self.instrument_repository.get(
+            db=db,
+            exchange_id=normalize_code(exchange_id),
+            symbol=normalize_code(symbol),
+        )
+        if instrument is None:
+            raise BusinessRuleError("合约不存在")
+        return self._validate_instrument(instrument)
+
     def get_order_rules(
         self,
         db: Session,
@@ -71,6 +98,7 @@ class RuleQueryService:
         trading_day: date,
         direction: str | None = None,
         offset_flag: str | None = None,
+        instrument: Instrument | None = None,
     ) -> OrderReferenceRules:
         """
         获取下单需要的合约、保证金、手续费规则。
@@ -83,27 +111,15 @@ class RuleQueryService:
         exchange_id = normalize_code(exchange_id)
         symbol = normalize_code(symbol)
 
-        instrument = self.instrument_repository.get(
-            db=db,
-            exchange_id=exchange_id,
-            symbol=symbol,
+        instrument = (
+            self._validate_instrument(instrument)
+            if instrument is not None
+            else self.get_instrument(
+                db,
+                exchange_id=exchange_id,
+                symbol=symbol,
+            )
         )
-
-        if instrument is None:
-            raise BusinessRuleError(
-                "合约不存在"
-            )
-
-        if not instrument.is_active:
-            raise BusinessRuleError(
-                "合约当前不可交易"
-            )
-
-        if instrument.instrument_type == InstrumentType.INDEX.value:
-            raise BusinessRuleError(
-                "指数合约不能提交交易订单",
-                error_code="INDEX_NOT_TRADEABLE",
-            )
 
         if instrument.instrument_type == InstrumentType.FUTURES.value:
             margin_rule = self.margin_repository.get_current(
