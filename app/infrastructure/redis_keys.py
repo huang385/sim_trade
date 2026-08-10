@@ -39,6 +39,10 @@ PNL_DIRTY_CONTRACTS_KEY = "pnl:dirty_contracts"
 PNL_DIRTY_CONTRACT_VERSIONS_KEY = "pnl:dirty_contract_versions"
 PNL_ACCOUNT_INDEX_KEYS_KEY = "pnl:index_keys:accounts"
 PNL_CONTRACT_INDEX_KEYS_KEY = "pnl:index_keys:contracts"
+# PnL 合约索引仍以内部 symbol 作为业务键；该 Hash 仅保存其对应的
+# 行情订阅标准代码（order_book_id），避免从 Redis key 反解析 symbol 后
+# 误传给外部行情源。
+PNL_CONTRACT_ORDER_BOOK_IDS_KEY = "pnl:contract_order_book_ids"
 PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 # PnL单写者在每个成功写入周期内递增一次；账户、持仓Hash、版本索引和
 # 对应实时事件由同一个Lua脚本共同使用该版本。

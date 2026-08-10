@@ -180,7 +180,7 @@ def test_account_with_positions_uses_one_pipeline():
     pipeline.execute.assert_called_once()
 
 
-def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
+def test_list_active_contract_codes_returns_order_book_ids_not_internal_symbols():
     redis_client = Mock()
     redis_client.smembers.return_value = {
         "pnl:contract_positions:DCE:JD2609",
@@ -189,13 +189,18 @@ def test_list_active_contract_codes_filters_empty_indexes_and_batches_scard():
     }
     pipeline = redis_client.pipeline.return_value
     # index_keys按字符串排序：CLOSED2609、JD2609、AG2612。
-    pipeline.execute.return_value = [0, 2, 1]
+    pipeline.execute.return_value = [
+        0, "CLOSED2609",
+        2, "LC2609C146000",
+        1, "AG2612",
+    ]
     store = RealtimePnlStore(redis_client)
 
     result = store.list_active_contract_codes()
 
-    assert result == {"JD2609", "AG2612"}
+    assert result == {"LC2609C146000", "AG2612"}
     assert pipeline.scard.call_count == 3
+    assert pipeline.hget.call_count == 3
     # 读取路径只过滤空集合，不删除索引，避免并发新建持仓时误删新索引。
     redis_client.srem.assert_not_called()
 
@@ -261,7 +266,7 @@ def test_closed_position_prunes_empty_account_and_contract_meta_indexes():
             dirty_version="cycle-1",
             active_positions=[],
             closed_positions=[
-                ("A001", "DCE", "JD2609", "P001")
+                ("A001", "DCE", "JD2609", "JD2609", "P001")
             ],
         )
     )
@@ -570,7 +575,7 @@ def test_rebuild_active_indexes_retries_watch_conflict_then_succeeds():
 
     rebuilt = store.rebuild_active_indexes(
         expected_cache_version="3",
-        positions=[("A001", "DCE", "JD2609", "P001")],
+        positions=[("A001", "DCE", "JD2609", "JD2609", "P001")],
     )
 
     assert rebuilt is True
@@ -609,7 +614,7 @@ def test_rebuild_active_indexes_does_not_overwrite_newer_version():
 
     rebuilt = store.rebuild_active_indexes(
         expected_cache_version="11",
-        positions=[("A001", "DCE", "JD2609", "P001")],
+        positions=[("A001", "DCE", "JD2609", "JD2609", "P001")],
     )
 
     assert rebuilt is False

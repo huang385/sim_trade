@@ -12,6 +12,7 @@ from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
     PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
     PNL_CONTRACT_INDEX_KEYS_KEY,
+    PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
     PNL_DIRTY_ACCOUNT_FACTS_KEY,
     PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
     PNL_DIRTY_CONTRACTS_KEY,
@@ -533,8 +534,8 @@ class RealtimePnlStore:
         positions: list[PositionRealtimePnl],
         accounts: list[AccountRealtimePnl],
         dirty_version: str,
-        additions: list[tuple[str, str, str, str]],
-        removals: list[tuple[str, str, str, str]],
+        additions: list[tuple[str, str, str, str, str]],
+        removals: list[tuple[str, str, str, str, str]],
         mark_dirty: bool = True,
     ) -> list[list[str]]:
         """
@@ -711,7 +712,7 @@ class RealtimePnlStore:
                 ]
             )
 
-        for account_id, exchange_id, symbol, position_id in additions:
+        for account_id, exchange_id, symbol, order_book_id, position_id in additions:
             account_key = pnl_account_positions_key(account_id)
             contract_key = pnl_contract_positions_key(exchange_id, symbol)
             operations.extend(
@@ -720,10 +721,16 @@ class RealtimePnlStore:
                     ["SADD", contract_key, position_id],
                     ["SADD", PNL_ACCOUNT_INDEX_KEYS_KEY, account_key],
                     ["SADD", PNL_CONTRACT_INDEX_KEYS_KEY, contract_key],
+                    [
+                        "HSET",
+                        PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
+                        contract_key,
+                        order_book_id,
+                    ],
                 )
             )
 
-        for account_id, exchange_id, symbol, position_id in removals:
+        for account_id, exchange_id, symbol, _order_book_id, position_id in removals:
             operations.extend(
                 (
                     [
@@ -748,16 +755,16 @@ class RealtimePnlStore:
         positions: Iterable[PositionRealtimePnl],
         accounts: Iterable[AccountRealtimePnl],
         dirty_version: str,
-        active_positions: Iterable[tuple[str, str, str, str]],
-        closed_positions: Iterable[tuple[str, str, str, str]],
+        active_positions: Iterable[tuple[str, str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
     ) -> tuple[int, int]:
         """
         一个500ms批次内原子写快照、Dirty标记和必要的静态索引变化。
 
-        active_positions/closed_positions元素依次为账户、交易所、合约、持仓
-        编号。行情价格变化不会重复维护索引，只有调用方确认结构变化或首次
+        active_positions/closed_positions元素依次为账户、交易所、内部symbol、
+        order_book_id、持仓编号。行情价格变化不会重复维护索引，只有调用方确认结构变化或首次
         恢复时才传入。
         """
 
@@ -796,8 +803,8 @@ class RealtimePnlStore:
         positions: Iterable[PositionRealtimePnl],
         accounts: Iterable[AccountRealtimePnl],
         dirty_version: str,
-        active_positions: Iterable[tuple[str, str, str, str]],
-        closed_positions: Iterable[tuple[str, str, str, str]],
+        active_positions: Iterable[tuple[str, str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
     ) -> tuple[bool, int, int]:
@@ -1083,24 +1090,18 @@ class RealtimePnlStore:
         pipeline = self.redis_client.pipeline(transaction=False)
         for index_key in index_keys:
             pipeline.scard(index_key)
-        member_counts = pipeline.execute()
+            pipeline.hget(PNL_CONTRACT_ORDER_BOOK_IDS_KEY, index_key)
+        rows = pipeline.execute()
 
-        prefix = "pnl:contract_positions:"
         codes: set[str] = set()
-        for index_key, member_count in zip(
-            index_keys,
-            member_counts,
-            strict=True,
-        ):
+        for offset, index_key in enumerate(index_keys):
+            member_count = rows[offset * 2]
+            order_book_id = rows[offset * 2 + 1]
             if int(member_count or 0) <= 0:
                 continue
-            if not index_key.startswith(prefix):
-                continue
-            contract_part = index_key[len(prefix):]
-            _exchange_id, separator, symbol = contract_part.partition(":")
-            normalized_symbol = symbol.strip().upper()
-            if separator and normalized_symbol:
-                codes.add(normalized_symbol)
+            normalized_order_book_id = str(order_book_id or "").strip().upper()
+            if normalized_order_book_id:
+                codes.add(normalized_order_book_id)
         return codes
 
     def list_margin_dependency_codes(self) -> set[str]:
@@ -1398,7 +1399,7 @@ class RealtimePnlStore:
         self,
         *,
         expected_cache_version: str,
-        positions: Iterable[tuple[str, str, str, str]],
+        positions: Iterable[tuple[str, str, str, str, str]],
     ) -> bool:
         """
         按PostgreSQL周期快照重建PnL活动索引，不使用KEYS扫描。
@@ -1431,8 +1432,9 @@ class RealtimePnlStore:
                 pipeline.delete(
                     PNL_ACCOUNT_INDEX_KEYS_KEY,
                     PNL_CONTRACT_INDEX_KEYS_KEY,
+                    PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
                 )
-                for account_id, exchange_id, symbol, position_id in items:
+                for account_id, exchange_id, symbol, order_book_id, position_id in items:
                     account_key = pnl_account_positions_key(account_id)
                     contract_key = pnl_contract_positions_key(
                         exchange_id,
@@ -1447,6 +1449,11 @@ class RealtimePnlStore:
                     pipeline.sadd(
                         PNL_CONTRACT_INDEX_KEYS_KEY,
                         contract_key,
+                    )
+                    pipeline.hset(
+                        PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
+                        contract_key,
+                        order_book_id,
                     )
                 pipeline.execute()
                 return True

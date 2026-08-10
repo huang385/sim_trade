@@ -346,8 +346,8 @@ class RealtimePnlService:
         position_models: dict[str, PositionRealtimePnl] = {}
         account_deltas: dict[str, list[Decimal]] = {}
         affected_accounts: set[str] = set()
-        active_index_additions: list[tuple[str, str, str, str]] = []
-        closed_index_removals: list[tuple[str, str, str, str]] = []
+        active_index_additions: list[tuple[str, str, str, str, str]] = []
+        closed_index_removals: list[tuple[str, str, str, str, str]] = []
         successful: set[ContractKey] = set()
         failed: set[ContractKey] = set()
         no_position: set[ContractKey] = set()
@@ -398,10 +398,10 @@ class RealtimePnlService:
                 local_models: dict[str, PositionRealtimePnl] = {}
                 local_deltas: dict[str, list[Decimal]] = {}
                 local_additions: list[
-                    tuple[str, str, str, str]
+                    tuple[str, str, str, str, str]
                 ] = []
                 local_removals: list[
-                    tuple[str, str, str, str]
+                    tuple[str, str, str, str, str]
                 ] = []
                 for position in positions:
                     result = self.calculator.calculate_position(
@@ -541,6 +541,7 @@ class RealtimePnlService:
                                 position.account_id,
                                 position.exchange_id,
                                 position.symbol,
+                                position.order_book_id,
                                 position.position_id,
                             )
                         )
@@ -620,6 +621,7 @@ class RealtimePnlService:
                             account_id,
                             key[0],
                             key[1],
+                            old.get("order_book_id", key[1]),
                             position_id,
                         )
                     )

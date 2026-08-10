@@ -310,6 +310,7 @@ def test_closing_last_position_prunes_static_meta_indexes_atomically():
                     account_id,
                     exchange_id,
                     symbol,
+                    symbol,
                     position_id,
                 )
             ],
@@ -336,6 +337,7 @@ def test_closing_last_position_prunes_static_meta_indexes_atomically():
                 (
                     account_id,
                     exchange_id,
+                    symbol,
                     symbol,
                     second_position_id,
                 )

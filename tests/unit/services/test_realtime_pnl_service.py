@@ -155,12 +155,12 @@ class FakeStore:
     ):
         self.index_additions.append(list(active_positions))
         self.index_removals.append(list(closed_positions))
-        for _account_id, exchange_id, symbol, position_id in active_positions:
+        for _account_id, exchange_id, symbol, _order_book_id, position_id in active_positions:
             self.contract_ids.setdefault(
                 (exchange_id, symbol),
                 set(),
             ).add(position_id)
-        for _account_id, exchange_id, symbol, position_id in closed_positions:
+        for _account_id, exchange_id, symbol, _order_book_id, position_id in closed_positions:
             self.contract_ids.setdefault(
                 (exchange_id, symbol),
                 set(),
@@ -285,7 +285,7 @@ def test_duplicate_tick_overwrites_same_absolute_values():
     assert current == first
     # 首次建立索引后，相同持仓的后续行情不再重复执行SADD。
     assert store.index_additions == [
-        [("A001", "SHFE", "RB2610", "P001")],
+        [("A001", "SHFE", "RB2610", "RB2610", "P001")],
         [],
     ]
 
@@ -387,7 +387,7 @@ def test_full_close_dirty_zeros_old_position_and_account():
         "cumulative_unrealized_pnl"
     ] == "0.000000"
     assert store.index_removals[-1] == [
-        ("A001", "SHFE", "RB2610", "P001")
+        ("A001", "SHFE", "RB2610", "RB2610", "P001")
     ]
 
 

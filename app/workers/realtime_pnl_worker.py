@@ -405,6 +405,7 @@ class RealtimePnlWorker:
                     position.account_id,
                     position.exchange_id,
                     position.symbol,
+                    position.order_book_id,
                     position.position_id,
                 )
                 for positions in cycle.by_contract.values()

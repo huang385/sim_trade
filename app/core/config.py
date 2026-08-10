@@ -107,7 +107,11 @@ class Settings(BaseSettings):
     # YMM Live Data客户端。Token和可选自定义地址只允许通过.env或环境变量提供。
     # mode使用官方SDK定义的lan、TS或local；若管理员要求直连，也可提供base_url。
     remote_market_data_base_url: str = ""
+    remote_market_data_api_user: str = ""
     remote_market_data_api_token: str = ""
+    # 历史行情数据库SDK与实时行情SDK使用不同凭证。当前仅纳入统一配置
+    # 校验，具体调用方必须按需读取，且不得记录实际Token。
+    remote_market_data_timeout_seconds: float = 3.0
     remote_market_data_mode: str = ""
     remote_market_data_ca_file: str = ""
     remote_market_data_verify_ssl: bool = True
