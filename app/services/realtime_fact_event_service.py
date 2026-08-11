@@ -231,6 +231,18 @@ class RealtimeFactEventService:
                 "limit_price": _decimal_string(
                     _field(order, "limit_price", Decimal("0"))
                 ),
+                "resolved_price": _decimal_string(
+                    _field(
+                        order,
+                        "resolved_price",
+                        _field(order, "limit_price", Decimal("0")),
+                    )
+                ),
+                "market_protection_price": (
+                    _decimal_string(_field(order, "market_protection_price"))
+                    if _field(order, "market_protection_price") is not None
+                    else None
+                ),
                 "total_volume": _field(order, "total_volume", 0),
                 "traded_volume": _field(order, "traded_volume", 0),
                 "remaining_volume": _field(order, "remaining_volume", 0),

@@ -83,6 +83,9 @@ const elements = {
     exchangeId: document.querySelector("#exchange-id"),
     symbol: document.querySelector("#symbol"),
     limitPrice: document.querySelector("#limit-price"),
+    limitPriceField: document.querySelector("#limit-price-field"),
+    orderPriceType: document.querySelector("#order-price-type"),
+    priceTypeHelp: document.querySelector("#price-type-help"),
     volume: document.querySelector("#volume"),
     offsetFlag: document.querySelector("#offset-flag"),
     clientOrderId: document.querySelector("#client-order-id"),
@@ -826,7 +829,8 @@ function renderOrders(orders) {
                 / ${escapeHtml(order.offset_flag)}
             </td>
             <td class="number">
-                ${formatPrice(order.limit_price)}/${formatPrice(order.average_price)}
+                ${formatPrice(order.resolved_price ?? order.limit_price)}/${formatPrice(order.average_price)}
+                <small>${escapeHtml(order.order_type)}</small>
             </td>
             <td class="number">
                 ${order.total_volume}/${order.traded_volume}/${order.remaining_volume}/${order.cancelled_volume}
@@ -839,11 +843,14 @@ function renderOrders(orders) {
                     ${escapeHtml(order.status)}
                 </span>
                 <small>${escapeHtml(order.submit_status)}</small>
+                ${order.cancel_reason_code
+                    ? `<small title="${escapeHtml(order.cancel_reason_message || "")}">${escapeHtml(order.cancel_reason_code)}</small>`
+                    : ""}
             </td>
             <td>${escapeHtml(order.trading_day)}</td>
             <td>${formatTime(order.updated_at, true)}</td>
             <td>
-                ${ACTIVE_ORDER_STATUSES.has(order.status)
+                ${ACTIVE_ORDER_STATUSES.has(order.status) && order.order_type !== "MARKET"
                     ? `<button class="table-action danger cancel-order"
                          type="button" data-order-id="${escapeHtml(order.order_id)}">
                          撤单
@@ -1026,10 +1033,12 @@ async function submitOrder(event) {
         symbol: String(formData.get("symbol")).trim().toUpperCase(),
         direction: formData.get("direction"),
         offset_flag: formData.get("offset_flag"),
-        order_type: "LIMIT",
-        limit_price: String(formData.get("limit_price")).trim(),
+        order_type: formData.get("order_type"),
         volume: Number(formData.get("volume")),
     };
+    if (payload.order_type === "LIMIT") {
+        payload.limit_price = String(formData.get("limit_price")).trim();
+    }
 
     try {
         await ensureOptionMarketReady(payload);
@@ -1038,7 +1047,12 @@ async function submitOrder(event) {
             method: "POST",
             body: JSON.stringify(payload),
         });
-        showToast(`订单已接收：${order.order_id}（${order.status}）`);
+        showToast(
+            `订单已接收：${order.order_id}；类型 ${order.order_type}；` +
+            `解析价 ${formatPrice(order.resolved_price)}；均价 ${formatPrice(order.average_price)}；` +
+            `剩余 ${order.remaining_volume}` +
+            (order.cancel_reason_code ? `；撤销 ${order.cancel_reason_code}` : "")
+        );
         generateClientOrderId();
         if (payload.account_id !== state.accountId) {
             elements.accountId.value = payload.account_id;
@@ -1049,8 +1063,22 @@ async function submitOrder(event) {
         showToast(`下单失败：${error.message}`, "error");
     } finally {
         elements.submitOrder.disabled = false;
-        elements.submitOrder.textContent = "提交限价订单";
+        elements.submitOrder.textContent = "提交订单";
     }
+}
+
+function updatePriceTypeForm() {
+    const type = elements.orderPriceType.value;
+    const isLimit = type === "LIMIT";
+    elements.limitPriceField.classList.toggle("hidden", !isLimit);
+    elements.limitPrice.required = isLimit;
+    const descriptions = {
+        LIMIT: "限价单按输入价格进入撮合。",
+        COUNTERPARTY: "对手价在受理时解析为买入卖一/卖出买一，之后不再重定价。",
+        LAST: "最新价在受理时固定，仍按普通限价规则撮合。",
+        MARKET: "市价单使用后端保护价冻结，只撮合受理快照的一档并立即撤余。",
+    };
+    elements.priceTypeHelp.textContent = descriptions[type];
 }
 
 function delay(milliseconds) {
@@ -1177,6 +1205,7 @@ elements.refreshNow.addEventListener("click", async () => {
 });
 elements.autoRefresh.addEventListener("change", restartTimers);
 elements.orderForm.addEventListener("submit", submitOrder);
+elements.orderPriceType.addEventListener("change", updatePriceTypeForm);
 elements.regenerateId.addEventListener("click", generateClientOrderId);
 elements.accountId.addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadAccount();
@@ -1185,6 +1214,7 @@ elements.accountId.addEventListener("keydown", (event) => {
 elements.loginForm.addEventListener("submit", login);
 elements.logoutButton.addEventListener("click", logout);
 generateClientOrderId();
+updatePriceTypeForm();
 refreshAccessToken()
     .then((restored) => restored ? loadAuthorizedAccounts() : showLogin())
     .catch(showLogin);

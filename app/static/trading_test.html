@@ -299,7 +299,7 @@
                 <div class="section-head">
                     <div>
                         <p class="eyebrow">ORDER TICKET</p>
-                        <h2>限价委托</h2>
+                        <h2>订单委托</h2>
                     </div>
                     <span class="badge warning">测试环境</span>
                 </div>
@@ -348,8 +348,18 @@
                         </select>
                     </label>
 
+                    <label class="field">
+                        <span>价格类型</span>
+                        <select id="order-price-type" name="order_type">
+                            <option value="LIMIT">限价</option>
+                            <option value="COUNTERPARTY">对手价</option>
+                            <option value="LAST">最新价</option>
+                            <option value="MARKET">市价</option>
+                        </select>
+                    </label>
+
                     <div class="field-row">
-                        <label class="field">
+                        <label id="limit-price-field" class="field">
                             <span>限价</span>
                             <input id="limit-price" name="limit_price"
                                    type="number" min="0" step="any"
@@ -373,12 +383,12 @@
                     </label>
 
                     <div class="order-notice">
-                        页面只调用正式下单 API。资金冻结、规则校验、撮合和结算
-                        仍由后端完成；提交后会真实写入本地测试数据库。
+                        <span id="price-type-help">限价单按输入价格进入撮合。</span>
+                        市价保护价及最终解析价格由后端根据同一份有效行情计算。
                     </div>
 
                     <button id="submit-order" class="button submit" type="submit">
-                        提交限价订单
+                        提交订单
                     </button>
                 </form>
             </aside>

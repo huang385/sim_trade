@@ -172,7 +172,7 @@ def test_zero_remaining_volume_removes_old_index():
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("order_type", "MARKET"), ("offset_flag", "UNKNOWN"), ("status", "NEW")],
+    [("offset_flag", "UNKNOWN"), ("status", "NEW")],
 )
 def test_non_active_order_shape_is_not_registered(field, value):
     service, _, active_index = make_service(make_order(**{field: value}))
@@ -180,6 +180,17 @@ def test_non_active_order_shape_is_not_registered(field, value):
     service.process(Mock(), make_fields())
 
     active_index.remove_active_order.assert_called_once()
+
+
+def test_market_order_is_never_registered_and_is_routed_for_immediate_execution():
+    service, _, active_index = make_service(make_order(order_type="MARKET"))
+
+    result = service.process(Mock(), make_fields())
+
+    assert result.action == "MARKET_READY"
+    assert result.order_snapshot.order.order_type.value == "MARKET"
+    active_index.remove_active_order.assert_called_once()
+    active_index.add_active_order.assert_not_called()
 
 
 def test_event_account_mismatch_is_rejected():

@@ -203,6 +203,43 @@ class Order(Base):
         Numeric(24, 6),
         nullable=False,
     )
+    submitted_limit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    resolved_price: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False,
+        default=lambda context: context.get_current_parameters()["limit_price"],
+    )
+    market_protection_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    price_snapshot_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    price_snapshot_source: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    price_snapshot_event_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    price_snapshot_stream_message_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    price_snapshot_bid1: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    price_snapshot_bid_volume1: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    price_snapshot_ask1: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
+    price_snapshot_ask_volume1: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    price_snapshot_last: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 6), nullable=True
+    )
     # 委托总数量
     total_volume: Mapped[int] = mapped_column(
         Integer,
@@ -336,6 +373,12 @@ class Order(Base):
     reject_message: Mapped[str | None] = mapped_column(
         String(256),
         nullable=True,
+    )
+    cancel_reason_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    cancel_reason_message: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
     )
 
     # 订单创建时间

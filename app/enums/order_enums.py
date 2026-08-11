@@ -54,6 +54,14 @@ class OrderType(str, Enum):
 
     # 限价单
     LIMIT = "LIMIT"
+    COUNTERPARTY = "COUNTERPARTY"
+    LAST = "LAST"
+    MARKET = "MARKET"
+
+
+LIMIT_LIKE_ORDER_TYPES = frozenset(
+    {OrderType.LIMIT.value, OrderType.COUNTERPARTY.value, OrderType.LAST.value}
+)
 
 
 class OrderStatus(str, Enum):

@@ -130,14 +130,21 @@ class MarketTickMatchingService:
         return ParsedMarketTickEvent(event_id, exchange_id, symbol, tick)
 
     @classmethod
-    def _database_order_is_candidate(cls, order, event: ParsedMarketTickEvent) -> bool:
+    def _database_order_is_candidate(
+        cls, order, event: ParsedMarketTickEvent, *, allow_market: bool = False
+    ) -> bool:
         """Redis 只提供候选编号，是否活动必须以 PostgreSQL 为准。"""
 
         return (
             order is not None
             and order.status in cls.ACTIVE_STATUSES
             and order.remaining_volume > 0
-            and order.order_type == OrderType.LIMIT.value
+            and order.order_type in {
+                OrderType.LIMIT.value,
+                OrderType.COUNTERPARTY.value,
+                OrderType.LAST.value,
+                *({OrderType.MARKET.value} if allow_market else set()),
+            }
             and order.offset_flag in cls.SUPPORTED_OFFSET_FLAGS
             and order.exchange_id == event.exchange_id
             and order.symbol == event.symbol
@@ -168,6 +175,7 @@ class MarketTickMatchingService:
             order_ids=order_ids,
             event=event,
             stream_message_id=stream_message_id,
+            allow_market=False,
         )
 
     def process_candidate_order(
@@ -194,6 +202,7 @@ class MarketTickMatchingService:
                 if order_snapshot is not None
                 else None
             ),
+            allow_market=True,
         )
 
     def _process_order_ids(
@@ -207,6 +216,7 @@ class MarketTickMatchingService:
             MatchingOrderCandidate,
         ]
         | None = None,
+        allow_market: bool = False,
     ) -> MarketTickMatchResult:
         """对调用方明确给出的候选订单逐笔执行事实校验、撮合和结算。"""
 
@@ -235,7 +245,12 @@ class MarketTickMatchingService:
                         candidate.order_id == order_id
                         and candidate.status.value in self.ACTIVE_STATUSES
                         and candidate.order.remaining_volume > 0
-                        and candidate.order.order_type == OrderType.LIMIT
+                        and candidate.order.order_type in {
+                            OrderType.LIMIT,
+                            OrderType.COUNTERPARTY,
+                            OrderType.LAST,
+                            *({OrderType.MARKET} if allow_market else set()),
+                        }
                         and candidate.order.offset_flag.value
                         in self.SUPPORTED_OFFSET_FLAGS
                         and candidate.exchange_id == event.exchange_id
@@ -255,6 +270,7 @@ class MarketTickMatchingService:
                         if not self._database_order_is_candidate(
                             order,
                             event,
+                            allow_market=allow_market,
                         ):
                             skipped += 1
                             continue

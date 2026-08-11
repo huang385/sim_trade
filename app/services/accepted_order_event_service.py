@@ -199,11 +199,50 @@ class AcceptedOrderEventService:
         if order.account_id != event.account_id:
             raise OrderEventValidationError("事件账户与数据库订单账户不一致")
 
+        if (
+            order.order_type == OrderType.MARKET.value
+            and order.status in self.ACTIVE_STATUSES
+            and order.remaining_volume > 0
+        ):
+            self.active_order_index.remove_active_order(
+                order_id=order.order_id,
+                account_id=order.account_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
+                event_id=event.event_id,
+                processed_ttl_seconds=self.processed_ttl_seconds,
+            )
+            return AcceptedOrderProcessResult(
+                event_id=event.event_id,
+                event_type=event.event_type,
+                order_id=event.order_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
+                action="MARKET_READY",
+                order_snapshot=MatchingOrderCandidate(
+                    order_id=order.order_id,
+                    exchange_id=order.exchange_id,
+                    symbol=order.symbol,
+                    status=OrderStatus(order.status),
+                    order=MatchingOrder(
+                        direction=OrderDirection(order.direction),
+                        offset_flag=OffsetFlag(order.offset_flag),
+                        order_type=OrderType.MARKET,
+                        limit_price=order.limit_price,
+                        remaining_volume=order.remaining_volume,
+                    ),
+                ),
+            )
+
         should_remove = (
             order.status in self.TERMINAL_STATUSES
             or order.remaining_volume <= 0
             or order.status not in self.ACTIVE_STATUSES
-            or order.order_type != OrderType.LIMIT.value
+            or order.order_type not in {
+                OrderType.LIMIT.value,
+                OrderType.COUNTERPARTY.value,
+                OrderType.LAST.value,
+            }
             or order.offset_flag not in self.SUPPORTED_OFFSET_FLAGS
         )
         if should_remove:

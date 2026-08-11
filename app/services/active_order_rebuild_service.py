@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
-from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.enums.order_enums import LIMIT_LIKE_ORDER_TYPES, OffsetFlag, OrderStatus
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.repositories.order_repository import OrderRepository
 
@@ -60,7 +60,7 @@ class ActiveOrderRebuildService:
             order is not None
             and order.status in cls.ACTIVE_STATUSES
             and order.remaining_volume > 0
-            and order.order_type == OrderType.LIMIT.value
+            and order.order_type in LIMIT_LIKE_ORDER_TYPES
             and order.offset_flag in cls.SUPPORTED_OFFSET_FLAGS
         )
 

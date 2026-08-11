@@ -30,6 +30,8 @@ from app.services.live_market_snapshot_service import (
 from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
 )
+from app.services.market_order_execution_service import MarketOrderExecutionService
+from app.services.order_cancellation_service import OrderCancellationService
 from app.services.order_arrival_matching_service import (
     OrderArrivalMatchingService,
 )
@@ -72,6 +74,7 @@ class OrderEventConsumerWorker:
         stream_consumer: OrderStreamConsumer,
         event_service: AcceptedOrderEventService,
         arrival_matching_service: OrderArrivalMatchingService | None = None,
+        market_order_execution_service: MarketOrderExecutionService | None = None,
         batch_size: int,
         block_ms: int,
         pending_idle_ms: int,
@@ -82,6 +85,7 @@ class OrderEventConsumerWorker:
         self.stream_consumer = stream_consumer
         self.event_service = event_service
         self.arrival_matching_service = arrival_matching_service
+        self.market_order_execution_service = market_order_execution_service
         self.batch_size = batch_size
         self.block_ms = block_ms
         self.pending_idle_ms = pending_idle_ms
@@ -176,6 +180,14 @@ class OrderEventConsumerWorker:
 
             arrival_result = None
             if (
+                self.market_order_execution_service is not None
+                and result.action == "MARKET_READY"
+            ):
+                arrival_result = self.market_order_execution_service.execute(
+                    order_id=result.order_id,
+                    order_snapshot=result.order_snapshot,
+                )
+            if (
                 self.arrival_matching_service is not None
                 and result.event_type == "ORDER_ACCEPTED"
                 and result.action in {"REGISTERED", "DUPLICATE"}
@@ -207,7 +219,7 @@ class OrderEventConsumerWorker:
                 self.consumer_name,
                 result.action,
                 (
-                    arrival_result.action
+                    getattr(arrival_result, "action", "MARKET_EXECUTED")
                     if arrival_result is not None
                     else "NOT_APPLICABLE"
                 ),
@@ -377,11 +389,17 @@ def main() -> None:
         ),
         matching_service=matching_service,
     )
+    market_order_execution_service = MarketOrderExecutionService(
+        session_factory=SessionLocal,
+        matching_service=matching_service,
+        cancellation_service=OrderCancellationService(),
+    )
     worker = OrderEventConsumerWorker(
         session_factory=SessionLocal,
         stream_consumer=stream_consumer,
         event_service=event_service,
         arrival_matching_service=arrival_matching_service,
+        market_order_execution_service=market_order_execution_service,
         batch_size=settings.order_consumer_batch_size,
         block_ms=settings.order_consumer_block_ms,
         pending_idle_ms=settings.order_pending_idle_ms,

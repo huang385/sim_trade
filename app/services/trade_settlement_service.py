@@ -214,7 +214,12 @@ class TradeSettlementService:
         return (
             order.status in ACTIVE_ORDER_STATUSES
             and order.remaining_volume > 0
-            and order.order_type == OrderType.LIMIT.value
+            and order.order_type in {
+                OrderType.LIMIT.value,
+                OrderType.COUNTERPARTY.value,
+                OrderType.LAST.value,
+                OrderType.MARKET.value,
+            }
             and order.offset_flag in SUPPORTED_OFFSET_FLAGS
             and result.fill_price is not None
             and result.fill_price > 0
@@ -260,6 +265,19 @@ class TradeSettlementService:
                 "trading_day": trade.trading_day.isoformat(),
                 "direction": trade.direction,
                 "offset_flag": trade.offset_flag,
+                "order_type": order.order_type,
+                "resolved_price": _decimal_string(
+                    getattr(
+                        order,
+                        "resolved_price",
+                        getattr(order, "limit_price", Decimal("0")),
+                    )
+                ),
+                "market_protection_price": (
+                    _decimal_string(order.market_protection_price)
+                    if getattr(order, "market_protection_price", None) is not None
+                    else None
+                ),
                 "trade_price": _decimal_string(trade.trade_price),
                 "trade_volume": trade.trade_volume,
                 "turnover": _decimal_string(trade.turnover),
@@ -302,6 +320,19 @@ class TradeSettlementService:
                 "order_book_id": order.order_book_id,
                 "direction": order.direction,
                 "offset_flag": order.offset_flag,
+                "order_type": order.order_type,
+                "resolved_price": _decimal_string(
+                    getattr(
+                        order,
+                        "resolved_price",
+                        getattr(order, "limit_price", Decimal("0")),
+                    )
+                ),
+                "market_protection_price": (
+                    _decimal_string(order.market_protection_price)
+                    if getattr(order, "market_protection_price", None) is not None
+                    else None
+                ),
                 "status": order.status,
                 "traded_volume": order.traded_volume,
                 "remaining_volume": order.remaining_volume,

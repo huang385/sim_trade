@@ -26,6 +26,7 @@ from app.services.account_access_scope import AccountAccessScope
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_service import OrderService
+from app.services.order_price_resolver import ResolvedOrderPrice
 from app.services.order_validation_service import OrderValidationService
 
 
@@ -115,6 +116,7 @@ def make_service(
     position_repository=None,
     allocation_repository=None,
     close_allocator=None,
+    order_price_resolver=None,
 ):
     order_repository = order_repository or Mock()
     account_repository = account_repository or Mock()
@@ -136,6 +138,7 @@ def make_service(
         order_id_factory=lambda: "O20260717000001",
         event_id_factory=lambda: "EVT-000001",
         default_access_scope=AccountAccessScope.admin(),
+        order_price_resolver=order_price_resolver,
     )
 
 
@@ -187,6 +190,60 @@ def test_create_open_order_success(direction, expected_margin):
     assert event_args["payload"]["direction"] == direction.value
     db.commit.assert_called_once_with()
     db.refresh.assert_called_once_with(created_order)
+
+
+def test_market_order_freezes_with_persisted_protection_price():
+    db = Mock()
+    order_repository = Mock()
+    account_repository = Mock()
+    rule_query_service = Mock()
+    outbox_repository = Mock()
+    resolver = Mock()
+    resolver.resolve.return_value = ResolvedOrderPrice(
+        resolved_price=Decimal("3600"),
+        market_protection_price=Decimal("3600"),
+        snapshot_time=None,
+        snapshot_source="YMM_LIVE_DATA",
+        snapshot_event_id="TICK-1",
+        snapshot_stream_message_id="1-0",
+        bid1=Decimal("3499"),
+        bid_volume1=3,
+        ask1=Decimal("3500"),
+        ask_volume1=1,
+        last_price=Decimal("3498"),
+    )
+    account = make_account()
+    created_order = SimpleNamespace(order_id="O20260717000001")
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    order_repository.create.return_value = created_order
+    account_repository.get_by_account_id.return_value = account
+    account_repository.get_by_account_id_for_update.return_value = account
+    rule_query_service.get_order_rules.return_value = make_rules()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+        order_price_resolver=resolver,
+    )
+
+    service.create_order(
+        db=db,
+        request=make_request(order_type="MARKET", limit_price=None),
+    )
+
+    created = order_repository.create.call_args.kwargs
+    assert created["limit_price"] == Decimal("3600")
+    assert created["market_protection_price"] == Decimal("3600")
+    assert created["frozen_margin"] == Decimal("8640.000000")
+    assert account.frozen_margin == Decimal("8640.000000")
+    event = next(
+        call.kwargs["payload"]
+        for call in outbox_repository.create_event.call_args_list
+        if call.kwargs["event_type"] == "ORDER_ACCEPTED"
+    )
+    assert event["order_type"] == "MARKET"
+    assert event["resolved_price"] == "3600.000000"
 
 
 @pytest.mark.parametrize(
@@ -242,6 +299,34 @@ def test_duplicate_client_order_id_returns_existing_without_freeze():
     db.expunge.assert_called_once_with(existing)
     db.commit.assert_called_once()
     db.refresh.assert_not_called()
+
+
+def test_idempotent_market_retry_does_not_reread_snapshot_or_refreeze():
+    db = Mock()
+    existing = make_existing_order(
+        order_type="MARKET",
+        submitted_limit_price=None,
+        resolved_price=Decimal("3600"),
+    )
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.return_value = existing
+    account_repository = Mock()
+    account_repository.get_by_account_id.return_value = make_account()
+    resolver = Mock()
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        order_price_resolver=resolver,
+    )
+
+    result = service.create_order(
+        db=db,
+        request=make_request(order_type="MARKET", limit_price=None),
+    )
+
+    assert result is existing
+    resolver.resolve.assert_not_called()
+    order_repository.create.assert_not_called()
 
 
 def test_missing_access_scope_never_falls_back_to_admin():

@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     market_matching_retry_interval_seconds: float = 1.0
     # 撮合算法由注册器按名称创建；未知名称会让 Worker 在启动阶段失败。
     matching_engine_name: str = "VN"
+    order_price_tick_max_age_seconds: int = 30
+    market_order_max_slippage_rate: Decimal = Decimal("0.02")
 
     # 盘中实时盈亏使用独立行情Consumer Group，不能与撮合组共享消息。
     pnl_consumer_group: str = "group:pnl-engine"

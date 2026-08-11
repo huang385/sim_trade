@@ -105,6 +105,7 @@ class OrderCancellationService:
         request: OrderCancelRequest,
         access_scope: AccountAccessScope | None = None,
         settlement_internal: bool = False,
+        market_auto_cancel: bool = False,
     ) -> Order:
         """
         锁定订单和账户，释放剩余冻结资源并原子提交撤单事件。
@@ -179,6 +180,10 @@ class OrderCancellationService:
                     "订单不属于指定账户",
                     error_code="ORDER_ACCOUNT_MISMATCH",
                 )
+            if market_auto_cancel and order.status == OrderStatus.FILLED.value:
+                db.expunge(order)
+                db.commit()
+                return order
             # 已撤销终态直接幂等返回，不释放资金、不创建新事件，
             # cancelled_at 也保持第一次撤单写入的值。订单查询使用了
             # SELECT FOR UPDATE，因此返回前必须主动提交，及时释放行锁。
@@ -189,7 +194,10 @@ class OrderCancellationService:
                 db.commit()
                 return order
 
-            if order.order_type != OrderType.LIMIT.value:
+            if (
+                order.order_type == OrderType.MARKET.value
+                and not market_auto_cancel
+            ) or order.order_type not in {item.value for item in OrderType}:
                 raise ResourceConflictError(
                     "当前撤单服务仅支持限价订单",
                     error_code="ORDER_NOT_CANCELLABLE",
@@ -424,6 +432,16 @@ class OrderCancellationService:
             order.frozen_cash = Decimal("0.000000")
             order.frozen_commission = Decimal("0.000000")
             order.cancelled_at = cancelled_at
+            order.cancel_reason_code = (
+                "MARKET_REMAINDER_CANCELLED"
+                if market_auto_cancel
+                else "USER_REQUEST"
+            )
+            order.cancel_reason_message = (
+                "市价单一档撮合后剩余数量自动撤销"
+                if market_auto_cancel
+                else "用户主动撤单"
+            )
             order.updated_at = cancelled_at
             account.updated_at = cancelled_at
             if order.traded_volume == 0:
@@ -464,6 +482,18 @@ class OrderCancellationService:
                     "direction": order.direction,
                     "offset_flag": order.offset_flag,
                     "order_type": order.order_type,
+                    "resolved_price": _decimal_string(
+                        getattr(
+                            order,
+                            "resolved_price",
+                            getattr(order, "limit_price", Decimal("0")),
+                        )
+                    ),
+                    "market_protection_price": (
+                        _decimal_string(order.market_protection_price)
+                        if getattr(order, "market_protection_price", None) is not None
+                        else None
+                    ),
                     "status": order.status,
                     "total_volume": order.total_volume,
                     "traded_volume": order.traded_volume,
@@ -486,6 +516,8 @@ class OrderCancellationService:
                     ),
                     "frozen_position_volume": order.frozen_position_volume,
                     "cancelled_at": cancelled_at.isoformat(),
+                    "cancel_reason_code": order.cancel_reason_code,
+                    "cancel_reason_message": order.cancel_reason_message,
                     "updated_at": order.updated_at.isoformat(),
                 },
                 created_at=cancelled_at,
@@ -522,6 +554,28 @@ class OrderCancellationService:
         except Exception:
             db.rollback()
             raise
+
+    def cancel_market_remainder(self, db: Session, order_id: str) -> Order:
+        order = self.order_repository.get_by_order_id(db, order_id.strip())
+        if order is None:
+            raise ResourceNotFoundError(
+                "订单不存在", error_code="ORDER_NOT_FOUND"
+            )
+        if order.order_type != OrderType.MARKET.value:
+            raise ResourceConflictError(
+                "仅市价单允许自动撤余",
+                error_code="ORDER_NOT_CANCELLABLE",
+            )
+        account_id = order.account_id
+        db.rollback()
+        return self.cancel_order(
+            db=db,
+            order_id=order_id,
+            request=OrderCancelRequest(account_id=account_id),
+            access_scope=AccountAccessScope.admin(),
+            settlement_internal=True,
+            market_auto_cancel=True,
+        )
 
 
 def get_order_cancellation_service() -> OrderCancellationService:

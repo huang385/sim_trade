@@ -76,6 +76,7 @@ from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
 )
 from app.services.order_freeze_service import OrderFreezeService
+from app.services.order_price_resolver import OrderPriceResolver, ResolvedOrderPrice
 from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
 from app.services.realtime_fact_event_service import RealtimeFactEventService
@@ -165,6 +166,7 @@ class OrderService:
         option_market_price_service: OptionMarketPriceService | None = None,
         market_pre_subscription_store: MarketPreSubscriptionStore | None = None,
         settlement_gate_service: SettlementGateService | None = None,
+        order_price_resolver: OrderPriceResolver | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -206,6 +208,7 @@ class OrderService:
         self.settlement_gate_service = (
             settlement_gate_service or SettlementGateService()
         )
+        self.order_price_resolver = order_price_resolver
 
     def _get_option_margin_prices(
         self,
@@ -213,6 +216,7 @@ class OrderService:
         request: OrderCreateRequest,
         rules: OrderReferenceRules,
         authorized_account: Account,
+        order_price: Decimal | None = None,
     ) -> OptionMarginMarketPrices:
         """读取卖方保证金价格；首次缺行情时自动登记临时订阅需求。"""
 
@@ -228,7 +232,11 @@ class OrderService:
             return self.option_market_price_service.get_margin_prices(
                 option_instrument=rules.instrument,
                 underlying_instrument=rules.underlying_instrument,
-                order_limit_price=request.limit_price,
+                order_limit_price=(
+                    order_price
+                    if order_price is not None
+                    else request.limit_price
+                ),
             )
         except BusinessRuleError as exc:
             if (
@@ -385,10 +393,27 @@ class OrderService:
                 rule_arguments["instrument"] = resolved_instrument
             rules = self.rule_query_service.get_order_rules(**rule_arguments)
 
+            if request.order_type.value == "LIMIT":
+                assert request.limit_price is not None
+                pricing = ResolvedOrderPrice(
+                    resolved_price=request.limit_price,
+                    submitted_limit_price=request.limit_price,
+                )
+            else:
+                if self.order_price_resolver is None:
+                    raise RuntimeError("非限价委托价格解析服务未配置")
+                pricing = self.order_price_resolver.resolve(
+                    request=request,
+                    price_tick=Decimal(rules.instrument.price_tick),
+                    trading_day=trading_day,
+                )
+            resolved_price = pricing.resolved_price
+
             # 校验订单类型、开平标志、价格档位和数量范围。
             self.validation_service.validate_order(
                 request=request,
                 instrument=rules.instrument,
+                resolved_price=resolved_price,
             )
 
             is_open = request.offset_flag == OffsetFlag.OPEN
@@ -470,7 +495,7 @@ class OrderService:
             # 只有开仓订单需要新增保证金；平仓订单只冻结手续费和持仓。
             frozen_margin = (
                 self.margin_calculator.calculate_open_margin(
-                    price=request.limit_price,
+                    price=resolved_price,
                     volume=request.volume,
                     direction=request.direction,
                     instrument=rules.instrument,
@@ -481,7 +506,7 @@ class OrderService:
             )
             if is_option and request.direction == OrderDirection.BUY:
                 frozen_cash = self.option_premium_calculator.calculate(
-                    price=request.limit_price,
+                    price=resolved_price,
                     volume=request.volume,
                     multiplier=commission_contract_multiplier,
                 )
@@ -511,6 +536,7 @@ class OrderService:
                     request=request,
                     rules=rules,
                     authorized_account=authorized_account,
+                    order_price=resolved_price,
                 )
                 option_rule = rules.option_margin_rule
                 rule_snapshot = OptionMarginRuleSnapshot(
@@ -610,7 +636,7 @@ class OrderService:
             # 再按每条 Allocation 的最终平今/平昨标志分别计算。
             frozen_commission = (
                 self.fee_calculator.calculate_from_snapshot(
-                    price=request.limit_price,
+                    price=resolved_price,
                     volume=request.volume,
                     commission_type=commission_type,
                     commission_parameter=commission_parameter,
@@ -664,7 +690,11 @@ class OrderService:
             # 账户不存在或不可交易应先于持仓查询返回，避免错误地报告
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
             self.freeze_service.validate_account_tradable(account)
-            if account.trading_day != trading_day:
+            if account.trading_day is None:
+                # A newly created account has no prior settlement facts. Bind it
+                # once to the already resolved order trading day under the account lock.
+                account.trading_day = trading_day
+            elif account.trading_day != trading_day:
                 raise BusinessRuleError(
                     "账户交易日与当前交易时段不一致，请先完成日终结算",
                     error_code="ACCOUNT_TRADING_DAY_MISMATCH",
@@ -773,7 +803,7 @@ class OrderService:
                 # 总数量计算一次，避免 PositionDetail 数量改变订单手续费。
                 allocation_commissions = (
                     self.fee_calculator.calculate_bucket_allocations(
-                        price=request.limit_price,
+                        price=resolved_price,
                         entries=[
                             FeeBucketEntry(
                                 key=FeeBucketKey(
@@ -907,7 +937,21 @@ class OrderService:
                 fee_rule_id=fee_rule_id,
                 fee_rule_version=fee_rule_version,
                 fee_rule_snapshot=fee_rule_snapshot,
-                limit_price=request.limit_price,
+                limit_price=resolved_price,
+                submitted_limit_price=pricing.submitted_limit_price,
+                resolved_price=resolved_price,
+                market_protection_price=pricing.market_protection_price,
+                price_snapshot_time=pricing.snapshot_time,
+                price_snapshot_source=pricing.snapshot_source,
+                price_snapshot_event_id=pricing.snapshot_event_id,
+                price_snapshot_stream_message_id=(
+                    pricing.snapshot_stream_message_id
+                ),
+                price_snapshot_bid1=pricing.bid1,
+                price_snapshot_bid_volume1=pricing.bid_volume1,
+                price_snapshot_ask1=pricing.ask1,
+                price_snapshot_ask_volume1=pricing.ask_volume1,
+                price_snapshot_last=pricing.last_price,
                 total_volume=request.volume,
                 status=OrderStatus.ACCEPTED.value,
                 submit_status=OrderSubmitStatus.ACCEPTED.value,
@@ -955,8 +999,35 @@ class OrderService:
                     "direction": request.direction.value,
                     "offset_flag": request.offset_flag.value,
                     "order_type": request.order_type.value,
-                    "limit_price": decimal_to_json_string(
-                        request.limit_price
+                    "limit_price": decimal_to_json_string(resolved_price),
+                    "submitted_limit_price": (
+                        decimal_to_json_string(pricing.submitted_limit_price)
+                        if pricing.submitted_limit_price is not None
+                        else None
+                    ),
+                    "resolved_price": decimal_to_json_string(resolved_price),
+                    "market_protection_price": (
+                        decimal_to_json_string(pricing.market_protection_price)
+                        if pricing.market_protection_price is not None
+                        else None
+                    ),
+                    "price_snapshot_time": (
+                        pricing.snapshot_time.isoformat()
+                        if pricing.snapshot_time is not None
+                        else None
+                    ),
+                    "price_snapshot_source": pricing.snapshot_source,
+                    "price_snapshot_bid1": (
+                        decimal_to_json_string(pricing.bid1)
+                        if pricing.bid1 is not None else None
+                    ),
+                    "price_snapshot_ask1": (
+                        decimal_to_json_string(pricing.ask1)
+                        if pricing.ask1 is not None else None
+                    ),
+                    "price_snapshot_last": (
+                        decimal_to_json_string(pricing.last_price)
+                        if pricing.last_price is not None else None
                     ),
                     "total_volume": request.volume,
                     "remaining_volume": request.volume,
@@ -1137,6 +1208,7 @@ def get_order_service() -> OrderService:
     )
     from app.core.config import settings
     from app.services.trading_day_service import get_trading_day_service
+    from app.services.live_market_snapshot_service import LiveMarketSnapshotService
 
     return OrderService(
         order_repository=OrderRepository(),
@@ -1151,6 +1223,11 @@ def get_order_service() -> OrderService:
         allocation_repository=PositionFreezeAllocationRepository(),
         close_allocator=PositionCloseAllocator(),
         trading_day_service=get_trading_day_service(),
+        order_price_resolver=OrderPriceResolver(
+            live_market_snapshot_service=LiveMarketSnapshotService(redis_client),
+            max_age_seconds=settings.order_price_tick_max_age_seconds,
+            market_max_slippage_rate=settings.market_order_max_slippage_rate,
+        ),
         option_market_price_service=OptionMarketPriceService(
             MarketTickStore(redis_client)
         ),

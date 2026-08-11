@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.common.code_utils import normalize_code
 from app.enums.order_enums import (
@@ -45,10 +45,18 @@ class OrderCreateRequest(BaseModel):
     order_type: OrderType = OrderType.LIMIT
 
     # 限价单委托价格，必须大于0，并符合合约 price_tick。
-    limit_price: Decimal = Field(gt=Decimal("0"))
+    limit_price: Decimal | None = Field(default=None, gt=Decimal("0"))
 
     # 委托数量，必须大于0，并处于合约允许的数量范围内。
     volume: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_price_by_type(self):
+        if self.order_type == OrderType.LIMIT and self.limit_price is None:
+            raise ValueError("限价单必须提供 limit_price")
+        if self.order_type != OrderType.LIMIT and self.limit_price is not None:
+            raise ValueError("非限价单不得提交 limit_price")
+        return self
 
     @field_validator("exchange_id", "symbol", mode="before")
     @classmethod
@@ -126,6 +134,14 @@ class OrderResponse(BaseModel):
 
     # 委托价格与数量执行情况
     limit_price: Decimal
+    submitted_limit_price: Decimal | None = None
+    resolved_price: Decimal | None = None
+    market_protection_price: Decimal | None = None
+    price_snapshot_time: datetime | None = None
+    price_snapshot_source: str | None = None
+    price_snapshot_bid1: Decimal | None = None
+    price_snapshot_ask1: Decimal | None = None
+    price_snapshot_last: Decimal | None = None
     total_volume: int
     traded_volume: int
     remaining_volume: int
@@ -155,12 +171,20 @@ class OrderResponse(BaseModel):
     submit_status: OrderSubmitStatus
     reject_code: str | None
     reject_message: str | None
+    cancel_reason_code: str | None = None
+    cancel_reason_message: str | None = None
 
     # 生命周期时间
     created_at: datetime
     accepted_at: datetime | None
     cancelled_at: datetime | None
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def populate_legacy_resolved_price(self):
+        if self.resolved_price is None:
+            self.resolved_price = self.limit_price
+        return self
 
 
 class OrderPageResponse(BaseModel):

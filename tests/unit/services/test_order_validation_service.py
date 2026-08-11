@@ -117,7 +117,7 @@ def test_rejects_non_open_order():
 def test_rejects_unsupported_order_type():
     with pytest.raises(BusinessValidationError) as exc_info:
         OrderValidationService.validate_open_order(
-            request=make_request(order_type="MARKET"),
+            request=make_request(order_type="STOP"),
             instrument=make_instrument(),
         )
 

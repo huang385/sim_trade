@@ -33,6 +33,7 @@ class OrderValidationService:
         *,
         request: OrderCreateRequest,
         instrument: Instrument | None,
+        resolved_price: Decimal | None = None,
     ) -> None:
         """校验一笔限价开仓或平仓订单的公共规则。"""
 
@@ -50,13 +51,13 @@ class OrderValidationService:
                 error_code="INSTRUMENT_INACTIVE",
             )
 
-        # 第一阶段不接收市价单、条件单等其他订单类型。
-        if request.order_type != OrderType.LIMIT:
+        if request.order_type not in set(OrderType):
             raise BusinessValidationError(
-                "当前只支持限价单",
+                "不支持的订单价格类型",
                 error_code="UNSUPPORTED_ORDER_TYPE",
             )
 
+        # 第一阶段不接收市价单、条件单等其他订单类型。
         if request.offset_flag not in {
             OffsetFlag.OPEN,
             OffsetFlag.CLOSE,
@@ -68,7 +69,8 @@ class OrderValidationService:
                 error_code="UNSUPPORTED_OFFSET_FLAG",
             )
 
-        if request.limit_price <= Decimal("0"):
+        price = resolved_price if resolved_price is not None else request.limit_price
+        if price is None or price <= Decimal("0"):
             raise BusinessValidationError(
                 "委托价格必须大于0",
                 error_code="INVALID_ORDER_PRICE",
@@ -95,7 +97,7 @@ class OrderValidationService:
 
         # 价格档位必须使用 Decimal 计算，禁止转换成 float。
         cls.validate_price_tick(
-            price=request.limit_price,
+            price=price,
             price_tick=instrument.price_tick,
         )
 
@@ -135,7 +137,13 @@ class OrderValidationService:
             existing_order.direction,
             existing_order.offset_flag,
             existing_order.order_type,
-            quantize_money(Decimal(existing_order.limit_price)),
+            (
+                quantize_money(Decimal(existing_order.submitted_limit_price))
+                if getattr(existing_order, "submitted_limit_price", None) is not None
+                else quantize_money(Decimal(existing_order.limit_price))
+                if existing_order.order_type == OrderType.LIMIT.value
+                else None
+            ),
             existing_order.total_volume,
         )
         request_fields = (
@@ -145,7 +153,11 @@ class OrderValidationService:
             getattr(request.direction, "value", request.direction),
             getattr(request.offset_flag, "value", request.offset_flag),
             getattr(request.order_type, "value", request.order_type),
-            quantize_money(request.limit_price),
+            (
+                quantize_money(request.limit_price)
+                if request.limit_price is not None
+                else None
+            ),
             request.volume,
         )
         if existing_fields != request_fields:

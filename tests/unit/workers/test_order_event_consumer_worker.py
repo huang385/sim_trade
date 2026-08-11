@@ -14,6 +14,7 @@ def make_worker(
     process_side_effect=None,
     failure_count=1,
     arrival_matching_service=None,
+    market_order_execution_service=None,
 ):
     db = Mock()
     session_context = MagicMock()
@@ -41,6 +42,7 @@ def make_worker(
         stream_consumer=stream_consumer,
         event_service=event_service,
         arrival_matching_service=arrival_matching_service,
+        market_order_execution_service=market_order_execution_service,
         batch_size=100,
         block_ms=1,
         pending_idle_ms=60000,
@@ -84,6 +86,31 @@ def test_accepted_order_triggers_arrival_matching_before_ack():
         exchange_id="DCE",
         symbol="JD2609",
         order_snapshot=None,
+    )
+    stream_consumer.acknowledge.assert_called_once_with("1-0")
+
+
+def test_market_order_executes_and_cancels_before_ack():
+    market_execution = Mock()
+    worker, stream_consumer, event_service, _ = make_worker(
+        market_order_execution_service=market_execution
+    )
+    snapshot = object()
+    event_service.process.return_value = SimpleNamespace(
+        event_id="EVT-1",
+        event_type="ORDER_ACCEPTED",
+        order_id="O-1",
+        exchange_id="DCE",
+        symbol="JD2609",
+        action="MARKET_READY",
+        order_snapshot=snapshot,
+    )
+
+    result = worker.handle_message("1-0", FIELDS)
+
+    assert result == "acknowledged"
+    market_execution.execute.assert_called_once_with(
+        order_id="O-1", order_snapshot=snapshot
     )
     stream_consumer.acknowledge.assert_called_once_with("1-0")
 

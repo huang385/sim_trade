@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.order import Order
 from app.models.account import Account
-from app.enums.order_enums import OffsetFlag, OrderStatus, OrderType
+from app.enums.order_enums import LIMIT_LIKE_ORDER_TYPES, OffsetFlag, OrderStatus
 
 
 SUPPORTED_ACTIVE_OFFSET_FLAGS = (
@@ -207,7 +207,7 @@ class OrderRepository:
                     )
                 ),
                 Order.remaining_volume > 0,
-                Order.order_type == OrderType.LIMIT.value,
+                Order.order_type.in_(LIMIT_LIKE_ORDER_TYPES),
                 Order.offset_flag.in_(SUPPORTED_ACTIVE_OFFSET_FLAGS),
             )
             .order_by(Order.id)
@@ -233,7 +233,7 @@ class OrderRepository:
             Order.instrument_type == "FUTURES_OPTION",
             Order.direction == "SELL",
             Order.offset_flag == "OPEN",
-            Order.order_type == OrderType.LIMIT.value,
+            Order.order_type.in_(LIMIT_LIKE_ORDER_TYPES),
             Order.status.in_(
                 (
                     OrderStatus.ACCEPTED.value,
@@ -255,7 +255,7 @@ class OrderRepository:
             .where(
                 Order.account_id == account_id,
                 Order.offset_flag == OffsetFlag.OPEN.value,
-                Order.order_type == OrderType.LIMIT.value,
+                Order.order_type.in_(LIMIT_LIKE_ORDER_TYPES),
                 Order.status.in_(
                     (OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value)
                 ),
@@ -294,6 +294,18 @@ class OrderRepository:
         commission_parameter: Decimal,
         commission_contract_multiplier: Decimal,
         limit_price: Decimal,
+        submitted_limit_price: Decimal | None = None,
+        resolved_price: Decimal | None = None,
+        market_protection_price: Decimal | None = None,
+        price_snapshot_time: datetime | None = None,
+        price_snapshot_source: str | None = None,
+        price_snapshot_event_id: str | None = None,
+        price_snapshot_stream_message_id: str | None = None,
+        price_snapshot_bid1: Decimal | None = None,
+        price_snapshot_bid_volume1: int | None = None,
+        price_snapshot_ask1: Decimal | None = None,
+        price_snapshot_ask_volume1: int | None = None,
+        price_snapshot_last: Decimal | None = None,
         total_volume: int,
         status: str,
         submit_status: str,
@@ -351,6 +363,18 @@ class OrderRepository:
             fee_rule_version=fee_rule_version,
             fee_rule_snapshot=fee_rule_snapshot,
             limit_price=limit_price,
+            submitted_limit_price=submitted_limit_price,
+            resolved_price=resolved_price if resolved_price is not None else limit_price,
+            market_protection_price=market_protection_price,
+            price_snapshot_time=price_snapshot_time,
+            price_snapshot_source=price_snapshot_source,
+            price_snapshot_event_id=price_snapshot_event_id,
+            price_snapshot_stream_message_id=price_snapshot_stream_message_id,
+            price_snapshot_bid1=price_snapshot_bid1,
+            price_snapshot_bid_volume1=price_snapshot_bid_volume1,
+            price_snapshot_ask1=price_snapshot_ask1,
+            price_snapshot_ask_volume1=price_snapshot_ask_volume1,
+            price_snapshot_last=price_snapshot_last,
             total_volume=total_volume,
             # 新订单尚未撮合，成交数量从0开始，平均成交价暂时为空。
             traded_volume=0,
@@ -377,6 +401,8 @@ class OrderRepository:
             reduce_only=reduce_only,
             reject_code=None,
             reject_message=None,
+            cancel_reason_code=None,
+            cancel_reason_message=None,
             created_at=created_at,
             accepted_at=accepted_at,
             updated_at=accepted_at,

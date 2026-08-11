@@ -95,7 +95,7 @@ class OptionOrderMarginAdjustmentService:
             }
             and order.direction == OrderDirection.SELL.value
             and order.offset_flag == OffsetFlag.OPEN.value
-            and order.order_type == "LIMIT"
+            and order.order_type in {"LIMIT", "COUNTERPARTY", "LAST"}
         )
 
     def _underlying(self, db: Session, *, order, instrument):

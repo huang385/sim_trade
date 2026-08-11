@@ -424,8 +424,9 @@ def make_request(
     symbol: str | None = None,
     direction: str = "BUY",
     offset_flag: str = "OPEN",
-    limit_price: Decimal = Decimal("3500"),
+    limit_price: Decimal | None = Decimal("3500"),
     volume: int = 2,
+    order_type: str = "LIMIT",
 ) -> OrderCreateRequest:
     """构造使用当前集成测试参考数据的订单请求。"""
 
@@ -436,7 +437,7 @@ def make_request(
         symbol=symbol or context.symbol,
         direction=direction,
         offset_flag=offset_flag,
-        order_type="LIMIT",
+        order_type=order_type,
         limit_price=limit_price,
         volume=volume,
     )
@@ -447,6 +448,7 @@ def make_order_service(
     *,
     outbox_repository=None,
     event_id_factory=None,
+    order_price_resolver=None,
 ) -> OrderService:
     """构造使用真实 PostgreSQL 仓储的订单服务。"""
 
@@ -464,6 +466,7 @@ def make_order_service(
         outbox_repository=outbox_repository or OutboxRepository(),
         trading_day_provider=lambda: context.trading_day,
         default_access_scope=AccountAccessScope.admin(),
+        order_price_resolver=order_price_resolver,
         **kwargs,
     )
 
