@@ -175,21 +175,24 @@ def test_order_cursor_pages_have_no_duplicates_and_traverse_all_rows():
     assert len(all_ids) == len(set(all_ids)) == 5
     assert repository.list_page_by_account.call_args_list == [
         call(
-            first_db,
-            "A001",
-            before_id=None,
+                first_db,
+                "A001",
+                trading_day=None,
+                before_id=None,
             fetch_size=3,
         ),
         call(
-            second_db,
-            "A001",
-            before_id=4,
+                second_db,
+                "A001",
+                trading_day=None,
+                before_id=4,
             fetch_size=3,
         ),
         call(
-            third_db,
-            "A001",
-            before_id=2,
+                third_db,
+                "A001",
+                trading_day=None,
+                before_id=2,
             fetch_size=3,
         ),
     ]

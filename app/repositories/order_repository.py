@@ -163,6 +163,7 @@ class OrderRepository:
         db: Session,
         account_id: str,
         *,
+        trading_day: date | None = None,
         before_id: int | None,
         fetch_size: int,
     ) -> Sequence[Order]:
@@ -176,6 +177,8 @@ class OrderRepository:
         statement = select(Order).where(
             Order.account_id == account_id
         )
+        if trading_day is not None:
+            statement = statement.where(Order.trading_day == trading_day)
         if before_id is not None:
             statement = statement.where(Order.id < before_id)
         return db.scalars(

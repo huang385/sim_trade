@@ -42,6 +42,9 @@ from app.services.market_subscription_service import MarketSubscriptionService
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,
 )
+from app.infrastructure.client_market_subscription_store import (
+    ClientMarketSubscriptionStore,
+)
 from app.services.market_tick_normalizer import (
     MarketTickNormalizationError,
     MarketTickNormalizer,
@@ -821,6 +824,13 @@ def build_worker() -> MarketDataSubscriberWorker:
             ttl_seconds=settings.market_pre_subscription_ttl_seconds,
             max_codes_per_account=(
                 settings.market_pre_subscription_max_codes_per_account
+            ),
+        ),
+        client_subscription_source=ClientMarketSubscriptionStore(
+            redis_client,
+            ttl_seconds=settings.market_client_subscription_ttl_seconds,
+            max_codes_per_connection=(
+                settings.market_client_subscription_max_codes_per_connection
             ),
         ),
         debounce_seconds=(

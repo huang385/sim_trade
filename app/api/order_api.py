@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -55,6 +57,7 @@ def create_order(
 @router.get("/page", response_model=OrderPageResponse)
 def list_order_page(
     account_id: str = Query(min_length=1, max_length=64),
+    trading_day: date | None = Query(default=None),
     cursor: str | None = Query(default=None, min_length=1),
     limit: int = Query(default=100, ge=1, le=500),
     current_user: AppUser = Depends(require_active_user),
@@ -75,6 +78,7 @@ def list_order_page(
     return service.list_order_page(
         db,
         account_id,
+        trading_day=trading_day,
         cursor=cursor,
         limit=limit,
     )

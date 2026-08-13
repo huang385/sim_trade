@@ -7,6 +7,7 @@ from app.core.logging_config import setup_logging
 from app.realtime.gateway_runtime import GatewayRuntime
 from app.realtime.metrics import realtime_metrics
 from app.realtime.websocket_api import router
+from app.realtime.market_websocket_api import router as market_router
 
 
 setup_logging()
@@ -30,6 +31,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(router)
+app.include_router(market_router)
 
 
 @app.get("/health")

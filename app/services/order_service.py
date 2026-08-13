@@ -1159,13 +1159,17 @@ class OrderService:
         db: Session,
         account_id: str,
         *,
+        trading_day: date | None = None,
         cursor: str | None,
         limit: int,
     ) -> OrderPageResponse:
         """返回可供客户端继续请求下一页的不透明游标分页结果。"""
 
         normalized_account_id = account_id.strip()
-        filters = {"account_id": normalized_account_id}
+        filters = {
+            "account_id": normalized_account_id,
+            "trading_day": trading_day.isoformat() if trading_day else None,
+        }
         before_id = None
         if cursor is not None:
             before_id = decode_cursor(
@@ -1177,6 +1181,7 @@ class OrderService:
             self.order_repository.list_page_by_account(
                 db,
                 normalized_account_id,
+                trading_day=trading_day,
                 before_id=before_id,
                 fetch_size=limit + 1,
             )

@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     auth_refresh_cookie_name: str = "sim_trade_refresh"
     auth_refresh_cookie_secure: bool = False
     auth_refresh_cookie_samesite: str = "lax"
+    # 桌面客户端 WebView 与 HTTP API 不同源。只允许显式列出的开发和 Tauri
+    # Origin；生产部署可用逗号分隔值覆盖，禁止使用带凭证的通配符 CORS。
+    api_cors_allowed_origins: str = (
+        "http://127.0.0.1:1420,http://localhost:1420,"
+        "http://tauri.localhost,tauri://localhost"
+    )
+
+    @property
+    def cors_allowed_origins(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.api_cors_allowed_origins.split(",")
+            if origin.strip()
+        ]
 
     # 期权能力全部采用失败关闭的双层开关。系统产品开关开启后，账户自身
     # option_trading_enabled仍必须为True。股指期权卖方和行权本阶段固定
@@ -123,6 +137,10 @@ class Settings(BaseSettings):
     # 合约没有活动订单或持仓，行情Worker会按原有防抖流程自动退订。
     market_pre_subscription_ttl_seconds: int = 60
     market_pre_subscription_max_codes_per_account: int = 20
+    # 终端观察行情采用短租约，Gateway会在连接存活期间续租；异常退出后无需
+    # 依赖进程内finally，过期需求也会自动离开上游订阅并集。
+    market_client_subscription_ttl_seconds: int = 90
+    market_client_subscription_max_codes_per_connection: int = 50
     remote_market_data_reconnect_initial_seconds: float = 1.0
     remote_market_data_reconnect_max_seconds: float = 30.0
     remote_market_data_queue_size: int = 10_000

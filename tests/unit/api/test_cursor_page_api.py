@@ -24,7 +24,11 @@ def test_order_page_route_returns_protocol_and_keeps_legacy_list():
         client = TestClient(app)
         page = client.get(
             "/api/orders/page",
-            params={"account_id": "A001", "limit": 100},
+            params={
+                "account_id": "A001",
+                "trading_day": "2026-08-11",
+                "limit": 100,
+            },
         )
         legacy = client.get(
             "/api/orders",
@@ -41,6 +45,7 @@ def test_order_page_route_returns_protocol_and_keeps_legacy_list():
     }
     assert legacy.status_code == 200
     assert legacy.json() == []
+    assert order_service.list_order_page.call_args.kwargs["trading_day"].isoformat() == "2026-08-11"
     order_service.get_order.assert_not_called()
 
 
