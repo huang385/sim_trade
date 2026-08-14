@@ -19,23 +19,23 @@ from app.infrastructure.order_stream_consumer import (
     StreamMessage,
 )
 from app.matching.registry import create_matching_engine
-from app.infrastructure.database.repository_adapters import OrderRepository
-from app.modules.orders import (
+from app.repositories.order_repository import OrderRepository
+from app.services.accepted_order_event_service import (
     AcceptedOrderEventService,
     UnsupportedOrderEventError,
 )
-from app.modules.market_data import (
+from app.services.live_market_snapshot_service import (
     LiveMarketSnapshotService,
 )
-from app.modules.orders import (
+from app.services.market_tick_matching_service import (
     MarketTickMatchingService,
 )
-from app.modules.orders import MarketOrderExecutionService
-from app.modules.orders import OrderCancellationService
-from app.modules.orders import (
+from app.services.market_order_execution_service import MarketOrderExecutionService
+from app.services.order_cancellation_service import OrderCancellationService
+from app.services.order_arrival_matching_service import (
     OrderArrivalMatchingService,
 )
-from app.modules.trades import TradeSettlementService
+from app.services.trade_settlement_service import TradeSettlementService
 
 
 logger = logging.getLogger(__name__)

@@ -6,7 +6,7 @@ from app.core.redis_client import redis_client
 from app.core.security import require_active_user
 from app.models.app_user import AppUser
 from app.api.auth_api import get_account_authorization_service
-from app.modules.accounts import (
+from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
@@ -15,7 +15,7 @@ from app.schemas.pnl_schema import (
     AccountTradingSnapshotResponse,
     PositionRealtimePnlResponse,
 )
-from app.modules.realtime import RealtimePnlQueryService
+from app.services.realtime_pnl_query_service import RealtimePnlQueryService
 
 
 router = APIRouter(tags=["实时盈亏"])

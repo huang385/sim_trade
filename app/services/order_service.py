@@ -79,7 +79,7 @@ from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_price_resolver import OrderPriceResolver, ResolvedOrderPrice
 from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductFamily,
     ProductStrategyRegistry,
     product_strategy_registry,

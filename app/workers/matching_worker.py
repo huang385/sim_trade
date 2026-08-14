@@ -15,13 +15,13 @@ from app.infrastructure.market_tick_stream_consumer import (
     MarketTickStreamConsumer,
 )
 from app.matching.registry import create_matching_engine
-from app.infrastructure.database.repository_adapters import OrderRepository
-from app.modules.orders import (
+from app.repositories.order_repository import OrderRepository
+from app.services.market_tick_matching_service import (
     MarketTickEventValidationError,
     MarketTickMatchingService,
     UnsupportedMarketTickEventError,
 )
-from app.modules.trades import TradeSettlementService
+from app.services.trade_settlement_service import TradeSettlementService
 
 
 logger = logging.getLogger(__name__)

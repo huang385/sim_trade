@@ -9,10 +9,10 @@ from app.schemas.market_subscription_schema import (
     OptionMarketPrepareRequest,
     OptionMarketPrepareResponse,
 )
-from app.modules.accounts import (
+from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
-from app.modules.market_data import (
+from app.services.option_market_pre_subscription_service import (
     OptionMarketPreSubscriptionService,
     get_option_market_pre_subscription_service,
 )

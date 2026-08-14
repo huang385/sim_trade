@@ -10,7 +10,7 @@ from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.enums.order_enums import OutboxStatus
 from app.infrastructure.order_event_publisher import OrderEventPublisher
-from app.infrastructure.database.repository_adapters import OutboxRepository
+from app.repositories.outbox_repository import OutboxRepository
 
 
 logger = logging.getLogger(__name__)

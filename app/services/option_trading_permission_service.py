@@ -3,8 +3,8 @@ from app.core.config import Settings, settings
 from app.enums.account_enums import AccountRiskState, AccountType
 from app.enums.option_enums import InstrumentType
 from app.enums.order_enums import OffsetFlag, OrderDirection
-from app.shared.enums import ProductFamily
-from app.modules.orders.product_registry import (
+from app.enums.product_enums import ProductFamily
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

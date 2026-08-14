@@ -4,8 +4,9 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 # 加载全部模型，确保 autogenerate 能看到完整 metadata。
+from app import models  # noqa: F401
 from app.core.config import settings
-from app.infrastructure.database.model_registry import metadata
+from app.core.database import Base
 
 
 config = context.config
@@ -14,7 +15,7 @@ if config.config_file_name is not None:
 
 # 数据库地址统一取项目 Settings，不在 alembic.ini 中重复保存密码。
 config.set_main_option("sqlalchemy.url", settings.database_url)
-target_metadata = metadata
+target_metadata = Base.metadata
 
 # 交易日历和产品时段由独立参考数据同步链路管理，本项目只读复用。自动
 # 比对必须忽略它们，否则 Alembic 会错误建议删除这两张已有事实表。

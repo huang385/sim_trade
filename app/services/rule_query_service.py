@@ -20,7 +20,7 @@ from app.repositories.margin_rule_repository import (
     MarginRuleRepository,
 )
 from app.enums.option_enums import InstrumentType
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductFamily,
     ProductStrategyRegistry,
     product_strategy_registry,

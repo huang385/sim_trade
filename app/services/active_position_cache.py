@@ -11,12 +11,12 @@ from sqlalchemy.orm import Session
 from app.repositories.account_repository import AccountRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.outbox_repository import OutboxRepository
-from app.shared.enums import ProductFamily
+from app.enums.product_enums import ProductFamily
 from app.services.pnl_calculator import (
     PnlDetailSnapshot,
     PositionPnlSnapshot,
 )
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

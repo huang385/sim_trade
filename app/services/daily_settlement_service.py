@@ -59,7 +59,7 @@ from app.services.settlement_replay_service import (
     ReplayedPosition,
     SettlementReplayService,
 )
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

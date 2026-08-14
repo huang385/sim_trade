@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_CEILING
 from app.common.time_utils import utc_now
 from app.enums.account_enums import AccountRiskState
 from app.enums.order_enums import OffsetFlag, OrderDirection, OrderStatus, PositionDirection
-from app.shared.enums import ProductFamily
+from app.enums.product_enums import ProductFamily
 from app.enums.risk_enums import LiquidationTaskStatus, OrderSource, RiskEventType
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.repositories.account_repository import AccountRepository
@@ -20,7 +20,7 @@ from app.services.order_service import OrderService
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.risk_event_service import RiskEventService
 from app.services.settlement_gate_service import SettlementGateService
-from app.modules.orders.product_registry import resolve_product_strategy
+from app.services.product_strategy_registry import resolve_product_strategy
 
 
 logger = logging.getLogger(__name__)

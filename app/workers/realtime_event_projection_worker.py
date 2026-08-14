@@ -11,10 +11,10 @@ from app.infrastructure.redis_keys import (
     REALTIME_PROJECTION_DEAD_LETTER_STREAM,
     realtime_projection_failure_key,
 )
-from app.modules.realtime import (
+from app.realtime.event_projection_service import (
     RealtimeEventProjectionService,
 )
-from app.modules.realtime import RealtimeEventStore
+from app.realtime.event_store import RealtimeEventStore
 
 
 logger = logging.getLogger(__name__)

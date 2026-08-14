@@ -32,7 +32,7 @@ from app.services.pnl_calculator import (
     PositionPnlSnapshot,
 )
 from app.services.settlement_gate_service import SettlementGateService
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductFamily,
     ProductStrategyRegistry,
     product_strategy_registry,

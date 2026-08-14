@@ -32,7 +32,7 @@ from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
 from app.services.order_freeze_service import OrderFreezeService
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

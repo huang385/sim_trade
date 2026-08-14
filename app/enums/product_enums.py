@@ -1,5 +1,8 @@
-"""旧枚举路径兼容层；实现已迁入 app.shared.enums。"""
+from enum import Enum
 
-from app.shared.enums.product import ProductFamily
 
-__all__ = ["ProductFamily"]
+class ProductFamily(str, Enum):
+    """稳定的产品族标识；具体交易规则仍由产品策略负责。"""
+
+    FUTURES = "FUTURES"
+    OPTIONS = "OPTIONS"

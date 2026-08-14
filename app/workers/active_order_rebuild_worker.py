@@ -5,8 +5,8 @@ from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex
-from app.infrastructure.database.repository_adapters import OrderRepository
-from app.modules.orders import (
+from app.repositories.order_repository import OrderRepository
+from app.services.active_order_rebuild_service import (
     ActiveOrderRebuildService,
 )
 

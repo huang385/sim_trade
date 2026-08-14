@@ -12,7 +12,7 @@ from app.schemas.instrument_schema import (
     InstrumentCreate,
     InstrumentCatalogItem,
 )
-from app.modules.instruments import (
+from app.services.instrument_service import (
     InstrumentService,
     get_instrument_service,
 )

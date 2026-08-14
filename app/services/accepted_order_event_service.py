@@ -13,7 +13,7 @@ from app.enums.order_enums import (
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.matching.models import MatchingOrder, MatchingOrderCandidate
 from app.repositories.order_repository import OrderRepository
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

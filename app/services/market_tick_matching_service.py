@@ -12,7 +12,7 @@ from app.enums.order_enums import (
 )
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.matching.base import MatchingEngine
-from app.modules.orders.matching import (
+from app.matching.product_strategy import (
     DerivativeMatchingStrategy,
     MatchingStrategyRegistry,
 )
@@ -28,7 +28,7 @@ from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
 )
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )

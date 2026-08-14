@@ -52,7 +52,7 @@ from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
-from app.modules.orders.product_registry import (
+from app.services.product_strategy_registry import (
     ProductFamily,
     ProductStrategyRegistry,
     product_strategy_registry,
