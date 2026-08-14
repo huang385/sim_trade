@@ -6,9 +6,9 @@ from app.core.security import require_active_user
 from app.models.app_user import AppUser
 from app.enums.auth_enums import UserRole
 from app.common.exceptions import AuthorizationError
-from app.api.auth_api import get_account_authorization_service
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
+    get_account_authorization_service,
 )
 from app.schemas.trade_schema import (
     TradePageResponse,

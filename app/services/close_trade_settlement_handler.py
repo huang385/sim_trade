@@ -17,7 +17,7 @@ from app.enums.order_enums import (
     PositionDirection,
     PositionFreezeAllocationStatus,
 )
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.models.trade import Trade
 from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.position_freeze_allocation_repository import (

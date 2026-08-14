@@ -11,7 +11,7 @@ from app.enums.order_enums import (
     OrderType,
 )
 from app.infrastructure.active_order_index import ActiveOrderIndex
-from app.matching.models import MatchingOrder, MatchingOrderCandidate
+from app.matching.types import MatchingOrder, MatchingOrderCandidate
 from app.repositories.order_repository import OrderRepository
 from app.services.product_strategy_registry import (
     ProductStrategyRegistry,

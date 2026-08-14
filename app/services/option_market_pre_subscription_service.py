@@ -13,7 +13,7 @@ from app.common.exceptions import (
 from app.core.config import settings
 from app.core.redis_client import redis_client
 from app.enums.account_enums import AccountStatus
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,

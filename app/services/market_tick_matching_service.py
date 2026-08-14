@@ -16,7 +16,7 @@ from app.matching.product_strategy import (
     DerivativeMatchingStrategy,
     MatchingStrategyRegistry,
 )
-from app.matching.models import (
+from app.matching.types import (
     MatchingMarketData,
     MatchingOrder,
     MatchingOrderCandidate,

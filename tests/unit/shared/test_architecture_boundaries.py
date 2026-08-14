@@ -45,7 +45,7 @@ def test_repositories_do_not_control_transactions_or_depend_on_upper_layers():
 def test_core_product_enums_have_one_class_definition_each():
     expected_sources = {
         "AccountType": "account_enums.py",
-        "InstrumentType": "option_enums.py",
+        "InstrumentType": "instrument_enums.py",
         "MarketType": "market_enums.py",
         "ExchangeID": "market_enums.py",
         "OrderType": "order_enums.py",
@@ -63,3 +63,21 @@ def test_core_product_enums_have_one_class_definition_each():
     assert definitions == {
         name: [source] for name, source in expected_sources.items()
     }
+
+
+def test_api_modules_do_not_import_authorization_dependency_from_auth_api():
+    violations: list[str] = []
+    for path in _python_files("app/api"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom):
+                continue
+            if node.module != "app.api.auth_api":
+                continue
+            if any(
+                alias.name == "get_account_authorization_service"
+                for alias in node.names
+            ):
+                violations.append(f"{path.name}:{node.lineno}")
+
+    assert violations == []

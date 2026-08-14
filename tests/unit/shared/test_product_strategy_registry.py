@@ -1,7 +1,7 @@
 import pytest
 
 from app.common.exceptions import BusinessRuleError
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.services.product_strategy_registry import (
     FuturesProductStrategy,
     OptionProductStrategy,

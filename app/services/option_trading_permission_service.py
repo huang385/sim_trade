@@ -1,7 +1,7 @@
 from app.common.exceptions import BusinessRuleError
 from app.core.config import Settings, settings
 from app.enums.account_enums import AccountRiskState, AccountType
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.enums.order_enums import OffsetFlag, OrderDirection
 from app.enums.product_enums import ProductFamily
 from app.services.product_strategy_registry import (

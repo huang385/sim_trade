@@ -1,5 +1,6 @@
 from app.common.exceptions import BusinessRuleError
-from app.enums.option_enums import InstrumentType, OptionMarginAlgorithm
+from app.enums.instrument_enums import InstrumentType
+from app.enums.option_enums import OptionMarginAlgorithm
 from app.services.cffex_index_option_margin_calculator import (
     CffexIndexOptionMarginCalculator,
 )
@@ -40,4 +41,3 @@ class OptionMarginCalculatorResolver:
             "没有匹配的期权保证金算法",
             error_code="OPTION_MARGIN_ALGORITHM_NOT_FOUND",
         )
-

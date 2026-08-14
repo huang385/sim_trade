@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 
 from app.common.exceptions import BusinessRuleError
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.enums.order_enums import OffsetFlag, OrderDirection
 from app.schemas.market_subscription_schema import (
     MarketPreparationStatus,

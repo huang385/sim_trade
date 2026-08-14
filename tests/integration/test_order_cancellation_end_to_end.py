@@ -25,7 +25,7 @@ from app.infrastructure.redis_keys import (
     processed_order_event_key,
 )
 from app.main import app
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.account import Account
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent

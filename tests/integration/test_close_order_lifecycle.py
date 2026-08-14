@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 
 from app.common.exceptions import BusinessRuleError, DataAccessError
 from app.core.database import SessionLocal
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.account import Account
 from app.models.order import Order
 from app.models.position import Position

@@ -9,7 +9,7 @@ from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.redis_keys import market_latest_key
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.account import Account
 from app.models.daily_settlement import DailySettlementBatch
 from app.models.fee_rule_item import FeeRuleItem

@@ -43,7 +43,7 @@ from app.models.app_user import AppUser
 from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.trade import Trade
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.realtime.event_consumer import RealtimeEventConsumer
 from app.realtime.gateway_lease import GatewayLease
 from app.realtime.gateway_runtime import GatewayRuntime

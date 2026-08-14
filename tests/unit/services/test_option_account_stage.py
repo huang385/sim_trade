@@ -6,8 +6,8 @@ from unittest.mock import Mock
 import pytest
 
 from app.common.exceptions import BusinessRuleError
+from app.enums.instrument_enums import InstrumentType
 from app.enums.option_enums import (
-    InstrumentType,
     MarginPriceMode,
     OptionMarginAlgorithm,
     OptionType,

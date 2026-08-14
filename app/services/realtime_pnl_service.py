@@ -9,9 +9,9 @@ from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.enums.account_enums import AccountRiskState
+from app.enums.instrument_enums import InstrumentType
 from app.enums.order_enums import PositionDirection
 from app.enums.option_enums import (
-    InstrumentType,
     MarginPriceMode,
     OptionType,
 )

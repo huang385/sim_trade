@@ -1,5 +1,5 @@
 from app.enums.order_enums import OrderDirection
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
+from app.matching.types import MatchResult, MatchingMarketData, MatchingOrder
 
 
 class VnMatchingEngine:

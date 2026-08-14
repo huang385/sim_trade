@@ -10,7 +10,7 @@ from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentResult,
     OptionOrderMarginAdjustmentService,
 )
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,

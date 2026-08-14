@@ -14,7 +14,7 @@ from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.risk_store import RiskStore
 from app.infrastructure.redis_keys import market_latest_key
 from app.infrastructure.redis_keys import processed_risk_trigger_key
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.account import Account
 from app.models.liquidation_task import LiquidationTask
 from app.models.order import Order

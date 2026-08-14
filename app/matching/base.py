@@ -1,6 +1,6 @@
 from typing import Protocol, runtime_checkable
 
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
+from app.matching.types import MatchResult, MatchingMarketData, MatchingOrder
 
 
 @runtime_checkable

@@ -19,6 +19,7 @@ from app.common.exceptions import (
 from app.common.decimal_utils import quantize_money
 from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
+from app.enums.instrument_enums import InstrumentType
 from app.enums.order_enums import (
     OffsetFlag,
     OrderDirection,
@@ -29,7 +30,6 @@ from app.enums.order_enums import (
 )
 from app.enums.reference_data_enums import CommissionType
 from app.enums.option_enums import (
-    InstrumentType,
     MarginPriceMode,
     OptionType,
 )

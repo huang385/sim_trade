@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from app.api.auth_api import get_account_authorization_service
+from app.services.account_authorization_service import (
+    get_account_authorization_service,
+)
 from app.core.security import get_current_user, require_active_user
 from app.enums.auth_enums import UserRole, UserStatus
 from app.main import app

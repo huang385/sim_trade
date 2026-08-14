@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.common.exceptions import DataAccessError
 from app.core.database import Base
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.account import Account
 from app.models.instrument import Instrument
 from app.models.order import Order

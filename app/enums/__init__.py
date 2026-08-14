@@ -16,9 +16,9 @@ from app.enums.reference_data_enums import (
     ReferenceDataSource,
 )
 from app.enums.auth_enums import TokenType, UserRole, UserStatus
+from app.enums.instrument_enums import InstrumentType
 from app.enums.option_enums import (
     ExerciseStyle,
-    InstrumentType,
     MarginPriceMode,
     OptionMarginAlgorithm,
     OptionType,

@@ -5,7 +5,7 @@ import pytest
 
 from app.enums.order_enums import OffsetFlag, OrderDirection, OrderType
 from app.matching.engines.vn import VnMatchingEngine
-from app.matching.models import MatchingMarketData, MatchingOrder
+from app.matching.types import MatchingMarketData, MatchingOrder
 
 
 def make_market(**overrides) -> MatchingMarketData:

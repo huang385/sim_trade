@@ -1,7 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.api.auth_api import get_account_authorization_service
 from app.core.database import get_db
 from app.core.security import require_active_user
 from app.models.app_user import AppUser
@@ -11,7 +10,10 @@ from app.schemas.risk_schema import (
     RiskEventResponse,
     RiskSnapshotResponse,
 )
-from app.services.account_authorization_service import AccountAuthorizationService
+from app.services.account_authorization_service import (
+    AccountAuthorizationService,
+    get_account_authorization_service,
+)
 
 
 router = APIRouter(prefix="/api/risk", tags=["实时风险"])

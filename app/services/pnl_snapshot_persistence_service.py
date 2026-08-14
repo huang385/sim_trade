@@ -7,7 +7,8 @@ from app.common.exceptions import DataAccessError
 from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.enums.account_enums import AccountRiskState
-from app.enums.option_enums import InstrumentType, MarginPriceMode, OptionType
+from app.enums.instrument_enums import InstrumentType
+from app.enums.option_enums import MarginPriceMode, OptionType
 from app.enums.order_enums import PositionDirection
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore

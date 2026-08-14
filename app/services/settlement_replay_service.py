@@ -7,7 +7,8 @@ from typing import Any
 
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError
-from app.enums.option_enums import InstrumentType, OptionType
+from app.enums.instrument_enums import InstrumentType
+from app.enums.option_enums import OptionType
 from app.enums.order_enums import OffsetFlag, PositionDirection
 from app.services.product_strategy_registry import (
     ProductFamily,

@@ -13,7 +13,7 @@ from app.enums.order_enums import (
     OrderType,
 )
 from app.matching.base import MatchingEngine
-from app.matching.models import (
+from app.matching.types import (
     MatchResult,
     MatchingMarketData,
     MatchingOrder,

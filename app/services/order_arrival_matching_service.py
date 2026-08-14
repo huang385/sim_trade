@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from app.matching.models import MatchingOrderCandidate
+from app.matching.types import MatchingOrderCandidate
 from app.schemas.matching_schema import MarketTickMatchResult
 from app.services.live_market_snapshot_service import (
     LiveMarketSnapshotService,

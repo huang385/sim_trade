@@ -18,6 +18,7 @@ from app.schemas.auth_schema import (
 from app.schemas.user_schema import UserSummary
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
+    get_account_authorization_service,
 )
 from app.services.auth_service import AuthResult, AuthService
 from app.services.login_rate_limit_service import LoginRateLimitService
@@ -36,15 +37,10 @@ _auth_service = AuthService(
     token_service=_token_service,
     rate_limit_service=LoginRateLimitService(redis_client),
 )
-_authorization_service = AccountAuthorizationService()
 
 
 def get_auth_service() -> AuthService:
     return _auth_service
-
-
-def get_account_authorization_service() -> AccountAuthorizationService:
-    return _authorization_service
 
 
 def _client_ip(request: Request) -> str:

@@ -64,7 +64,9 @@ from app.services.account_authorization_service import (
     AccountAuthorizationService,
 )
 from app.services.account_access_scope import AccountAccessScope
-from app.api.auth_api import get_account_authorization_service
+from app.services.account_authorization_service import (
+    get_account_authorization_service,
+)
 from app.main import app
 from tests.api_auth_helpers import install_admin_auth_overrides
 

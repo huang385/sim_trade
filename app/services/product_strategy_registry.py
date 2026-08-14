@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from app.common.exceptions import BusinessRuleError
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.enums.product_enums import ProductFamily
 
 

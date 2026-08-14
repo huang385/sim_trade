@@ -11,7 +11,7 @@ from app.common.exceptions import (
 )
 from app.common.time_utils import utc_now
 from app.enums.reference_data_enums import ReferenceDataSource
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.models.instrument import Instrument
 from app.repositories.instrument_repository import (
     InstrumentRepository,

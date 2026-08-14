@@ -5,7 +5,7 @@ from typing import Mapping
 from sqlalchemy.orm import Session
 
 from app.common.code_utils import normalize_code
-from app.enums.option_enums import InstrumentType
+from app.enums.instrument_enums import InstrumentType
 from app.repositories.instrument_market_data_mapping_repository import (
     InstrumentMarketDataMappingRepository,
 )

@@ -23,7 +23,7 @@ from app.enums.order_enums import (
     PositionDirection,
 )
 from app.enums.account_enums import AccountRiskState
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.trade import Trade

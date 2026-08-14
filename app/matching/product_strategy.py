@@ -3,7 +3,7 @@ from typing import Protocol, runtime_checkable
 
 from app.enums.product_enums import ProductFamily
 from app.matching.base import MatchingEngine
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
+from app.matching.types import MatchResult, MatchingMarketData, MatchingOrder
 
 
 @runtime_checkable

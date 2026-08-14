@@ -14,8 +14,8 @@ from app.services.account_service import (
 )
 from app.services.account_authorization_service import (
     AccountAuthorizationService,
+    get_account_authorization_service,
 )
-from app.api.auth_api import get_account_authorization_service
 
 
 router = APIRouter(

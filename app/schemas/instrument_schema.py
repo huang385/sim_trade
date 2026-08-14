@@ -1,9 +1,9 @@
 from datetime import date, datetime
 from decimal import Decimal
+from app.enums.instrument_enums import InstrumentType
 from app.enums.market_enums import MarketType
 from app.enums.option_enums import (
     ExerciseStyle,
-    InstrumentType,
     OptionType,
     SettlementType,
 )

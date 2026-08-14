@@ -22,7 +22,8 @@ from app.enums.daily_settlement_enums import (
     DailySettlementStage,
     SettlementCacheStatus,
 )
-from app.enums.option_enums import InstrumentType, MarginPriceMode, OptionType
+from app.enums.instrument_enums import InstrumentType
+from app.enums.option_enums import MarginPriceMode, OptionType
 from app.enums.order_enums import PositionDetailStatus, PositionDirection
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_data.market_tick_store import MarketTickStore

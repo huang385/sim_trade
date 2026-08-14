@@ -4,7 +4,7 @@ from decimal import Decimal
 import pytest
 
 from app.enums.order_enums import OffsetFlag, OrderDirection, OrderType
-from app.matching.models import MatchResult, MatchingMarketData, MatchingOrder
+from app.matching.types import MatchResult, MatchingMarketData, MatchingOrder
 
 
 def _field_names(model_type) -> set[str]:

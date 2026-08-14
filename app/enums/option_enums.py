@@ -1,15 +1,6 @@
 from enum import Enum
 
 
-class InstrumentType(str, Enum):
-    """精确合约类型，用于在统一账户中分派期货和期权业务。"""
-
-    FUTURES = "FUTURES"
-    FUTURES_OPTION = "FUTURES_OPTION"
-    INDEX = "INDEX"
-    INDEX_OPTION = "INDEX_OPTION"
-
-
 class OptionType(str, Enum):
     """期权权利类型。"""
 
@@ -44,4 +35,3 @@ class OptionMarginAlgorithm(str, Enum):
 
     COMMODITY_FUTURES_OPTION = "COMMODITY_FUTURES_OPTION"
     CFFEX_INDEX_OPTION = "CFFEX_INDEX_OPTION"
-

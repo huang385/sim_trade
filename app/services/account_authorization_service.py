@@ -177,3 +177,12 @@ class AccountAuthorizationService:
         if position is None:
             raise self._resource_not_found()
         return position
+
+
+_account_authorization_service = AccountAuthorizationService()
+
+
+def get_account_authorization_service() -> AccountAuthorizationService:
+    """返回应用级无状态账户授权服务，供 FastAPI 依赖复用。"""
+
+    return _account_authorization_service

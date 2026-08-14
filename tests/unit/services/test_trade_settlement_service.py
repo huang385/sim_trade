@@ -14,7 +14,7 @@ from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
 from app.models.trade import Trade
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.trade_repository import TradeRepository

@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.account import Account
-from app.matching.models import MatchResult
+from app.matching.types import MatchResult
 from app.models.position import Position
 from app.models.trade import Trade
 from app.services.trade_settlement_service import (
