@@ -101,6 +101,21 @@ class InstrumentRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def list_tradeable_futures(db: Session) -> Sequence[Instrument]:
+        """返回普通交易终端可选择的有效期货合约。"""
+
+        statement = (
+            select(Instrument)
+            .where(
+                Instrument.instrument_type == "FUTURES",
+                Instrument.is_active.is_(True),
+                Instrument.is_tradeable.is_(True),
+            )
+            .order_by(Instrument.exchange_id, Instrument.symbol)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def upsert(
         db: Session,
         *,

@@ -22,10 +22,10 @@ class LiveMatchingEvent:
 
 class LiveMarketSnapshotService:
     """
-    判断Redis最新行情是否属于当前可用的WebSocket订阅。
+    判断Redis最新行情是否属于当前可用的上游订阅代次。
 
     本服务不使用REST、不按行情年龄拒绝低活跃合约，也不推算交易日。它只
-    检查行情源运行状态、合约订阅结果和当前订阅代次是否已经收到真实Tick。
+    检查行情源运行状态、合约订阅结果和当前订阅代次是否已有可用Tick。
     """
 
     def __init__(self, redis_client: Redis):
@@ -45,7 +45,7 @@ class LiveMarketSnapshotService:
         exchange_id: str,
         symbol: str,
     ) -> LiveMatchingEvent | None:
-        """条件全部满足时返回撮合事件，否则安全等待下一条实时Tick。"""
+        """条件全部满足时返回撮合事件，否则安全等待下一条行情。"""
 
         normalized_exchange = normalize_code(exchange_id)
         normalized_symbol = normalize_code(symbol)
@@ -75,10 +75,12 @@ class LiveMarketSnapshotService:
         ):
             return None
         if (
-            latest.get("source") != "YMM_LIVE_DATA"
-            or latest.get("ingest_type")
-            != MarketTickIngestType.LIVE_CALLBACK.value
-        ):
+            latest.get("source"),
+            latest.get("ingest_type"),
+        ) not in {
+            ("YMM_LIVE_DATA", MarketTickIngestType.LIVE_CALLBACK.value),
+            ("YMM_DATA_SDK", MarketTickIngestType.REST_SNAPSHOT.value),
+        }:
             return None
 
         stream_message_id = latest.get("stream_message_id", "").strip()

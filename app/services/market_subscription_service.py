@@ -173,13 +173,22 @@ class MarketSubscriptionService:
         *,
         now: float,
     ) -> SubscriptionChange | None:
-        """目标集合连续稳定达到防抖时间后才返回变更。"""
+        """新增订阅立即生效；移除订阅仍需连续稳定达到防抖时间。"""
 
         with self._lock:
             if desired_codes == self._requested_codes:
                 self._pending_codes = None
                 self._pending_since = None
                 return None
+            added_codes = desired_codes - self._requested_codes
+            if added_codes:
+                # 新合约需要尽快拿到首条行情。若本轮同时存在删除，先保留旧
+                # 合约并立即追加新合约；下一轮再单独对删除集合执行防抖。
+                self._pending_codes = None
+                self._pending_since = None
+                return SubscriptionChange(
+                    frozenset(self._requested_codes | added_codes)
+                )
             if desired_codes != self._pending_codes:
                 self._pending_codes = desired_codes
                 self._pending_since = now

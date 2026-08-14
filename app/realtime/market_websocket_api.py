@@ -297,6 +297,7 @@ async def market_websocket(websocket: WebSocket, ticket: str = ""):
                     "message": "仅支持subscribe、unsubscribe、resync和pong",
                 })
                 continue
+            codes: set[str] = set()
             try:
                 codes = _normalize_codes(message)
                 if action in {"subscribe", "resync"}:
@@ -335,6 +336,7 @@ async def market_websocket(websocket: WebSocket, ticket: str = ""):
                 await _enqueue(runtime, context, "ERROR", {
                     "error_code": getattr(exc, "error_code", "MARKET_SUBSCRIPTION_INVALID"),
                     "message": getattr(exc, "message", str(exc)),
+                    "order_book_ids": sorted(codes),
                 })
     except (WebSocketDisconnect, RuntimeError, json.JSONDecodeError):
         pass

@@ -3,6 +3,7 @@ import queue
 import signal
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -17,6 +18,10 @@ from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_data.market_tick_store import (
     MarketTickStore,
+)
+from app.infrastructure.market_data.database_snapshot_client import (
+    YMM_DATABASE_SOURCE,
+    YmmDatabaseSnapshotClient,
 )
 from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
@@ -92,6 +97,7 @@ class QueuedTick:
     data: dict[str, Any]
     raw: dict[str, Any]
     ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK
+    source: str = "YMM_LIVE_DATA"
     # Tick入队时所属的订阅代次；None只用于兼容独立测试和手工调用。
     subscription_generation: int | None = None
 
@@ -118,6 +124,8 @@ class MarketDataSubscriberWorker:
         reconnect_initial_seconds: float,
         reconnect_max_seconds: float,
         shutdown_drain_timeout_seconds: float = 10.0,
+        database_snapshot_client=None,
+        database_snapshot_retry_seconds: float = 15.0,
         monotonic: Callable[[], float] = time.monotonic,
     ):
         self.session_factory = session_factory
@@ -130,6 +138,11 @@ class MarketDataSubscriberWorker:
         self.reconnect_initial_seconds = reconnect_initial_seconds
         self.reconnect_max_seconds = reconnect_max_seconds
         self.shutdown_drain_timeout_seconds = shutdown_drain_timeout_seconds
+        self.database_snapshot_client = database_snapshot_client
+        self.database_snapshot_retry_seconds = max(
+            database_snapshot_retry_seconds,
+            1.0,
+        )
         self.monotonic = monotonic
 
         self.tick_queue: queue.Queue[QueuedTick] = queue.Queue(maxsize=queue_size)
@@ -162,6 +175,15 @@ class MarketDataSubscriberWorker:
         # 不打印完整行情报文，既保留排障信息也避免日志刷屏或泄露上游细节。
         self._last_invalid_tick_log_at: float | None = None
         self._last_storage_slow_consumer_log_at: float | None = None
+        self._snapshot_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="MarketBootstrap",
+        )
+        self._snapshot_futures: set[Future] = set()
+        self._bootstrap_requested_codes: set[str] = set()
+        self._bootstrap_retry_at: dict[str, float] = {}
+        self._latest_live_event_times: dict[str, datetime] = {}
+        self._bootstrap_watermarks: dict[str, datetime] = {}
         self.last_tick_at: datetime | None = None
         self.last_published_at: datetime | None = None
         self.last_disconnect_at: datetime | None = None
@@ -270,6 +292,7 @@ class MarketDataSubscriberWorker:
                     data=normalized_data,
                     raw=dict(raw),
                     ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+                    source="YMM_LIVE_DATA",
                     subscription_generation=active_generation,
                 )
             )
@@ -351,6 +374,95 @@ class MarketDataSubscriberWorker:
         elif state.failed_codes:
             self._schedule_failed_subscription_retry(state.generation)
 
+        if code_mapping is not None:
+            self._schedule_bootstrap_snapshots(
+                state.subscribed_codes,
+                generation=state.generation,
+                code_mapping=code_mapping,
+            )
+
+    def _schedule_bootstrap_snapshots(
+        self,
+        codes: frozenset[str],
+        *,
+        generation: int,
+        code_mapping: MarketDataCodeMappingSnapshot,
+    ) -> None:
+        """每个新增实际订阅只异步补取一次数据库最后Tick。"""
+
+        if self.database_snapshot_client is None:
+            return
+        with self._state_lock:
+            now = self.monotonic()
+            added = {
+                code
+                for code in set(codes) - self._bootstrap_requested_codes
+                if self._bootstrap_retry_at.get(code, 0.0) <= now
+            }
+            if not added or self.stop_event.is_set():
+                return
+            self._bootstrap_requested_codes.update(added)
+        source_codes = {
+            code_mapping.to_source(code)
+            for code in added
+        }
+        future = self._snapshot_executor.submit(
+            self.database_snapshot_client.fetch_latest_many,
+            source_codes,
+        )
+        with self._state_lock:
+            self._snapshot_futures.add(future)
+
+        def completed(done: Future) -> None:
+            with self._state_lock:
+                self._snapshot_futures.discard(done)
+            try:
+                snapshots = done.result()
+            except Exception as exc:
+                retry_at = self.monotonic() + self.database_snapshot_retry_seconds
+                with self._state_lock:
+                    self._bootstrap_requested_codes.difference_update(added)
+                    for code in added:
+                        self._bootstrap_retry_at[code] = retry_at
+                logger.warning(
+                    "数据库初始化行情查询失败，等待低频重试 "
+                    "error_type=%s retry_seconds=%s",
+                    type(exc).__name__,
+                    self.database_snapshot_retry_seconds,
+                )
+                return
+            with self._state_lock:
+                for code in added:
+                    self._bootstrap_retry_at.pop(code, None)
+            for source_code, data in snapshots.items():
+                if self.stop_event.is_set():
+                    return
+                try:
+                    internal_code = code_mapping.to_internal(source_code)
+                    normalized_data = dict(data)
+                    normalized_data["order_book_id"] = internal_code
+                    normalized_data["channel"] = f"tick_{internal_code}"
+                    self.tick_queue.put_nowait(
+                        QueuedTick(
+                            data=normalized_data,
+                            raw={
+                                "action": "feed",
+                                "channel": f"tick_{internal_code}",
+                            },
+                            ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+                            source=YMM_DATABASE_SOURCE,
+                            subscription_generation=generation,
+                        )
+                    )
+                    self._increment("enqueued_count")
+                except (ValueError, queue.Full) as exc:
+                    if isinstance(exc, queue.Full):
+                        self._increment("queue_full_drop_count")
+                    else:
+                        self._record_invalid_tick(exc, source_code)
+
+        future.add_done_callback(completed)
+
     def on_message(self, message: dict[str, Any]) -> None:
         """把SDK状态变化收敛成Worker状态，不启动第二套网络重连循环。"""
 
@@ -419,11 +531,35 @@ class MarketDataSubscriberWorker:
 
     def _process_queued_tick(self, item: QueuedTick) -> None:
         try:
+            code = str(item.data.get("order_book_id") or "").strip().upper()
+            event_time = MarketTickNormalizer._datetime(
+                item.data.get("datetime"),
+                "datetime",
+            )
+            with self._state_lock:
+                current_generation = (
+                    self.subscription_service.state_snapshot().generation
+                )
+                if (
+                    item.ingest_type == MarketTickIngestType.REST_SNAPSHOT
+                    and item.subscription_generation is not None
+                    and item.subscription_generation != current_generation
+                ):
+                    return
+                if item.ingest_type == MarketTickIngestType.REST_SNAPSHOT:
+                    latest_live = self._latest_live_event_times.get(code)
+                    if latest_live is not None and latest_live >= event_time:
+                        return
+                else:
+                    bootstrap_time = self._bootstrap_watermarks.get(code)
+                    if bootstrap_time is not None and event_time <= bootstrap_time:
+                        return
             result = self.market_data_service.process_with_session_factory(
                 self.session_factory,
                 data=item.data,
                 raw=item.raw,
                 ingest_type=item.ingest_type,
+                source=item.source,
                 subscription_generation=item.subscription_generation,
             )
             self._increment("processed_count")
@@ -431,6 +567,23 @@ class MarketDataSubscriberWorker:
                 self._increment("published_count")
                 with self._state_lock:
                     self.last_published_at = utc_now()
+                    if item.ingest_type == MarketTickIngestType.REST_SNAPSHOT:
+                        self._bootstrap_watermarks[code] = result.tick.event_time
+                        logger.info(
+                            "数据库初始化行情已接入 code=%s event_time=%s",
+                            code,
+                            result.tick.event_time.isoformat(),
+                        )
+                    else:
+                        previous = self._latest_live_event_times.get(code)
+                        if previous is None or result.tick.event_time > previous:
+                            self._latest_live_event_times[code] = result.tick.event_time
+                        bootstrap_time = self._bootstrap_watermarks.get(code)
+                        if (
+                            bootstrap_time is not None
+                            and result.tick.event_time > bootstrap_time
+                        ):
+                            self._bootstrap_watermarks.pop(code, None)
         except (
             MarketTickValidationError,
             MarketTickNormalizationError,
@@ -546,6 +699,14 @@ class MarketDataSubscriberWorker:
     def _replace_subscription(self, codes: frozenset[str]) -> None:
         """在同一SDK连接上批量增订/退订，并切换回调代次和代码映射。"""
 
+        previous_codes = self.subscription_service.state_snapshot().requested_codes
+        removed_codes = set(previous_codes) - set(codes)
+        with self._state_lock:
+            self._bootstrap_requested_codes.difference_update(removed_codes)
+            for code in removed_codes:
+                self._latest_live_event_times.pop(code, None)
+                self._bootstrap_watermarks.pop(code, None)
+                self._bootstrap_retry_at.pop(code, None)
         generation = self.subscription_service.mark_requested(codes)
         with self.session_factory() as db:
             self.market_data_service.refresh_instrument_cache(db, codes)
@@ -689,6 +850,10 @@ class MarketDataSubscriberWorker:
                 self._stop_subscription()
                 self.subscription_service.clear()
                 with self._state_lock:
+                    self._bootstrap_requested_codes.clear()
+                    self._bootstrap_retry_at.clear()
+                    self._latest_live_event_times.clear()
+                    self._bootstrap_watermarks.clear()
                     self._reconnect_delay = self.reconnect_initial_seconds
                     self._next_reconnect_at = 0.0
                     self._retry_generation = None
@@ -733,6 +898,13 @@ class MarketDataSubscriberWorker:
                 self._try_start(state.requested_codes, now)
 
         self._publish_source_status()
+        state = self.subscription_service.state_snapshot()
+        if state.subscribed_codes:
+            self._schedule_bootstrap_snapshots(
+                state.subscribed_codes,
+                generation=state.generation,
+                code_mapping=self._code_mapping,
+            )
 
     def _drop_queued_items(self) -> int:
         dropped = 0
@@ -776,6 +948,7 @@ class MarketDataSubscriberWorker:
 
             self._set_status(MarketDataSourceStatus.STOPPED)
             self._publish_source_status(force_status=MarketDataSourceStatus.STOPPED)
+            self._snapshot_executor.shutdown(wait=True, cancel_futures=True)
             self._shutdown_complete = True
 
     def run_forever(self) -> None:
@@ -854,6 +1027,10 @@ def build_worker() -> MarketDataSubscriberWorker:
         reconnect_max_seconds=settings.remote_market_data_reconnect_max_seconds,
         shutdown_drain_timeout_seconds=(
             settings.remote_market_data_shutdown_drain_timeout_seconds
+        ),
+        database_snapshot_client=YmmDatabaseSnapshotClient(settings),
+        database_snapshot_retry_seconds=(
+            settings.market_database_snapshot_retry_seconds
         ),
     )
 

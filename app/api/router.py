@@ -1,7 +1,10 @@
 from fastapi import APIRouter
 
 from app.api.account_api import router as account_router
-from app.api.instrument_api import router as instrument_router
+from app.api.instrument_api import (
+    catalog_router as instrument_catalog_router,
+    router as instrument_router,
+)
 from app.api.margin_rule_api import router as margin_rule_router
 from app.api.fee_rule_api import router as fee_rule_router
 from app.api.order_api import router as order_router
@@ -29,6 +32,7 @@ api_router.include_router(account_router)
 
 # 合约管理接口
 api_router.include_router(instrument_router)
+api_router.include_router(instrument_catalog_router)
 
 # 保证金规则管理接口
 api_router.include_router(margin_rule_router)

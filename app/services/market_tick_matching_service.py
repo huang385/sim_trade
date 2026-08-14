@@ -87,7 +87,7 @@ class MarketTickMatchingService:
     @staticmethod
     def parse_event(fields: Mapping[str, str]) -> ParsedMarketTickEvent:
         """
-        解析Stream消息，只允许YMM Live Data实时回调进入撮合。
+        解析Stream消息，允许实时Tick及新增订阅时选中的数据库初始化Tick撮合。
 
         格式、来源或接入方式不合法属于永久消息错误，Worker会直接尝试写入
         死信；数据库临时异常则属于可恢复错误，必须保留Pending重试。
@@ -109,12 +109,17 @@ class MarketTickMatchingService:
             raise MarketTickEventValidationError("行情payload不是合法JSON") from exc
         if not isinstance(payload, dict):
             raise MarketTickEventValidationError("行情payload必须是JSON对象")
-        if payload.get("source") != "YMM_LIVE_DATA":
+        source_pair = (
+            payload.get("source"),
+            payload.get("ingest_type"),
+        )
+        if source_pair not in {
+            ("YMM_LIVE_DATA", MarketTickIngestType.LIVE_CALLBACK.value),
+            ("YMM_DATA_SDK", MarketTickIngestType.REST_SNAPSHOT.value),
+        }:
             raise UnsupportedMarketTickEventError(
-                "只允许YMM_LIVE_DATA行情撮合"
+                "不支持的行情来源或接入类型"
             )
-        if payload.get("ingest_type") != MarketTickIngestType.LIVE_CALLBACK.value:
-            raise UnsupportedMarketTickEventError("非LIVE_CALLBACK行情不触发撮合")
         try:
             # Pydantic负责把日期、时间、整数和Decimal字符串转换为正确类型。
             tick = MarketTick.model_validate(payload)

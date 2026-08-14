@@ -106,3 +106,14 @@ class InstrumentResponse(BaseModel):
     synced_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class InstrumentCatalogItem(BaseModel):
+    """桌面交易端可选择的有效期货合约。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    order_book_id: str
+    symbol: str
+    exchange_id: str
+    instrument_name: str | None

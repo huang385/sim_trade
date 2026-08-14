@@ -168,7 +168,12 @@ class MarketTickNormalizer:
         return str(value)
 
     @classmethod
-    def build_source_event_id(cls, data: dict[str, Any]) -> str:
+    def build_source_event_id(
+        cls,
+        data: dict[str, Any],
+        *,
+        source: str | None = None,
+    ) -> str:
         """优先保留源端事件号；缺失时对稳定业务字段做SHA-256。
 
         SDK文档没有承诺每条Tick带事件编号，因此不能使用进程计数器。
@@ -185,9 +190,14 @@ class MarketTickNormalizer:
             separators=(",", ":"),
             sort_keys=True,
         )
-        return hashlib.sha256(
-            f"{cls.SOURCE}|{canonical}".encode("utf-8")
+        digest = hashlib.sha256(
+            f"{source or cls.SOURCE}|{canonical}".encode("utf-8")
         ).hexdigest()
+        return (
+            f"BOOTSTRAP-{digest}"
+            if source == "YMM_DATA_SDK"
+            else digest
+        )
 
     @classmethod
     def _sequence_id(cls, data: dict[str, Any], source_event_id: str) -> int:
@@ -209,6 +219,7 @@ class MarketTickNormalizer:
         raw: dict[str, Any],
         instrument,
         ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
+        source: str = SOURCE,
     ) -> MarketTick:
         """使用Instrument补齐交易所和品种，不从合约字符串猜测业务字段。"""
 
@@ -216,11 +227,12 @@ class MarketTickNormalizer:
         order_book_id = normalize_code(str(data.get("order_book_id") or ""))
         trading_day = self._date(data.get("trading_date"), "trading_date")
         event_time = self._datetime(data.get("datetime"), "datetime")
-        source_event_id = self.build_source_event_id(data)
+        source_event_id = self.build_source_event_id(data, source=source)
         sequence_id = self._sequence_id(data, source_event_id)
 
         return MarketTick(
             source_event_id=source_event_id,
+            source=source,
             ingest_type=ingest_type,
             order_book_id=order_book_id,
             exchange_id=instrument.exchange_id,

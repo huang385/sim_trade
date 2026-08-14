@@ -1,16 +1,21 @@
+import os
+
 import ymm_data_sdk
+from dotenv import load_dotenv
 
-ymm_data_sdk.init(token="dVKQ2TlgsU9CT6XZP2A6B0z1EGc4wp2f2V0Yf6R9zZ8")
 
-ticks = ymm_data_sdk.get_price(
+load_dotenv()
+
+ymm_data_sdk.init(
+    token=os.environ["YMM_DATA_SDK_TOKEN"],
+    mode=os.getenv("REMOTE_MARKET_DATA_MODE", "lan"),
+)
+
+data = ymm_data_sdk.get_price(
     "JD2608",
-    start_date="2026-08-07",
-    end_date="2026-08-07",
+    start_date="2026-08-13",
+    end_date="2026-08-13",
     frequency="tick",
 )
 
-if ticks is None or ticks.empty:
-    print("08-07数据尚未入库")
-else:
-    print("记录数：", len(ticks))
-    print(ticks.tail(5).to_string())
+print(data)

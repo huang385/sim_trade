@@ -188,6 +188,11 @@ class InstrumentService:
             only_active=only_active,
         )
 
+    def list_tradeable_futures(self, db: Session) -> Sequence[Instrument]:
+        """返回桌面交易端允许浏览和订阅的有效期货合约。"""
+
+        return self.repository.list_tradeable_futures(db)
+
 
 def get_instrument_service() -> InstrumentService:
     return InstrumentService(

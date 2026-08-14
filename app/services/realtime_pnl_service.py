@@ -17,7 +17,7 @@ from app.enums.option_enums import (
 )
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
-from app.schemas.market_tick_schema import MarketTick
+from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.schemas.pnl_schema import (
     AccountRealtimePnl,
     PositionRealtimePnl,
@@ -121,7 +121,7 @@ class RealtimePnlService:
 
     @staticmethod
     def parse_tick(fields: Mapping[str, str]) -> MarketTick | None:
-        """解析实时行情；REST快照和空价格由调用方直接确认。"""
+        """解析实时行情及选中的订阅初始化快照。"""
 
         if fields.get("event_type", "").strip() != "MARKET_TICK":
             raise PnlEventValidationError(
@@ -136,9 +136,12 @@ class RealtimePnlService:
         if not isinstance(payload, dict):
             raise PnlEventValidationError("行情payload必须是对象")
         if (
-            payload.get("source") != "YMM_LIVE_DATA"
-            or payload.get("ingest_type") != "LIVE_CALLBACK"
-        ):
+            payload.get("source"),
+            payload.get("ingest_type"),
+        ) not in {
+            ("YMM_LIVE_DATA", MarketTickIngestType.LIVE_CALLBACK.value),
+            ("YMM_DATA_SDK", MarketTickIngestType.REST_SNAPSHOT.value),
+        }:
             return None
         try:
             return MarketTick.model_validate(payload)

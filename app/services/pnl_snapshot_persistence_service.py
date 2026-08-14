@@ -127,10 +127,16 @@ class PnlSnapshotPersistenceService:
             tick = MarketTickStore.mapping_to_tick(values)
         except Exception:
             # 单元测试和历史Redis快照可能只保存经过上游校验的核心字段；
-            # 仍要求来源、实时回调类型和有限正数价格全部满足。
+            # 仍要求受支持的来源组合、交易日和有限正数价格全部满足。
             if (
-                values.get("source") != "YMM_LIVE_DATA"
-                or values.get("ingest_type") != "LIVE_CALLBACK"
+                (
+                    values.get("source"),
+                    values.get("ingest_type"),
+                )
+                not in {
+                    ("YMM_LIVE_DATA", "LIVE_CALLBACK"),
+                    ("YMM_DATA_SDK", "REST_SNAPSHOT"),
+                }
                 or (
                     expected_trading_day is not None
                     and values.get("trading_day")

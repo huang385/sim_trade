@@ -20,10 +20,9 @@ from app.services.market_tick_validation_service import (
 
 
 class MarketDataProcessAction(str, Enum):
-    """行情业务处理结果；REST 快照不会进入实时撮合 Stream。"""
+    """行情业务处理结果。"""
 
     PUBLISHED = "PUBLISHED"
-    REST_IGNORED = "REST_IGNORED"
 
 
 @dataclass(frozen=True)
@@ -124,6 +123,7 @@ class MarketDataService:
         raw: dict[str, Any],
         instrument: MarketInstrumentSnapshot | None,
         ingest_type: MarketTickIngestType,
+        source: str,
         subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         if instrument is None:
@@ -133,15 +133,9 @@ class MarketDataService:
             raw=raw,
             instrument=instrument,
             ingest_type=ingest_type,
+            source=source,
         )
         self.validation_service.validate(tick=tick, instrument=instrument)
-
-        if ingest_type == MarketTickIngestType.REST_SNAPSHOT:
-            # REST 只用于订阅启动阶段观察行情源是否有快照，不得触发撮合。
-            return MarketDataProcessResult(
-                action=MarketDataProcessAction.REST_IGNORED,
-                tick=tick,
-            )
 
         store_result = self.tick_store.publish(
             tick,
@@ -158,6 +152,7 @@ class MarketDataService:
         data: dict[str, Any],
         raw: dict[str, Any],
         ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
+        source: str = "YMM_LIVE_DATA",
         subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         self.validation_service.validate_envelope(data=data, raw=raw)
@@ -172,6 +167,7 @@ class MarketDataService:
             raw=raw,
             instrument=instrument,
             ingest_type=ingest_type,
+            source=source,
             subscription_generation=subscription_generation,
         )
 
@@ -182,6 +178,7 @@ class MarketDataService:
         data: dict[str, Any],
         raw: dict[str, Any],
         ingest_type: MarketTickIngestType = MarketTickIngestType.LIVE_CALLBACK,
+        source: str = "YMM_LIVE_DATA",
         subscription_generation: int | None = None,
     ) -> MarketDataProcessResult:
         """Tick 线程入口：缓存命中时完全不创建数据库 Session。"""
@@ -199,5 +196,6 @@ class MarketDataService:
             raw=raw,
             instrument=instrument,
             ingest_type=ingest_type,
+            source=source,
             subscription_generation=subscription_generation,
         )

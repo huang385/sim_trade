@@ -51,6 +51,8 @@ def make_worker(
     queue_size=10,
     clock=None,
     shutdown_drain_timeout_seconds=10,
+    database_snapshot_client=None,
+    database_snapshot_retry_seconds=15,
 ):
     details = details if details is not None else {}
     index = Mock()
@@ -96,6 +98,8 @@ def make_worker(
         reconnect_initial_seconds=1,
         reconnect_max_seconds=30,
         shutdown_drain_timeout_seconds=shutdown_drain_timeout_seconds,
+        database_snapshot_client=database_snapshot_client,
+        database_snapshot_retry_seconds=database_snapshot_retry_seconds,
         monotonic=clock,
     )
     return worker, feed_client, market_data_service, subscription_service, clock
@@ -161,6 +165,7 @@ def test_current_subscription_generation_is_forwarded_to_atomic_publish():
         data=make_data(),
         raw=make_raw(),
         ingest_type=MarketTickIngestType.LIVE_CALLBACK,
+        source="YMM_LIVE_DATA",
         subscription_generation=7,
     )
 
@@ -172,6 +177,149 @@ def test_websocket_callback_captures_subscription_generation():
 
     queued = worker.tick_queue.get_nowait()
     assert queued.subscription_generation == 9
+
+
+def test_new_subscription_enqueues_one_database_bootstrap_snapshot():
+    snapshot_client = Mock()
+    snapshot_client.fetch_latest_many.return_value = {
+        "AG2609": make_data(datetime="2026-07-22 09:31:00")
+    }
+    worker, *_ = make_worker(database_snapshot_client=snapshot_client)
+    mapping = MarketDataCodeMappingSnapshot.identity({"AG2609"})
+
+    worker._schedule_bootstrap_snapshots(
+        frozenset({"AG2609"}),
+        generation=1,
+        code_mapping=mapping,
+    )
+    worker._schedule_bootstrap_snapshots(
+        frozenset({"AG2609"}),
+        generation=1,
+        code_mapping=mapping,
+    )
+
+    deadline = time.time() + 1
+    while worker.tick_queue.empty() and time.time() < deadline:
+        time.sleep(0.01)
+    item = worker.tick_queue.get_nowait()
+    worker.tick_queue.task_done()
+    assert item.ingest_type == MarketTickIngestType.REST_SNAPSHOT
+    assert item.source == "YMM_DATA_SDK"
+    snapshot_client.fetch_latest_many.assert_called_once_with({"AG2609"})
+    worker.shutdown()
+
+
+def test_failed_database_bootstrap_retries_after_low_frequency_backoff():
+    snapshot_client = Mock()
+    snapshot_client.fetch_latest_many.side_effect = [
+        RuntimeError("temporarily unavailable"),
+        {"AG2609": make_data(datetime="2026-07-22 09:31:00")},
+    ]
+    clock = MutableClock()
+    worker, *_ = make_worker(
+        database_snapshot_client=snapshot_client,
+        database_snapshot_retry_seconds=15,
+        clock=clock,
+    )
+    mapping = MarketDataCodeMappingSnapshot.identity({"AG2609"})
+
+    worker._schedule_bootstrap_snapshots(
+        frozenset({"AG2609"}),
+        generation=1,
+        code_mapping=mapping,
+    )
+    deadline = time.time() + 1
+    while snapshot_client.fetch_latest_many.call_count < 1 and time.time() < deadline:
+        time.sleep(0.01)
+    while "AG2609" not in worker._bootstrap_retry_at and time.time() < deadline:
+        time.sleep(0.01)
+
+    clock.value = 14
+    worker._schedule_bootstrap_snapshots(
+        frozenset({"AG2609"}),
+        generation=1,
+        code_mapping=mapping,
+    )
+    assert snapshot_client.fetch_latest_many.call_count == 1
+
+    clock.value = 15
+    worker._schedule_bootstrap_snapshots(
+        frozenset({"AG2609"}),
+        generation=1,
+        code_mapping=mapping,
+    )
+    deadline = time.time() + 1
+    while worker.tick_queue.empty() and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert snapshot_client.fetch_latest_many.call_count == 2
+    assert worker.tick_queue.get_nowait().source == "YMM_DATA_SDK"
+    worker.shutdown()
+
+
+def test_older_database_snapshot_is_ignored_after_newer_live_tick():
+    worker, _feed, service, *_ = make_worker()
+
+    def process(*_args, data, ingest_type, source, **_kwargs):
+        tick = normalize(data).model_copy(
+            update={"ingest_type": ingest_type, "source": source}
+        )
+        return SimpleNamespace(action=MarketDataProcessAction.PUBLISHED, tick=tick)
+
+    service.process_with_session_factory.side_effect = process
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(datetime="2026-07-22 09:32:00"),
+            make_raw(),
+        )
+    )
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(datetime="2026-07-22 09:31:00"),
+            make_raw(),
+            ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+            source="YMM_DATA_SDK",
+        )
+    )
+
+    assert service.process_with_session_factory.call_count == 1
+    assert worker.stats_snapshot().published_count == 1
+
+
+def test_bootstrap_watermark_blocks_old_live_then_allows_new_live():
+    worker, _feed, service, *_ = make_worker()
+
+    def process(*_args, data, ingest_type, source, **_kwargs):
+        tick = normalize(data).model_copy(
+            update={"ingest_type": ingest_type, "source": source}
+        )
+        return SimpleNamespace(action=MarketDataProcessAction.PUBLISHED, tick=tick)
+
+    service.process_with_session_factory.side_effect = process
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(datetime="2026-07-22 09:32:00"),
+            make_raw(),
+            ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+            source="YMM_DATA_SDK",
+        )
+    )
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(datetime="2026-07-22 09:31:00"),
+            make_raw(),
+        )
+    )
+    worker._process_queued_tick(
+        QueuedTick(
+            make_data(datetime="2026-07-22 09:33:00"),
+            make_raw(),
+        )
+    )
+
+    assert service.process_with_session_factory.call_count == 2
+    assert worker.stats_snapshot().published_count == 2
+    assert "AG2609" not in worker._bootstrap_watermarks
 
 
 def test_bad_tick_does_not_escape_processing_loop():

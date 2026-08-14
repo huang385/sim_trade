@@ -172,10 +172,15 @@ class FakeStore:
         )
 
 
-def make_fields(*, last_price="3520", ingest_type="LIVE_CALLBACK"):
+def make_fields(
+    *,
+    last_price="3520",
+    ingest_type="LIVE_CALLBACK",
+    source="YMM_LIVE_DATA",
+):
     payload = {
         "source_event_id": "TICK-1",
-        "source": "YMM_LIVE_DATA",
+        "source": source,
         "ingest_type": ingest_type,
         "order_book_id": "RB2610",
         "exchange_id": "SHFE",
@@ -309,6 +314,25 @@ def test_rest_or_empty_price_is_skipped_without_redis_write():
     assert rest.action == "SKIPPED"
     assert empty.action == "SKIPPED"
     assert store.calls == 0
+
+
+def test_database_bootstrap_snapshot_updates_realtime_pnl():
+    store = FakeStore()
+    service = RealtimePnlService(
+        active_position_cache=FakeCache(),
+        pnl_store=store,
+    )
+
+    result = service.process(
+        stream_message_id="bootstrap-1",
+        fields=make_fields(
+            ingest_type="REST_SNAPSHOT",
+            source="YMM_DATA_SDK",
+        ),
+    )
+
+    assert result.action == "CALCULATED"
+    assert store.calls == 1
 
 
 def test_one_thousand_ticks_only_write_realtime_store_not_database():

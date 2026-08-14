@@ -25,6 +25,7 @@ Python 3.12并包含FastAPI、PostgreSQL、ClickHouse和RQData服务依赖。它
 REMOTE_MARKET_DATA_MODE=lan
 REMOTE_MARKET_DATA_BASE_URL=
 REMOTE_MARKET_DATA_API_TOKEN=
+YMM_DATA_SDK_TOKEN=
 REMOTE_MARKET_DATA_CA_FILE=
 REMOTE_MARKET_DATA_VERIFY_SSL=true
 ```
@@ -32,6 +33,9 @@ REMOTE_MARKET_DATA_VERIFY_SSL=true
 `MODE`按管理员要求选择`lan`、`TS`或`local`。使用模式内置地址时无需填写
 `BASE_URL`；管理员要求自定义WSS地址时再填写。Token不能为空，代码和日志不会
 输出Token、完整连接地址或SDK会话信息。官方客户端不支持关闭TLS校验。
+
+`YMM_DATA_SDK_TOKEN`属于`ymm_data_sdk`数据库客户端，与Live SDK Token分开
+配置。它只在新增实际行情订阅时低频查询一次当前交易日最后Tick，不进行轮询。
 
 ## 字段映射
 
@@ -51,8 +55,9 @@ REMOTE_MARKET_DATA_VERIFY_SSL=true
 | `sequence_id`或`sequence` | `sequence_id` |
 
 源端没有事件编号时，对不含本地接收时间的稳定Tick业务字段做SHA-256；没有序号时
-再从该稳定事件编号派生审计序号。接收端不根据价格、盘口、序号或行情时间过滤Tick。
-每条合法回调都执行一次Redis Lua原子双写。Redis Stream的消息编号、Pending恢复和
+再从该稳定事件编号派生审计序号。普通实时阶段不按内容或时间丢弃Live Tick；只有
+数据库初始化过渡期间会按`datetime`水位阻止旧Live Tick重复进入业务链。每条被接受
+的行情都执行一次Redis Lua原子双写。Redis Stream的消息编号、Pending恢复和
 成交结算幂等仍负责消息重投安全，两者不能与行情内容去重混为一谈。
 
 需要特别说明：本次任务说明称源端已经完成Tick去重，但当前官方客户端指南明确写着
@@ -74,3 +79,25 @@ market:source:ymm_live_data:status
 
 旧行情源代码、文档和Redis状态键已在真实连接、真实Tick及下游链路验收完成后删除。
 系统不存在新源失败后自动回退旧源的运行分支。
+
+## 新增订阅的初始化行情
+
+新增合约订阅时，Worker先完成Live SDK订阅，再异步调用
+`ymm_data_sdk.get_price(..., frequency="tick")`补取当前交易日最后一条已入库Tick。
+数据库查询不会阻塞Live SDK回调，两类结果进入同一个本地消费队列：
+
+1. 数据库结果返回前已有时间相同或更新的Live Tick时，数据库结果丢弃；
+2. 暂无Live Tick或数据库Tick更新时，数据库Tick以`YMM_DATA_SDK / REST_SNAPSHOT`
+   身份进入现有Redis Stream、WebSocket、PnL和撮合链；
+3. 数据库Tick成为初始化水位后，时间不晚于该水位的Live Tick不重复处理；
+4. 第一条时间更新的Live Tick到达后恢复原有实时处理，数据库初始化水位失效；
+5. 同一实际订阅不会重复查询；退订后重新新增时可以重新初始化。
+
+若数据库行情恰逢发布窗口并返回临时`running`不可用状态，单次查询先在
+`REMOTE_MARKET_DATA_TIMEOUT_SECONDS`内短暂重试；仍失败时，只对该活动订阅按
+`MARKET_DATABASE_SNAPSHOT_RETRY_SECONDS`（默认15秒）低频退避。Live SDK订阅与
+实时行情处理在此期间保持正常，成功或退订后立即停止重试。
+
+数据库Tick没有官方事件编号，系统对稳定业务字段生成带`BOOTSTRAP-`前缀的
+事件ID。成交表原有`order_id + market_event_id`唯一约束继续作为最终幂等防线。
+数据库SDK查询日期与返回Tick的`trading_date`不一致时不会接入。

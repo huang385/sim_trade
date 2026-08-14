@@ -16,6 +16,7 @@ def make_service(
     status_generation: str = "7",
     tick_generation: str = "7",
     ingest_type: str = "LIVE_CALLBACK",
+    source: str = "YMM_LIVE_DATA",
 ):
     redis_client = Mock()
     pipeline = redis_client.pipeline.return_value
@@ -26,6 +27,7 @@ def make_service(
             "subscription_generation": tick_generation,
             "stream_message_id": "123-0",
             "ingest_type": ingest_type,
+            "source": source,
         }
     )
     pipeline.execute.return_value = [
@@ -70,6 +72,21 @@ def test_unready_or_non_live_snapshot_is_not_used(overrides):
         exchange_id=tick.exchange_id,
         symbol=tick.symbol,
     ) is None
+
+
+def test_current_database_bootstrap_is_available_for_order_arrival():
+    service, tick = make_service(
+        ingest_type="REST_SNAPSHOT",
+        source="YMM_DATA_SDK",
+    )
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        symbol=tick.symbol,
+    )
+
+    assert event is not None
+    assert event.parsed_event.tick.source == "YMM_DATA_SDK"
 
 
 def test_missing_stream_message_id_is_not_used():

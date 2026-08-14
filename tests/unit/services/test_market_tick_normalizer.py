@@ -9,6 +9,7 @@ from app.services.market_tick_normalizer import (
     MarketTickNormalizationError,
     MarketTickNormalizer,
 )
+from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_tick_validation_service import (
     MarketTickValidationError,
     MarketTickValidationService,
@@ -208,6 +209,30 @@ def test_source_event_id_prefers_official_id_and_missing_sequence_is_stable():
     assert explicit.source_event_id == "SOURCE-EVENT-1"
     assert first.source_event_id == second.source_event_id
     assert first.sequence_id == second.sequence_id
+
+
+def test_database_snapshot_has_stable_distinct_identity_and_source():
+    data = make_data()
+    first = MarketTickNormalizer().normalize(
+        data=data,
+        raw=make_raw(data),
+        instrument=make_instrument(),
+        ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+        source="YMM_DATA_SDK",
+    )
+    second = MarketTickNormalizer().normalize(
+        data=dict(data),
+        raw=make_raw(data),
+        instrument=make_instrument(),
+        ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+        source="YMM_DATA_SDK",
+    )
+
+    assert first.source == "YMM_DATA_SDK"
+    assert first.ingest_type == MarketTickIngestType.REST_SNAPSHOT
+    assert first.source_event_id.startswith("BOOTSTRAP-")
+    assert first.source_event_id == second.source_event_id
+    assert first.source_event_id != normalize(data).source_event_id
 
 
 def test_same_prices_with_distinct_source_identity_remain_distinct_ticks():

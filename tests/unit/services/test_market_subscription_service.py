@@ -169,7 +169,7 @@ def test_client_watchlist_codes_join_existing_subscription_union():
     client_subscriptions.list_active_contract_codes.assert_called_once_with()
 
 
-def test_add_and_remove_changes_wait_for_debounce():
+def test_add_changes_apply_immediately_and_remove_changes_wait_for_debounce():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
         active_position_contract_source=make_position_source(),
@@ -177,15 +177,31 @@ def test_add_and_remove_changes_wait_for_debounce():
     )
     desired = frozenset({"AG2609"})
 
-    assert service.observe(desired, now=1) is None
-    assert service.observe(desired, now=3.9) is None
-    change = service.observe(desired, now=4)
+    change = service.observe(desired, now=1)
     assert change.codes == desired
     service.mark_applied(desired)
 
     assert service.observe(frozenset(), now=5) is None
     change = service.observe(frozenset(), now=8)
     assert change.codes == frozenset()
+
+
+def test_mixed_change_adds_new_code_immediately_and_debounces_old_code_removal():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
+        debounce_seconds=3,
+    )
+    service.mark_applied(frozenset({"OLD"}))
+
+    change = service.observe(frozenset({"NEW"}), now=1)
+    assert change.codes == frozenset({"OLD", "NEW"})
+    service.mark_applied(change.codes)
+
+    assert service.observe(frozenset({"NEW"}), now=2) is None
+    assert service.observe(frozenset({"NEW"}), now=4.9) is None
+    change = service.observe(frozenset({"NEW"}), now=5)
+    assert change.codes == frozenset({"NEW"})
 
 
 def test_partial_subscription_receipt_tracks_success_and_failure_reasons():

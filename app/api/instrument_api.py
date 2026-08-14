@@ -6,10 +6,11 @@ from fastapi import (
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.security import require_admin_user
+from app.core.security import require_active_user, require_admin_user
 from app.schemas.instrument_schema import (
     InstrumentResponse,
     InstrumentCreate,
+    InstrumentCatalogItem,
 )
 from app.services.instrument_service import (
     InstrumentService,
@@ -22,6 +23,22 @@ router = APIRouter(
     tags=["合约管理"],
     dependencies=[Depends(require_admin_user)],
 )
+
+catalog_router = APIRouter(
+    prefix="/api/instruments",
+    tags=["合约查询"],
+    dependencies=[Depends(require_active_user)],
+)
+
+
+@catalog_router.get("", response_model=list[InstrumentCatalogItem])
+def list_tradeable_futures(
+    db: Session = Depends(get_db),
+    service: InstrumentService = Depends(get_instrument_service),
+):
+    """查询当前允许交易的期货合约，供桌面端选择和订阅。"""
+
+    return service.list_tradeable_futures(db)
 
 
 @router.put(

@@ -29,10 +29,10 @@ from app.services.trade_settlement_service import (
 )
 
 
-def make_fields(*, ingest_type="LIVE_CALLBACK"):
+def make_fields(*, ingest_type="LIVE_CALLBACK", source="YMM_LIVE_DATA"):
     payload = {
         "source_event_id": "TICK-1",
-        "source": "YMM_LIVE_DATA",
+        "source": source,
         "ingest_type": ingest_type,
         "order_book_id": "AG2609",
         "exchange_id": "SHFE",
@@ -162,6 +162,22 @@ def test_rest_snapshot_never_triggers_matching():
 
     assert engine.calls == []
     settlement.settle.assert_not_called()
+
+
+def test_database_bootstrap_snapshot_triggers_existing_matching_chain():
+    service, engine, settlement = make_service()
+
+    result = service.process(
+        stream_message_id="1-0",
+        fields=make_fields(
+            ingest_type="REST_SNAPSHOT",
+            source="YMM_DATA_SDK",
+        ),
+    )
+
+    assert result.settled_count == 2
+    assert len(engine.calls) == 2
+    assert settlement.settle.call_count == 2
 
 
 def test_limit_open_orders_each_call_injected_engine_and_settle():

@@ -72,6 +72,7 @@ def test_valid_tick_is_validated_and_published():
         tick,
         subscription_generation=None,
     )
+    assert normalizer.normalize.call_args.kwargs["source"] == "YMM_LIVE_DATA"
 
 
 def test_old_event_time_from_live_callback_is_not_filtered():
@@ -95,7 +96,7 @@ def test_old_event_time_from_live_callback_is_not_filtered():
     )
 
 
-def test_rest_snapshot_is_explicitly_ignored_and_never_published():
+def test_rest_snapshot_is_published_with_database_source():
     service, repository, normalizer, _validation, store = make_service()
     repository.get_by_order_book_id.return_value = make_instrument()
     rest_tick = normalize().model_copy(
@@ -103,16 +104,22 @@ def test_rest_snapshot_is_explicitly_ignored_and_never_published():
     )
     normalizer.normalize.return_value = rest_tick
 
+    store.publish.return_value = MarketTickStoreResult.PUBLISHED
     result = service.process(
         Mock(),
         data=make_data(),
         raw=make_raw(),
         ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+        source="YMM_DATA_SDK",
     )
 
-    assert result.action == MarketDataProcessAction.REST_IGNORED
+    assert result.action == MarketDataProcessAction.PUBLISHED
     assert result.tick.ingest_type == MarketTickIngestType.REST_SNAPSHOT
-    store.publish.assert_not_called()
+    store.publish.assert_called_once_with(
+        rest_tick,
+        subscription_generation=None,
+    )
+    assert normalizer.normalize.call_args.kwargs["source"] == "YMM_DATA_SDK"
 
 
 def test_repeated_ticks_for_same_contract_query_repository_only_once():

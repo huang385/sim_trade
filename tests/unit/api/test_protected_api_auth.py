@@ -9,6 +9,7 @@ from app.main import app
     [
         ("get", "/api/auth/me", {}),
         ("get", "/api/accounts", {}),
+        ("get", "/api/instruments", {}),
         ("post", "/api/accounts", {"json": {}}),
         (
             "get",
