@@ -13,6 +13,10 @@ from app.enums.order_enums import (
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.matching.models import MatchingOrder, MatchingOrderCandidate
 from app.repositories.order_repository import OrderRepository
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 class OrderEventValidationError(ValueError):
@@ -104,10 +108,12 @@ class AcceptedOrderEventService:
         order_repository: OrderRepository,
         active_order_index: ActiveOrderIndex,
         processed_ttl_seconds: int,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.order_repository = order_repository
         self.active_order_index = active_order_index
         self.processed_ttl_seconds = processed_ttl_seconds
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def parse_event(fields: Mapping[str, str]) -> ParsedOrderEvent:
@@ -198,6 +204,9 @@ class AcceptedOrderEventService:
             raise OrderEventValidationError("数据库订单编号与事件不一致")
         if order.account_id != event.account_id:
             raise OrderEventValidationError("事件账户与数据库订单账户不一致")
+        # 活动索引只接受已实现产品，防止未知产品被Redis候选链路误当成
+        # 衍生品。分派依据始终是数据库订单快照，不读取事件中的可伪造值。
+        self.product_registry.resolve(order.instrument_type)
 
         if (
             order.order_type == OrderType.MARKET.value
@@ -224,6 +233,7 @@ class AcceptedOrderEventService:
                     exchange_id=order.exchange_id,
                     symbol=order.symbol,
                     status=OrderStatus(order.status),
+                    instrument_type=order.instrument_type,
                     order=MatchingOrder(
                         direction=OrderDirection(order.direction),
                         offset_flag=OffsetFlag(order.offset_flag),
@@ -288,6 +298,7 @@ class AcceptedOrderEventService:
                 exchange_id=order.exchange_id,
                 symbol=order.symbol,
                 status=OrderStatus(order.status),
+                instrument_type=order.instrument_type,
                 order=MatchingOrder(
                     direction=OrderDirection(order.direction),
                     offset_flag=OffsetFlag(order.offset_flag),

@@ -79,6 +79,11 @@ from app.services.order_freeze_service import OrderFreezeService
 from app.services.order_price_resolver import OrderPriceResolver, ResolvedOrderPrice
 from app.services.order_validation_service import OrderValidationService
 from app.services.position_close_allocator import PositionCloseAllocator
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.rule_query_service import (
     OrderReferenceRules,
@@ -167,6 +172,7 @@ class OrderService:
         market_pre_subscription_store: MarketPreSubscriptionStore | None = None,
         settlement_gate_service: SettlementGateService | None = None,
         order_price_resolver: OrderPriceResolver | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -209,6 +215,7 @@ class OrderService:
             settlement_gate_service or SettlementGateService()
         )
         self.order_price_resolver = order_price_resolver
+        self.product_registry = product_registry or product_strategy_registry
 
     def _get_option_margin_prices(
         self,
@@ -417,15 +424,12 @@ class OrderService:
             )
 
             is_open = request.offset_flag == OffsetFlag.OPEN
-            instrument_type = getattr(
-                rules.instrument,
-                "instrument_type",
-                InstrumentType.FUTURES.value,
-            )
-            is_option = instrument_type in {
-                InstrumentType.FUTURES_OPTION.value,
-                InstrumentType.INDEX_OPTION.value,
-            }
+            # 产品类型只取服务端加载的Instrument事实。注册中心在任何
+            # 资金计算前拒绝未知产品，客户端请求无法伪造分派结果。
+            instrument_type = rules.instrument.instrument_type
+            product_strategy = self.product_registry.resolve(instrument_type)
+            is_option = product_strategy.family == ProductFamily.OPTIONS
+            is_futures = product_strategy.family == ProductFamily.FUTURES
             fee_rule_id = None
             fee_rule_version = None
             fee_rule_snapshot = None
@@ -456,7 +460,7 @@ class OrderService:
                     ),
                     "data_source": fee_item.data_source,
                 }
-            else:
+            elif is_futures:
                 if rules.fee_rule is None or rules.margin_rule is None:
                     raise DataAccessError(
                         "期货交易规则查询结果不完整",
@@ -470,6 +474,11 @@ class OrderService:
                         offset_flag=request.offset_flag,
                         fee_rule=rules.fee_rule,
                     )
+                )
+            else:
+                raise BusinessRuleError(
+                    "订单产品资源策略尚未实现",
+                    error_code="PRODUCT_ORDER_RESOURCE_NOT_IMPLEMENTED",
                 )
             commission_contract_multiplier = Decimal(
                 rules.instrument.contract_multiplier

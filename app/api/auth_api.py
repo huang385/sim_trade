@@ -3,49 +3,26 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.redis_client import redis_client
 from app.core.security import get_current_user
 from app.models.app_user import AppUser
-from app.repositories.auth_refresh_session_repository import (
-    AuthRefreshSessionRepository,
-)
-from app.repositories.user_repository import UserRepository
 from app.schemas.auth_schema import (
     CurrentUserResponse,
     LoginRequest,
     TokenResponse,
 )
 from app.schemas.user_schema import UserSummary
-from app.services.account_authorization_service import (
+from app.modules.accounts import (
     AccountAuthorizationService,
 )
-from app.services.auth_service import AuthResult, AuthService
-from app.services.login_rate_limit_service import LoginRateLimitService
-from app.services.password_service import PasswordService
-from app.services.token_service import TokenService
+from app.modules.auth import (
+    AuthResult,
+    AuthService,
+    get_account_authorization_service,
+    get_auth_service,
+)
 
 
 router = APIRouter(prefix="/api/auth", tags=["用户认证"])
-
-_password_service = PasswordService()
-_token_service = TokenService()
-_auth_service = AuthService(
-    user_repository=UserRepository(),
-    refresh_repository=AuthRefreshSessionRepository(),
-    password_service=_password_service,
-    token_service=_token_service,
-    rate_limit_service=LoginRateLimitService(redis_client),
-)
-_authorization_service = AccountAuthorizationService()
-
-
-def get_auth_service() -> AuthService:
-    return _auth_service
-
-
-def get_account_authorization_service() -> AccountAuthorizationService:
-    return _authorization_service
-
 
 def _client_ip(request: Request) -> str:
     """仅使用服务端连接信息，不信任客户端自行提交的身份字段。"""

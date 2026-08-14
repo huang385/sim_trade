@@ -59,6 +59,10 @@ from app.services.settlement_replay_service import (
     ReplayedPosition,
     SettlementReplayService,
 )
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -232,6 +236,7 @@ class DailySettlementService:
         time_provider: Callable[[], datetime] = utc_now,
         tick_max_age_seconds: int | None = None,
         redis_recovery_enabled: bool = True,
+        product_registry: ProductStrategyRegistry | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.database_engine = database_engine
@@ -250,7 +255,10 @@ class DailySettlementService:
             settings, "daily_settlement_tick_max_age_seconds", 3600
         )
         self.redis_recovery_enabled = redis_recovery_enabled
-        self.replay_service = SettlementReplayService()
+        self.product_registry = product_registry or product_strategy_registry
+        self.replay_service = SettlementReplayService(
+            product_registry=self.product_registry
+        )
 
     def _now(self) -> datetime:
         value = self.time_provider()
@@ -358,6 +366,11 @@ class DailySettlementService:
             relevant = [
                 item for item in instruments.values() if item.is_tradeable
             ]
+            # 日终只允许已经显式实现结算语义的产品进入衍生品批次。
+            # INDEX仅作为股指期权标的加载且不可交易，不参与产品分派。
+            for item in relevant:
+                if item.instrument_type != InstrumentType.INDEX.value:
+                    self.product_registry.resolve(item.instrument_type)
             relevant_exchanges = {item.exchange_id for item in relevant}
             selected_calendars = [
                 row

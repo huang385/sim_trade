@@ -25,6 +25,7 @@ from app.enums.option_enums import (
     SettlementType,
 )
 from app.enums.risk_enums import LiquidationTaskStatus, OrderSource, RiskEventType
+from app.shared.enums import ProductFamily
 
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "LiquidationTaskStatus",
     "OrderSource",
     "RiskEventType",
+    "ProductFamily",
 ]

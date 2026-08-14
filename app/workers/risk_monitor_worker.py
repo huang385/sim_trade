@@ -13,13 +13,16 @@ from app.core.redis_client import redis_client
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.risk_store import RiskStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
-from app.repositories.account_repository import AccountRepository
-from app.repositories.risk_repository import RiskRepository
-from app.services.liquidation_service import LiquidationService
-from app.services.order_cancellation_service import get_order_cancellation_service
-from app.services.order_service import get_order_service
-from app.services.risk_monitor_service import RiskMonitorService
-from app.services.pnl_snapshot_persistence_service import (
+from app.infrastructure.database.repository_adapters import (
+    AccountRepository,
+    RiskRepository,
+)
+from app.modules.risk import LiquidationService, RiskMonitorService
+from app.modules.orders import (
+    get_order_cancellation_service,
+    get_order_service,
+)
+from app.modules.realtime import (
     PnlSnapshotPersistenceService,
 )
 

@@ -60,6 +60,7 @@ class RealtimeFactEventService:
                 "event_id": event_id,
                 "event_type": "ACCOUNT_FACT_UPDATED",
                 "account_id": resolved_account_id,
+                "account_type": _field(account, "account_type", "FUTURES"),
                 "cash_balance": _decimal_string(
                     _field(account, "cash_balance", Decimal("0"))
                 ),
@@ -135,9 +136,7 @@ class RealtimeFactEventService:
                 "exchange_id": _field(position, "exchange_id", ""),
                 "symbol": _field(position, "symbol", ""),
                 "order_book_id": _field(position, "order_book_id", ""),
-                "instrument_type": (
-                    _field(position, "instrument_type") or "FUTURES"
-                ),
+                "instrument_type": position.instrument_type,
                 "direction": _field(position, "direction", ""),
                 "total_volume": total_volume,
                 "today_volume": _field(position, "today_volume", total_volume),
@@ -222,9 +221,7 @@ class RealtimeFactEventService:
                 "trading_day": (
                     trading_day.isoformat() if trading_day is not None else ""
                 ),
-                "instrument_type": _field(
-                    order, "instrument_type", "FUTURES"
-                ),
+                "instrument_type": order.instrument_type,
                 "direction": _field(order, "direction", ""),
                 "offset_flag": _field(order, "offset_flag", ""),
                 "order_type": _field(order, "order_type", ""),

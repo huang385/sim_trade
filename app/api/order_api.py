@@ -7,21 +7,21 @@ from app.core.database import get_db
 from app.core.security import require_active_user
 from app.models.app_user import AppUser
 from app.api.auth_api import get_account_authorization_service
-from app.services.account_authorization_service import (
+from app.modules.accounts import (
     AccountAuthorizationService,
 )
-from app.services.account_access_scope import AccountAccessScope
+from app.modules.accounts import AccountAccessScope
 from app.schemas.order_schema import (
     OrderCancelRequest,
     OrderCreateRequest,
     OrderPageResponse,
     OrderResponse,
 )
-from app.services.order_cancellation_service import (
+from app.modules.orders import (
     OrderCancellationService,
     get_order_cancellation_service,
 )
-from app.services.order_service import OrderService, get_order_service
+from app.modules.orders import OrderService, get_order_service
 
 
 router = APIRouter(

@@ -56,6 +56,8 @@ class RealtimeEventProjectionService:
             # 的状态版本连续单调，客户端和Redis投影可可靠拒绝迟到旧事件。
             business_version = str(payload.get("risk_version") or "").strip()
         account_id = str(payload.get("account_id") or "").strip()
+        account_type = str(payload.get("account_type") or "").strip()
+        instrument_type = str(payload.get("instrument_type") or "").strip()
         if not event_id or not account_id:
             raise ValueError("订单事件缺少event_id或account_id")
         if source_type == "ORDER_ACCEPTED":
@@ -95,6 +97,8 @@ class RealtimeEventProjectionService:
             event_type=event_type,
             account_id=account_id,
             entity_id=entity_id or None,
+            account_type=account_type or None,
+            instrument_type=instrument_type or None,
             occurred_at=occurred_at,
             # Gateway路由时会以目标Stream消息编号覆盖该来源版本。
             version=source_message_id,

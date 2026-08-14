@@ -31,6 +31,7 @@ def make_order(**overrides):
         "exchange_id": "SHFE",
         "symbol": "RB2610",
         "trading_day": date(2026, 7, 24),
+        "instrument_type": "FUTURES",
         "direction": "BUY",
         "offset_flag": "OPEN",
         "order_type": "LIMIT",

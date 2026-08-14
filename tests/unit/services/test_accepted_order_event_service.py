@@ -18,6 +18,7 @@ def make_order(**overrides):
         "account_id": "A001",
         "exchange_id": "SHFE",
         "symbol": "RB2610",
+        "instrument_type": "FUTURES",
         "status": "ACCEPTED",
         "remaining_volume": 2,
         "order_type": "LIMIT",

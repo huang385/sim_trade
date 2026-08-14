@@ -32,6 +32,10 @@ from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
 from app.services.order_freeze_service import OrderFreezeService
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.settlement_gate_service import SettlementGateService
 
@@ -78,6 +82,7 @@ class OrderCancellationService:
         time_provider: Callable[[], datetime] = utc_now,
         default_access_scope: AccountAccessScope | None = None,
         settlement_gate_service: SettlementGateService | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.order_repository = order_repository or OrderRepository()
         self.account_repository = account_repository or AccountRepository()
@@ -96,6 +101,7 @@ class OrderCancellationService:
         self.settlement_gate_service = (
             settlement_gate_service or SettlementGateService()
         )
+        self.product_registry = product_registry or product_strategy_registry
 
     def cancel_order(
         self,
@@ -180,6 +186,9 @@ class OrderCancellationService:
                     "订单不属于指定账户",
                     error_code="ORDER_ACCOUNT_MISMATCH",
                 )
+            # 撤单释放只能处理已经显式注册的产品。不能根据OPEN/CLOSE
+            # 猜测产品，更不能让未来股票订单进入衍生品释放路径。
+            self.product_registry.resolve(order.instrument_type)
             if market_auto_cancel and order.status == OrderStatus.FILLED.value:
                 db.expunge(order)
                 db.commit()

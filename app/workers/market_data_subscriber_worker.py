@@ -29,32 +29,33 @@ from app.infrastructure.market_data.remote_feed_client import (
     load_remote_sdk_client_class,
     remote_sdk_client_kwargs,
 )
+from app.modules.market_data.contracts import MarketDataProvider
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
-from app.repositories.instrument_market_data_mapping_repository import (
+from app.infrastructure.database.repository_adapters import (
     InstrumentMarketDataMappingRepository,
+    InstrumentRepository,
 )
-from app.repositories.instrument_repository import InstrumentRepository
 from app.schemas.market_tick_schema import MarketTickIngestType
-from app.services.market_data_service import (
+from app.modules.market_data import (
     MarketDataProcessAction,
     MarketDataService,
 )
-from app.services.market_data_code_mapping_service import (
+from app.modules.market_data import (
     MarketDataCodeMappingService,
     MarketDataCodeMappingSnapshot,
 )
-from app.services.market_subscription_service import MarketSubscriptionService
+from app.modules.market_data import MarketSubscriptionService
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,
 )
 from app.infrastructure.client_market_subscription_store import (
     ClientMarketSubscriptionStore,
 )
-from app.services.market_tick_normalizer import (
+from app.modules.market_data import (
     MarketTickNormalizationError,
     MarketTickNormalizer,
 )
-from app.services.market_tick_validation_service import (
+from app.modules.market_data import (
     MarketTickValidationError,
     MarketTickValidationService,
 )
@@ -114,7 +115,7 @@ class MarketDataSubscriberWorker:
         self,
         *,
         session_factory: Callable[[], Session],
-        feed_client: RemoteFeedClient,
+        feed_client: MarketDataProvider,
         market_data_service: MarketDataService,
         code_mapping_service: MarketDataCodeMappingService,
         subscription_service: MarketSubscriptionService,

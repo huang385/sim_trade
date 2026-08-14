@@ -37,6 +37,7 @@ def make_fields(*, ingest_type="LIVE_CALLBACK", source="YMM_LIVE_DATA"):
         "order_book_id": "AG2609",
         "exchange_id": "SHFE",
         "symbol": "AG2609",
+        "instrument_type": "FUTURES",
         "trading_day": date(2026, 7, 23).isoformat(),
         "event_time": datetime(
             2026, 7, 23, 1, tzinfo=timezone.utc
@@ -66,6 +67,7 @@ def make_order(order_id, **overrides):
         "offset_flag": "OPEN",
         "exchange_id": "SHFE",
         "symbol": "AG2609",
+        "instrument_type": "FUTURES",
         "direction": "BUY",
         "limit_price": Decimal("14600"),
     }

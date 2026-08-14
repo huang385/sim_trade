@@ -8,11 +8,11 @@ from app.schemas.account_schema import (
     AccountCreate,
     AccountResponse,
 )
-from app.services.account_service import (
+from app.modules.accounts import (
     AccountService,
     get_account_service,
 )
-from app.services.account_authorization_service import (
+from app.modules.accounts import (
     AccountAuthorizationService,
 )
 from app.api.auth_api import get_account_authorization_service

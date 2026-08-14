@@ -254,8 +254,28 @@ def configure_option_close(
         account = db.scalar(select(Account))
         position = db.scalar(select(Position))
         detail = db.scalar(select(PositionDetail))
+        instrument = db.scalar(select(Instrument))
+
+        underlying = Instrument(
+            order_book_id="AG-UNDERLYING",
+            symbol="AG-UNDERLYING",
+            exchange_id="SHFE",
+            instrument_type="FUTURES",
+            contract_multiplier=Decimal("10"),
+            price_tick=Decimal("1"),
+            min_volume=1,
+            max_volume=100,
+            is_active=True,
+        )
+        db.add(underlying)
+        db.flush()
 
         order.instrument_type = "FUTURES_OPTION"
+        instrument.instrument_type = "FUTURES_OPTION"
+        instrument.underlying_instrument_id = underlying.id
+        instrument.option_type = "CALL"
+        instrument.strike_price = Decimal("3500")
+        instrument.expire_date = date(2026, 9, 30)
         order.direction = close_direction
         order.limit_price = Decimal("25")
         position.instrument_type = "FUTURES_OPTION"

@@ -54,6 +54,7 @@ def make_rules(**overrides):
         order_book_id="RB2610",
         symbol="RB2610",
         exchange_id="SHFE",
+        instrument_type="FUTURES",
         is_active=True,
         min_volume=1,
         max_volume=100,
@@ -376,6 +377,7 @@ def test_create_close_order_freezes_commission_and_position(
     )
     position = SimpleNamespace(
         position_id="P-1",
+        instrument_type="FUTURES",
         frozen_volume=0,
         available_volume=5,
         updated_at=None,
@@ -462,6 +464,7 @@ def test_plain_close_splits_yesterday_and_today_frozen_commission():
     )
     position = SimpleNamespace(
         position_id="P-1",
+        instrument_type="FUTURES",
         frozen_volume=0,
         available_volume=10,
         updated_at=None,
@@ -543,6 +546,7 @@ def test_close_order_freeze_uses_bucket_total_across_multiple_details():
     ]
     position = SimpleNamespace(
         position_id="P-1",
+        instrument_type="FUTURES",
         frozen_volume=0,
         available_volume=2,
         updated_at=None,

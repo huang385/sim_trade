@@ -15,7 +15,7 @@ from app.schemas.fee_rule_schema import (
     FeeRuleDailyResponse,
     FeeRuleResponse,
 )
-from app.services.fee_rule_service import (
+from app.modules.instruments import (
     FeeRuleService,
     get_fee_rule_service,
 )

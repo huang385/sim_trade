@@ -13,7 +13,7 @@ from app.enums.order_enums import (
 )
 
 
-class OrderCreateRequest(BaseModel):
+class CommonOrderCreateRequest(BaseModel):
     """
     创建订单请求。
 
@@ -37,9 +37,6 @@ class OrderCreateRequest(BaseModel):
 
     # 买卖方向。开仓 BUY 建立多头，SELL 建立空头。
     direction: OrderDirection
-
-    # 开平标志。第一阶段只允许 OPEN。
-    offset_flag: OffsetFlag
 
     # 订单类型。第一阶段只支持 LIMIT。
     order_type: OrderType = OrderType.LIMIT
@@ -73,6 +70,16 @@ class OrderCreateRequest(BaseModel):
         if not isinstance(value, str):
             return value
         return value.strip()
+
+
+class DerivativeOrderCreateRequest(CommonOrderCreateRequest):
+    """期货和期权订单字段；衍生品必须明确提交开平标志。"""
+
+    offset_flag: OffsetFlag
+
+
+class OrderCreateRequest(DerivativeOrderCreateRequest):
+    """现有统一订单API的兼容名称，本阶段仍只接收衍生品请求。"""
 
 
 class OrderCancelRequest(BaseModel):

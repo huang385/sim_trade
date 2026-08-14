@@ -40,6 +40,11 @@ from app.services.option_margin_calculator import (
 from app.services.option_margin_calculator_resolver import (
     OptionMarginCalculatorResolver,
 )
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +115,7 @@ class RealtimePnlService:
         calculator: PnlCalculator | None = None,
         market_tick_store: MarketTickStore | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.active_position_cache = active_position_cache
         self.pnl_store = pnl_store
@@ -118,6 +124,7 @@ class RealtimePnlService:
         self.option_margin_resolver = (
             option_margin_resolver or OptionMarginCalculatorResolver()
         )
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def parse_tick(fields: Mapping[str, str]) -> MarketTick | None:
@@ -413,13 +420,11 @@ class RealtimePnlService:
                     )
                     option_market_value = Decimal("0")
                     realtime_required_margin = Decimal("0")
-                    instrument_type = InstrumentType(
+                    product_strategy = self.product_registry.resolve(
                         position.instrument_type
                     )
-                    if instrument_type in {
-                        InstrumentType.FUTURES_OPTION,
-                        InstrumentType.INDEX_OPTION,
-                    }:
+                    instrument_type = InstrumentType(position.instrument_type)
+                    if product_strategy.family == ProductFamily.OPTIONS:
                         option_market_value = quantize_money(
                             request.tick.last_price
                             * position.contract_multiplier
@@ -691,11 +696,8 @@ class RealtimePnlService:
             position.account_id
             for positions in current_by_key.values()
             for position in positions
-            if InstrumentType(position.instrument_type)
-            in {
-                InstrumentType.FUTURES_OPTION,
-                InstrumentType.INDEX_OPTION,
-            }
+            if self.product_registry.resolve(position.instrument_type).family
+            == ProductFamily.OPTIONS
         }
         full_accounts.update(option_affected_accounts)
         full_position_ids = {
@@ -799,14 +801,11 @@ class RealtimePnlService:
                                 position,
                                 latest_by_key=latest_ticks,
                             )
-                    position_type = InstrumentType(
+                    product_strategy = self.product_registry.resolve(
                         position.instrument_type
                     )
                     cumulative += result.cumulative_unrealized_pnl
-                    if position_type in {
-                        InstrumentType.FUTURES_OPTION,
-                        InstrumentType.INDEX_OPTION,
-                    }:
+                    if product_strategy.family == ProductFamily.OPTIONS:
                         position_values = position_models.get(
                             position.position_id
                         )
@@ -841,8 +840,10 @@ class RealtimePnlService:
                             option_realtime_required_margin += (
                                 required_margin
                             )
-                    else:
+                    elif product_strategy.family == ProductFamily.FUTURES:
                         valuation_futures += result.cash_unrealized_pnl
+                    else:
+                        raise ValueError("持仓估值策略尚未实现")
                     daily_position += result.daily_position_pnl
                 reconciled_accounts += 1
                 previous = old_accounts.get(account_id, {})
@@ -993,13 +994,11 @@ class RealtimePnlService:
         for key in successful:
             for position in current_by_key[key]:
                 model = position_models.get(position.position_id)
-                position_type = InstrumentType(position.instrument_type)
+                product_strategy = self.product_registry.resolve(
+                    position.instrument_type
+                )
                 is_short_option = (
-                    position_type
-                    in {
-                        InstrumentType.FUTURES_OPTION,
-                        InstrumentType.INDEX_OPTION,
-                    }
+                    product_strategy.family == ProductFamily.OPTIONS
                     and position.direction == PositionDirection.SHORT.value
                 )
                 if (

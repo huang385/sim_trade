@@ -5,13 +5,13 @@ from app.api.auth_api import get_account_authorization_service
 from app.core.database import get_db
 from app.core.security import require_active_user
 from app.models.app_user import AppUser
-from app.repositories.risk_repository import RiskRepository
 from app.schemas.risk_schema import (
     LiquidationTaskResponse,
     RiskEventResponse,
     RiskSnapshotResponse,
 )
-from app.services.account_authorization_service import AccountAuthorizationService
+from app.modules.accounts import AccountAuthorizationService
+from app.modules.risk import RiskQueryService, get_risk_query_service
 
 
 router = APIRouter(prefix="/api/risk", tags=["实时风险"])
@@ -25,11 +25,11 @@ def get_risk_snapshot(
         get_account_authorization_service
     ),
     db: Session = Depends(get_db),
+    query_service: RiskQueryService = Depends(get_risk_query_service),
 ):
     """返回当前用户有权访问的账户风险状态和最近强平任务。"""
 
     account = authorization.require_account_access(db, current_user, account_id)
-    tasks = RiskRepository.list_tasks_by_account(db, account_id, limit=1)
     return RiskSnapshotResponse(
         account_id=account.account_id,
         risk_state=account.risk_state,
@@ -38,7 +38,7 @@ def get_risk_snapshot(
         equity=account.equity,
         available_cash=account.available_cash,
         risk_available_cash=account.risk_available_cash,
-        latest_task=tasks[0] if tasks else None,
+        latest_task=query_service.latest_task(db, account_id),
     )
 
 
@@ -53,11 +53,12 @@ def list_risk_events(
         get_account_authorization_service
     ),
     db: Session = Depends(get_db),
+    query_service: RiskQueryService = Depends(get_risk_query_service),
 ):
     """分页上限内读取账户风险审计记录，不暴露其他用户账户。"""
 
     authorization.require_account_access(db, current_user, account_id)
-    return RiskRepository.list_events_by_account(db, account_id, limit=limit)
+    return query_service.list_events(db, account_id, limit=limit)
 
 
 @router.get(
@@ -72,8 +73,9 @@ def list_liquidation_tasks(
         get_account_authorization_service
     ),
     db: Session = Depends(get_db),
+    query_service: RiskQueryService = Depends(get_risk_query_service),
 ):
     """读取强平任务进度；账户转移或权限撤销后立即停止访问。"""
 
     authorization.require_account_access(db, current_user, account_id)
-    return RiskRepository.list_tasks_by_account(db, account_id, limit=limit)
+    return query_service.list_tasks(db, account_id, limit=limit)

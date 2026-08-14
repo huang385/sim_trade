@@ -12,6 +12,10 @@ from app.enums.order_enums import (
 )
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.matching.base import MatchingEngine
+from app.modules.orders.matching import (
+    DerivativeMatchingStrategy,
+    MatchingStrategyRegistry,
+)
 from app.matching.models import (
     MatchingMarketData,
     MatchingOrder,
@@ -23,6 +27,10 @@ from app.schemas.matching_schema import MarketTickMatchResult
 from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
+)
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
 )
 
 
@@ -75,6 +83,8 @@ class MarketTickMatchingService:
         order_repository: OrderRepository,
         matching_engine: MatchingEngine,
         settlement_service: TradeSettlementService,
+        product_registry: ProductStrategyRegistry | None = None,
+        matching_strategy_registry: MatchingStrategyRegistry | None = None,
     ):
         # Session工厂而不是单个Session被注入，因为每笔候选订单必须使用
         # 独立事务，才能让一笔失败不阻止其他订单先完成结算。
@@ -83,6 +93,13 @@ class MarketTickMatchingService:
         self.order_repository = order_repository
         self.matching_engine = matching_engine
         self.settlement_service = settlement_service
+        self.product_registry = product_registry or product_strategy_registry
+        if matching_strategy_registry is None:
+            matching_strategy_registry = MatchingStrategyRegistry()
+            matching_strategy_registry.register(
+                DerivativeMatchingStrategy(matching_engine)
+            )
+        self.matching_strategy_registry = matching_strategy_registry
 
     @staticmethod
     def parse_event(fields: Mapping[str, str]) -> ParsedMarketTickEvent:
@@ -134,15 +151,18 @@ class MarketTickMatchingService:
             raise MarketTickEventValidationError("行情路由字段与payload不一致")
         return ParsedMarketTickEvent(event_id, exchange_id, symbol, tick)
 
-    @classmethod
+
     def _database_order_is_candidate(
-        cls, order, event: ParsedMarketTickEvent, *, allow_market: bool = False
+        self, order, event: ParsedMarketTickEvent, *, allow_market: bool = False
     ) -> bool:
         """Redis 只提供候选编号，是否活动必须以 PostgreSQL 为准。"""
 
+        if order is not None:
+            self.product_registry.resolve(order.instrument_type)
+
         return (
             order is not None
-            and order.status in cls.ACTIVE_STATUSES
+            and order.status in self.ACTIVE_STATUSES
             and order.remaining_volume > 0
             and order.order_type in {
                 OrderType.LIMIT.value,
@@ -150,7 +170,7 @@ class MarketTickMatchingService:
                 OrderType.LAST.value,
                 *({OrderType.MARKET.value} if allow_market else set()),
             }
-            and order.offset_flag in cls.SUPPORTED_OFFSET_FLAGS
+            and order.offset_flag in self.SUPPORTED_OFFSET_FLAGS
             and order.exchange_id == event.exchange_id
             and order.symbol == event.symbol
         )
@@ -246,6 +266,9 @@ class MarketTickMatchingService:
                 if candidate is not None:
                     # 订单事件服务刚刚从数据库读取并生成了不可变标量快照，
                     # 到达撮合直接复用它，避免在另一个Session中重复普通查询。
+                    product_strategy = self.product_registry.resolve(
+                        candidate.instrument_type
+                    )
                     if not (
                         candidate.order_id == order_id
                         and candidate.status.value in self.ACTIVE_STATUSES
@@ -279,6 +302,9 @@ class MarketTickMatchingService:
                         ):
                             skipped += 1
                             continue
+                        product_strategy = self.product_registry.resolve(
+                            order.instrument_type
+                        )
                         matching_order = MatchingOrder(
                             direction=OrderDirection(order.direction),
                             offset_flag=OffsetFlag(order.offset_flag),
@@ -286,7 +312,10 @@ class MarketTickMatchingService:
                             limit_price=order.limit_price,
                             remaining_volume=order.remaining_volume,
                         )
-                match_result = self.matching_engine.match(
+                matching_strategy = self.matching_strategy_registry.resolve(
+                    product_strategy.family
+                )
+                match_result = matching_strategy.match(
                     matching_order,
                     market_snapshot,
                 )

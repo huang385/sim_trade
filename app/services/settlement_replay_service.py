@@ -9,6 +9,11 @@ from app.common.decimal_utils import quantize_money
 from app.common.exceptions import DataAccessError
 from app.enums.option_enums import InstrumentType, OptionType
 from app.enums.order_enums import OffsetFlag, PositionDirection
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 ZERO = Decimal("0.000000")
@@ -78,6 +83,13 @@ class SettlementReplayResult:
 
 class SettlementReplayService:
     """只使用不可变开仓/成交/分配/昨结事实重建目标交易日状态。"""
+
+    def __init__(
+        self,
+        *,
+        product_registry: ProductStrategyRegistry | None = None,
+    ) -> None:
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def _sign(direction: str) -> Decimal:
@@ -231,7 +243,18 @@ class SettlementReplayService:
                 (instrument.exchange_id, instrument.symbol)
             )
 
-            is_option = instrument.instrument_type in OPTION_TYPES
+            product_strategy = self.product_registry.resolve(
+                instrument.instrument_type
+            )
+            is_option = product_strategy.family == ProductFamily.OPTIONS
+            if (
+                product_strategy.family == ProductFamily.FUTURES
+                and instrument.instrument_type != InstrumentType.FUTURES.value
+            ):
+                raise DataAccessError(
+                    "期货结算产品类型不一致",
+                    error_code="PRODUCT_DAILY_SETTLEMENT_NOT_IMPLEMENTED",
+                )
             expires_today = bool(
                 is_option
                 and instrument.expire_date is not None

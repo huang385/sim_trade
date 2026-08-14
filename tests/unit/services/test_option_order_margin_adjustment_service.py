@@ -278,7 +278,9 @@ def test_settlement_blocks_trade_when_final_margin_check_fails():
     account_repository = Mock()
     account_repository.get_by_account_id_for_update.return_value = account
     instrument_repository = Mock()
-    instrument_repository.get_by_order_book_id.return_value = SimpleNamespace()
+    instrument_repository.get_by_order_book_id.return_value = SimpleNamespace(
+        instrument_type="FUTURES_OPTION"
+    )
     trade_repository = Mock()
     trade_repository.get_by_order_market_event.return_value = None
     final_checker = Mock()

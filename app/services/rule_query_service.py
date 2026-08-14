@@ -20,6 +20,11 @@ from app.repositories.margin_rule_repository import (
     MarginRuleRepository,
 )
 from app.enums.option_enums import InstrumentType
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +57,7 @@ class RuleQueryService:
         fee_repository: FeeRuleRepository,
         option_margin_repository: OptionMarginRuleRepository | None = None,
         fee_item_repository: FeeRuleItemRepository | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.instrument_repository = instrument_repository
         self.margin_repository = margin_repository
@@ -62,6 +68,7 @@ class RuleQueryService:
         self.fee_item_repository = (
             fee_item_repository or FeeRuleItemRepository()
         )
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def _validate_instrument(instrument: Instrument) -> Instrument:
@@ -121,7 +128,10 @@ class RuleQueryService:
             )
         )
 
-        if instrument.instrument_type == InstrumentType.FUTURES.value:
+        product_strategy = self.product_registry.resolve(
+            instrument.instrument_type
+        )
+        if product_strategy.family == ProductFamily.FUTURES:
             margin_rule = self.margin_repository.get_current(
                 db=db,
                 exchange_id=exchange_id,
@@ -142,6 +152,13 @@ class RuleQueryService:
                 fee_rule=fee_rule,
             )
 
+        if product_strategy.family != ProductFamily.OPTIONS:
+            # 注册中心新增产品后仍必须在规则查询层实现对应规则，禁止
+            # 新产品意外复用期权查询路径。
+            raise BusinessRuleError(
+                "合约产品规则查询尚未实现",
+                error_code="PRODUCT_ORDER_RULES_NOT_IMPLEMENTED",
+            )
         if direction is None or offset_flag is None:
             raise BusinessRuleError(
                 "期权规则查询缺少买卖或开平参数",

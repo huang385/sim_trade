@@ -7,7 +7,7 @@ from app.models.app_user import AppUser
 from app.enums.auth_enums import UserRole
 from app.common.exceptions import AuthorizationError
 from app.api.auth_api import get_account_authorization_service
-from app.services.account_authorization_service import (
+from app.modules.accounts import (
     AccountAuthorizationService,
 )
 from app.schemas.trade_schema import (
@@ -15,7 +15,7 @@ from app.schemas.trade_schema import (
     TradePositionAllocationResponse,
     TradeResponse,
 )
-from app.services.trade_settlement_service import TradeQueryService
+from app.modules.trades import TradeQueryService
 
 
 router = APIRouter(prefix="/api/trades", tags=["成交查询"])

@@ -10,9 +10,9 @@ from app.core.security import (
 from app.enums.auth_enums import TokenType
 from app.models.app_user import AppUser
 from app.realtime.metrics import realtime_metrics
-from app.realtime.websocket_ticket_service import WebSocketTicketService
+from app.modules.realtime import WebSocketTicketService
 from app.schemas.websocket_schema import WebSocketTicketResponse
-from app.services.token_service import TokenService
+from app.modules.auth import TokenService
 
 
 router = APIRouter(prefix="/api/ws", tags=["WebSocket实时推送"])

@@ -5,11 +5,11 @@ from app.core.database import get_db
 from app.core.security import require_active_user
 from app.models.app_user import AppUser
 from app.api.auth_api import get_account_authorization_service
-from app.services.account_authorization_service import (
+from app.modules.accounts import (
     AccountAuthorizationService,
 )
 from app.schemas.position_schema import PositionResponse
-from app.services.trade_settlement_service import PositionQueryService
+from app.modules.trades import PositionQueryService
 
 
 router = APIRouter(prefix="/api/positions", tags=["持仓查询"])

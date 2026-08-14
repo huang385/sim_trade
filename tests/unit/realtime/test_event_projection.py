@@ -21,7 +21,9 @@ def test_order_accepted_projection_adds_absolute_status():
                 {
                     "event_id": "E001",
                     "account_id": "A001",
+                    "account_type": "FUTURES",
                     "order_id": "O001",
+                    "instrument_type": "FUTURES_OPTION",
                     "accepted_at": "2026-08-03T12:00:00+00:00",
                     "frozen_margin": "8400.000000",
                 }
@@ -34,6 +36,8 @@ def test_order_accepted_projection_adds_absolute_status():
     assert event.payload["frozen_margin"] == "8400.000000"
     assert event.version == "10-0"
     assert event.business_version == "1"
+    assert event.account_type == "FUTURES"
+    assert event.instrument_type == "FUTURES_OPTION"
     assert event.payload["business_version"] == "1"
 
 

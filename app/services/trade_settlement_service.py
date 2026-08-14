@@ -23,7 +23,6 @@ from app.enums.order_enums import (
     PositionDirection,
 )
 from app.enums.account_enums import AccountRiskState
-from app.enums.option_enums import InstrumentType
 from app.matching.models import MatchResult
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
@@ -53,6 +52,11 @@ from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentService,
 )
 from app.services.realtime_fact_event_service import RealtimeFactEventService
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 from app.services.settlement_gate_service import SettlementGateService
 
 
@@ -142,6 +146,7 @@ class TradeSettlementService:
         position_detail_id_factory: Callable[[], str] | None = None,
         event_id_factory: Callable[[], str] | None = None,
         settlement_gate_service: SettlementGateService | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         # 所有依赖都允许从构造函数注入，便于单元测试精确模拟某一步失败，
         # 同时生产环境默认使用真实Repository和UUID编号工厂。
@@ -184,6 +189,7 @@ class TradeSettlementService:
         self.settlement_gate_service = (
             settlement_gate_service or SettlementGateService()
         )
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def _allocate_frozen(
@@ -478,6 +484,14 @@ class TradeSettlementService:
                     "成交订单对应合约不存在",
                     error_code="SETTLEMENT_INSTRUMENT_NOT_FOUND",
                 )
+            if instrument.instrument_type != order.instrument_type:
+                raise DataAccessError(
+                    "订单产品类型与合约事实不一致",
+                    error_code="SETTLEMENT_PRODUCT_TYPE_MISMATCH",
+                )
+            product_strategy = self.product_registry.resolve(
+                order.instrument_type
+            )
 
             fill_price = quantize_money(match_result.fill_price)
             now = utc_now()
@@ -549,17 +563,7 @@ class TradeSettlementService:
                 direction=position_direction,
             )
 
-            instrument_type = InstrumentType(
-                getattr(
-                    order,
-                    "instrument_type",
-                    InstrumentType.FUTURES.value,
-                )
-            )
-            if instrument_type in {
-                InstrumentType.FUTURES_OPTION,
-                InstrumentType.INDEX_OPTION,
-            }:
+            if product_strategy.family == ProductFamily.OPTIONS:
                 # 期权权利金和卖方保证金的现金语义与期货不同，必须走
                 # 独立策略；数据库锁顺序仍保持 Order→Account→Position。
                 trade = self.option_strategy.apply_open(
@@ -596,6 +600,12 @@ class TradeSettlementService:
                     trade.trade_id,
                     order.order_id,
                     "SETTLED",
+                )
+
+            if product_strategy.family != ProductFamily.FUTURES:
+                raise DataAccessError(
+                    "成交产品结算策略尚未实现",
+                    error_code="PRODUCT_TRADE_SETTLEMENT_NOT_IMPLEMENTED",
                 )
 
             # 保证金仍从成交前剩余冻结资源按数量转为实际占用；手续费则

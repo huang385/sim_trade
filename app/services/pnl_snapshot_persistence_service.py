@@ -32,6 +32,11 @@ from app.services.pnl_calculator import (
     PositionPnlSnapshot,
 )
 from app.services.settlement_gate_service import SettlementGateService
+from app.modules.orders.product_registry import (
+    ProductFamily,
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 RISK_QUANT = Decimal("0.00000001")
@@ -85,6 +90,7 @@ class PnlSnapshotPersistenceService:
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         risk_store: RiskStore | None = None,
         settlement_gate_service: SettlementGateService | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.session_factory = session_factory
         self.pnl_store = pnl_store
@@ -103,6 +109,7 @@ class PnlSnapshotPersistenceService:
         self.settlement_gate_service = (
             settlement_gate_service or SettlementGateService()
         )
+        self.product_registry = product_registry or product_strategy_registry
 
     @staticmethod
     def _risk(used_margin: Decimal, equity: Decimal) -> Decimal:
@@ -424,11 +431,10 @@ class PnlSnapshotPersistenceService:
                 )
                 if mark_price is None:
                     raise ValueError("持仓行情不可用")
-                instrument_type = InstrumentType(position.instrument_type)
-                if instrument_type in {
-                    InstrumentType.FUTURES_OPTION,
-                    InstrumentType.INDEX_OPTION,
-                }:
+                product_strategy = self.product_registry.resolve(
+                    position.instrument_type
+                )
+                if product_strategy.family == ProductFamily.OPTIONS:
                     if any(
                         item.margin_rule_id != position.margin_rule_id
                         or item.margin_rule_version
@@ -467,7 +473,7 @@ class PnlSnapshotPersistenceService:
                             underlying_price=underlying_price,
                         )
                     )
-                else:
+                elif product_strategy.family == ProductFamily.FUTURES:
                     multiplier = Decimal(position.multiplier_snapshot)
                     if multiplier <= 0:
                         raise ValueError("期货持仓乘数快照不合法")
@@ -486,6 +492,11 @@ class PnlSnapshotPersistenceService:
                             underlying_price=None,
                             detail_margin_shares=(),
                         )
+                    )
+                else:
+                    raise DataAccessError(
+                        "持仓估值策略尚未实现",
+                        error_code="PRODUCT_VALUATION_NOT_IMPLEMENTED",
                     )
         except (ValueError, TypeError, ArithmeticError, DataAccessError) as exc:
             # 金额不确定时禁止部分写入；风险状态单独提交并保留Dirty重试。
@@ -555,14 +566,13 @@ class PnlSnapshotPersistenceService:
                 detail.margin_calculated_at = now
                 detail.updated_at = now
 
-            position_type = InstrumentType(position.instrument_type)
+            product_strategy = self.product_registry.resolve(
+                position.instrument_type
+            )
             cumulative_economic_pnl += (
                 update.pnl.cumulative_unrealized_pnl
             )
-            if position_type in {
-                InstrumentType.FUTURES_OPTION,
-                InstrumentType.INDEX_OPTION,
-            }:
+            if product_strategy.family == ProductFamily.OPTIONS:
                 if position.direction == PositionDirection.LONG.value:
                     long_option_value += update.option_market_value
                 else:
@@ -570,8 +580,13 @@ class PnlSnapshotPersistenceService:
                     option_required_margin += (
                         update.realtime_required_margin
                     )
-            else:
+            elif product_strategy.family == ProductFamily.FUTURES:
                 futures_unrealized += update.pnl.cash_unrealized_pnl
+            else:
+                raise DataAccessError(
+                    "账户估值汇总策略尚未实现",
+                    error_code="PRODUCT_VALUATION_NOT_IMPLEMENTED",
+                )
             daily_position_pnl += update.pnl.daily_position_pnl
 
         account.unrealized_pnl = quantize_money(futures_unrealized)

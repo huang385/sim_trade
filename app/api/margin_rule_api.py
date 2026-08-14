@@ -15,7 +15,7 @@ from app.schemas.margin_rule_schema import (
     MarginRuleDailyResponse,
     MarginRuleResponse,
 )
-from app.services.margin_rule_service import (
+from app.modules.instruments import (
     MarginRuleService,
     get_margin_rule_service,
 )

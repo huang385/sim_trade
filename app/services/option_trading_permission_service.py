@@ -3,13 +3,24 @@ from app.core.config import Settings, settings
 from app.enums.account_enums import AccountRiskState, AccountType
 from app.enums.option_enums import InstrumentType
 from app.enums.order_enums import OffsetFlag, OrderDirection
+from app.shared.enums import ProductFamily
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
+)
 
 
 class OptionTradingPermissionService:
     """统一校验产品开关、账户权限以及实时风险限制。"""
 
-    def __init__(self, config: Settings = settings):
+    def __init__(
+        self,
+        config: Settings = settings,
+        *,
+        product_registry: ProductStrategyRegistry | None = None,
+    ):
         self.config = config
+        self.product_registry = product_registry or product_strategy_registry
 
     def validate(
         self,
@@ -21,9 +32,7 @@ class OptionTradingPermissionService:
     ) -> None:
         # 迁移前构造的历史合约可能没有 instrument_type；按期货兼容，
         # 避免期权扩展改变原有期货订单链路。
-        instrument_type = InstrumentType(
-            getattr(instrument, "instrument_type", InstrumentType.FUTURES.value)
-        )
+        instrument_type_value = instrument.instrument_type
         # 风险不足时禁止继续开仓增加风险，但必须允许已有仓位平仓。
         if (
             getattr(account, "risk_state", AccountRiskState.NORMAL.value)
@@ -38,13 +47,15 @@ class OptionTradingPermissionService:
                 error_code="ACCOUNT_RISK_INCREASE_BLOCKED",
             )
 
-        if instrument_type == InstrumentType.FUTURES:
-            return
-        if instrument_type == InstrumentType.INDEX:
+        if instrument_type_value == InstrumentType.INDEX.value:
             raise BusinessRuleError(
                 "指数合约不能提交交易订单",
                 error_code="INDEX_NOT_TRADEABLE",
             )
+        product = self.product_registry.resolve(instrument_type_value)
+        if product.family == ProductFamily.FUTURES:
+            return
+        instrument_type = InstrumentType(instrument_type_value)
         if account.account_type != AccountType.FUTURES.value:
             raise BusinessRuleError(
                 "当前账户类型不支持期权交易",

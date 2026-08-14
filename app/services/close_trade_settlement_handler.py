@@ -345,9 +345,7 @@ class CloseTradeSettlementHandler:
     ) -> Trade:
         """消费本订单冻结分配并原子更新成交、账户和剩余持仓。"""
 
-        instrument_type = InstrumentType(
-            getattr(order, "instrument_type", InstrumentType.FUTURES.value)
-        )
+        instrument_type = InstrumentType(order.instrument_type)
         is_option = instrument_type in {
             InstrumentType.FUTURES_OPTION,
             InstrumentType.INDEX_OPTION,

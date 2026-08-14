@@ -1,38 +1,15 @@
-from enum import Enum
+"""核心枚举的兼容导入层。
+
+枚举唯一事实来源位于 ``app.enums``。旧代码若仍从 ``app.core.enums``
+导入，可以继续工作，但这里不再重复定义同名 Enum。
+"""
+
+from app.enums.account_enums import AccountStatus, AccountType
+from app.enums.market_enums import MarketType
+from app.enums.reference_data_enums import CommissionType
 
 
-class AccountType(str, Enum):
-    """
-    账户类型
-    """
-    FUTURES = "FUTURES"      # 期货账户
-    STOCK = "STOCK"          # 股票账户
-    OPTION = "OPTION"        # 期权账户
-    CRYPTO = "CRYPTO"        # 数字货币账户
+# 历史名称仅保留为同一个类对象的别名，禁止字符串隐式桥接两套枚举。
+FeeMode = CommissionType
 
-
-class AccountStatus(str, Enum):
-    """
-    账户状态
-    """
-    NORMAL = "NORMAL"              # 正常
-    DISABLED = "DISABLED"          # 禁用
-    LIQUIDATION = "LIQUIDATION"    # 强平中
-
-
-class MarketType(str, Enum):
-    """
-    市场类型
-    """
-    FUTURES = "FUTURES"      # 期货
-    STOCK = "STOCK"          # 股票
-    OPTION = "OPTION"        # 期权
-    CRYPTO = "CRYPTO"        # 数字货币
-
-
-class FeeMode(str, Enum):
-    """
-    手续费计算方式
-    """
-    BY_VOLUME = "BY_VOLUME"  # 按手数收费，例如 3元/手
-    BY_AMOUNT = "BY_AMOUNT"  # 按成交金额比例收费，例如 万分之一
+__all__ = ["AccountStatus", "AccountType", "FeeMode", "MarketType"]

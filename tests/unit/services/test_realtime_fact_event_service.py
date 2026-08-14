@@ -17,6 +17,7 @@ def test_account_fact_event_owns_only_postgres_decimal_fields():
     )
     account = SimpleNamespace(
         account_id="A001",
+        account_type="FUTURES",
         cash_balance=Decimal("1000"),
         used_margin=Decimal("100"),
         option_used_margin=Decimal("60"),
@@ -43,6 +44,7 @@ def test_account_fact_event_owns_only_postgres_decimal_fields():
     payload = repository.create_event.call_args.kwargs["payload"]
     event = repository.create_event.call_args.kwargs
     assert event["event_type"] == "ACCOUNT_FACT_UPDATED"
+    assert payload["account_type"] == "FUTURES"
     assert payload["cash_balance"] == "1000"
     assert payload["frozen_commission"] == "4"
     assert payload["option_used_margin"] == "60"

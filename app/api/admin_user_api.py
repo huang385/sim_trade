@@ -3,14 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.security import require_admin_user
-from app.repositories.user_repository import UserRepository
 from app.schemas.user_schema import (
     UserCreateRequest,
     UserResponse,
     UserStatusUpdateRequest,
 )
-from app.services.admin_user_service import AdminUserService
-from app.services.password_service import PasswordService
+from app.modules.auth import AdminUserService, get_admin_user_service
 
 
 router = APIRouter(
@@ -18,16 +16,6 @@ router = APIRouter(
     tags=["用户管理"],
     dependencies=[Depends(require_admin_user)],
 )
-_service = AdminUserService(
-    repository=UserRepository(),
-    password_service=PasswordService(),
-)
-
-
-def get_admin_user_service() -> AdminUserService:
-    return _service
-
-
 @router.post("", response_model=UserResponse)
 def create_user(
     request: UserCreateRequest,

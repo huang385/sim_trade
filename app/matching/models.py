@@ -44,6 +44,8 @@ class MatchingOrderCandidate:
     symbol: str
     status: OrderStatus
     order: MatchingOrder
+    # 服务端订单事实中的精确合约类型；撮合协调器据此选择产品边界。
+    instrument_type: str = "FUTURES"
 
 
 @dataclass(frozen=True)

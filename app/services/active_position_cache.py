@@ -11,9 +11,14 @@ from sqlalchemy.orm import Session
 from app.repositories.account_repository import AccountRepository
 from app.repositories.position_repository import PositionRepository
 from app.repositories.outbox_repository import OutboxRepository
+from app.shared.enums import ProductFamily
 from app.services.pnl_calculator import (
     PnlDetailSnapshot,
     PositionPnlSnapshot,
+)
+from app.modules.orders.product_registry import (
+    ProductStrategyRegistry,
+    product_strategy_registry,
 )
 
 
@@ -119,6 +124,7 @@ class ActivePositionCache:
         refresh_ms: int = 1000,
         monotonic: Callable[[], float] = time.monotonic,
         version_loader: Callable[[], str] | None = None,
+        product_registry: ProductStrategyRegistry | None = None,
     ):
         self.session_factory = session_factory
         self.position_repository = (
@@ -131,6 +137,7 @@ class ActivePositionCache:
         self.refresh_seconds = max(refresh_ms, 1) / 1000
         self.monotonic = monotonic
         self.version_loader = version_loader
+        self.product_registry = product_registry or product_strategy_registry
         self._expires_at = 0.0
         self._by_contract: dict[
             ContractKey, tuple[PositionPnlSnapshot, ...]
@@ -250,8 +257,8 @@ class ActivePositionCache:
         if not account_id and not (exchange_id and symbol):
             self._expires_at = 0.0
 
-    @staticmethod
     def _snapshots_from_rows(
+        self,
         rows,
         fact_versions: Mapping[tuple[str, str], str] | None = None,
     ) -> tuple[
@@ -326,10 +333,9 @@ class ActivePositionCache:
                 for detail_multiplier in item["detail_multipliers"]
             ):
                 raise ValueError("持仓与明细乘数快照不一致")
-            if getattr(position, "instrument_type", "FUTURES") in {
-                "FUTURES_OPTION",
-                "INDEX_OPTION",
-            } and any(
+            instrument_type = position.instrument_type
+            product = self.product_registry.resolve(instrument_type)
+            if product.family == ProductFamily.OPTIONS and any(
                 detail_rule
                 != (
                     getattr(position, "margin_rule_id", None),
@@ -354,9 +360,7 @@ class ActivePositionCache:
                     position.daily_position_pnl
                 ),
                 details=tuple(item["details"]),
-                instrument_type=getattr(
-                    position, "instrument_type", "FUTURES"
-                ),
+                instrument_type=instrument_type,
                 total_volume=getattr(
                     position,
                     "total_volume",

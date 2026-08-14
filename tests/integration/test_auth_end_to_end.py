@@ -30,7 +30,10 @@ from app.models.auth_refresh_session import AuthRefreshSession
 from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
+from app.models.position_detail import PositionDetail
+from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade import Trade
+from app.models.trade_position_allocation import TradePositionAllocation
 from app.repositories.auth_refresh_session_repository import (
     AuthRefreshSessionRepository,
 )
@@ -136,16 +139,59 @@ def auth_context():
                 if account_ids
                 else []
             )
-            if order_ids:
-                db.execute(
-                    delete(OutboxEvent).where(
-                        OutboxEvent.aggregate_id.in_(order_ids)
+            if account_ids:
+                trade_ids = list(
+                    db.scalars(
+                        select(Trade.trade_id).where(
+                            Trade.account_id.in_(account_ids)
+                        )
+                    )
+                )
+                position_ids = list(
+                    db.scalars(
+                        select(Position.position_id).where(
+                            Position.account_id.in_(account_ids)
+                        )
                     )
                 )
                 db.execute(
-                    delete(Order).where(Order.order_id.in_(order_ids))
+                    delete(TradePositionAllocation).where(
+                        TradePositionAllocation.account_id.in_(account_ids)
+                    )
                 )
-            if account_ids:
+                db.execute(
+                    delete(PositionFreezeAllocation).where(
+                        PositionFreezeAllocation.account_id.in_(account_ids)
+                    )
+                )
+                db.execute(
+                    delete(PositionDetail).where(
+                        PositionDetail.account_id.in_(account_ids)
+                    )
+                )
+                db.execute(
+                    delete(Position).where(
+                        Position.account_id.in_(account_ids)
+                    )
+                )
+                db.execute(
+                    delete(Trade).where(Trade.account_id.in_(account_ids))
+                )
+                if order_ids:
+                    db.execute(
+                        delete(Order).where(Order.order_id.in_(order_ids))
+                    )
+                aggregate_ids = [
+                    *account_ids,
+                    *order_ids,
+                    *trade_ids,
+                    *position_ids,
+                ]
+                db.execute(
+                    delete(OutboxEvent).where(
+                        OutboxEvent.aggregate_id.in_(aggregate_ids)
+                    )
+                )
                 db.execute(
                     delete(Account).where(
                         Account.account_id.in_(account_ids)
@@ -479,6 +525,7 @@ def test_login_account_authorization_refresh_and_logout(
     b_order_id = admin_b_order.json()["order_id"]
     b_trade_id = f"TRB{auth_context.suffix.upper()}"
     b_position_id = f"PSB{auth_context.suffix.upper()}"
+    b_position_detail_id = f"PDB{auth_context.suffix.upper()}"
     with SessionLocal() as db:
         now = utc_now()
         db.add(
@@ -492,6 +539,7 @@ def test_login_account_authorization_refresh_and_logout(
                 exchange_id=integration_context.exchange_id,
                 symbol=integration_context.symbol,
                 trading_day=integration_context.trading_day,
+                instrument_type="FUTURES",
                 direction="BUY",
                 offset_flag="OPEN",
                 trade_price=Decimal("3500"),
@@ -512,6 +560,7 @@ def test_login_account_authorization_refresh_and_logout(
                 order_book_id=integration_context.symbol,
                 exchange_id=integration_context.exchange_id,
                 symbol=integration_context.symbol,
+                instrument_type="FUTURES",
                 direction="LONG",
                 total_volume=1,
                 today_volume=1,
@@ -527,6 +576,34 @@ def test_login_account_authorization_refresh_and_logout(
                 daily_position_pnl=Decimal("0"),
                 daily_close_pnl=Decimal("0"),
                 trading_day=integration_context.trading_day,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        db.add(
+            PositionDetail(
+                position_detail_id=b_position_detail_id,
+                position_id=b_position_id,
+                account_id=account_b,
+                open_trade_id=b_trade_id,
+                order_book_id=integration_context.symbol,
+                exchange_id=integration_context.exchange_id,
+                symbol=integration_context.symbol,
+                instrument_type="FUTURES",
+                direction="LONG",
+                open_trading_day=integration_context.trading_day,
+                open_price=Decimal("3500"),
+                pnl_base_price=Decimal("3500"),
+                original_volume=1,
+                remaining_volume=1,
+                frozen_volume=0,
+                open_margin=Decimal("4200"),
+                remaining_margin=Decimal("4200"),
+                initial_occupied_margin=Decimal("4200"),
+                realtime_required_margin=Decimal("4200"),
+                multiplier_snapshot=Decimal("10"),
+                open_commission=Decimal("3"),
+                status="OPEN",
                 created_at=now,
                 updated_at=now,
             )

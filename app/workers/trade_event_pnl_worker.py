@@ -11,7 +11,7 @@ from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.infrastructure.risk_store import RiskStore
 from app.infrastructure.redis_keys import pnl_trade_event_failure_key
-from app.services.trade_created_pnl_service import (
+from app.modules.realtime import (
     TradeCreatedPnlService,
     TradeCreatedPnlValidationError,
 )

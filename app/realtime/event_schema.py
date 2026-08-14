@@ -13,6 +13,9 @@ class RealtimeEventEnvelope(BaseModel):
     event_type: RealtimeEventType
     account_id: str | None = None
     entity_id: str | None = None
+    # 产品维度是可选路由元数据。旧事件可以不携带，新事件由服务端事实填充。
+    account_type: str | None = None
+    instrument_type: str | None = None
     occurred_at: datetime
     # version是目标Redis Stream传输游标；business_version是业务聚合版本。
     # 两者用途不同，禁止用重试后生成的Stream编号判断订单状态先后。
