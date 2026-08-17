@@ -125,6 +125,7 @@ class SettlementReplayService:
         instruments_by_id: Mapping[int, Any],
         prices: Mapping[tuple[str, str], Decimal],
         has_prior_batch: bool,
+        previous_prices: Mapping[tuple[str, str], Decimal] | None = None,
     ) -> SettlementReplayResult:
         trade_by_id = {item.trade_id: item for item in trades}
         if len(trade_by_id) != len(trades):
@@ -383,7 +384,17 @@ class SettlementReplayService:
                         error_code="REPLAY_SETTLEMENT_PRICE_MISSING",
                     )
                 if detail.open_trading_day < trading_day:
-                    if prior is not None:
+                    if previous_prices is not None:
+                        previous_price = previous_prices.get(
+                            (instrument.exchange_id, instrument.symbol)
+                        )
+                        if previous_price is None:
+                            raise DataAccessError(
+                                "历史持仓缺少前一交易日最后 Tick 价格",
+                                error_code="REPLAY_PREVIOUS_LAST_TICK_MISSING",
+                            )
+                        basis = Decimal(previous_price)
+                    elif prior is not None:
                         basis = Decimal(prior.settlement_price)
                     elif has_prior_batch:
                         raise DataAccessError(

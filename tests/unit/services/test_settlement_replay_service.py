@@ -229,6 +229,61 @@ def test_non_expired_option_loss_is_recorded_as_economic_pnl():
     assert result.positions[0].holding_pnl == Decimal("-20.000000")
 
 
+def test_historical_position_uses_previous_trading_day_last_tick_as_basis():
+    yesterday = date(2026, 8, 5)
+    trade = _trade(
+        "T1", trading_day=yesterday, offset="OPEN", price="100", volume=3
+    )
+    detail = _detail(
+        "D1", open_trade_id="T1", open_day=yesterday, price="100", volume=3
+    )
+    prior = SimpleNamespace(settlement_price=Decimal("110"))
+
+    result = SettlementReplayService().replay(
+        trading_day=DAY,
+        details=[detail],
+        trades=[trade],
+        allocations=[],
+        prior_position_settlements={"P1": prior},
+        prior_expired_position_ids=set(),
+        instruments={"RB2610": _instrument()},
+        instruments_by_id={1: _instrument()},
+        prices={("SHFE", "RB2610"): Decimal("120")},
+        has_prior_batch=True,
+        previous_prices={("SHFE", "RB2610"): Decimal("115")},
+    )
+
+    assert result.positions[0].previous_basis == Decimal("115.000000")
+    assert result.positions[0].holding_pnl == Decimal("15.000000")
+
+
+def test_historical_position_rejects_missing_previous_last_tick():
+    yesterday = date(2026, 8, 5)
+    trade = _trade(
+        "T1", trading_day=yesterday, offset="OPEN", price="100", volume=1
+    )
+    detail = _detail(
+        "D1", open_trade_id="T1", open_day=yesterday, price="100", volume=1
+    )
+
+    with pytest.raises(DataAccessError) as error:
+        SettlementReplayService().replay(
+            trading_day=DAY,
+            details=[detail],
+            trades=[trade],
+            allocations=[],
+            prior_position_settlements={},
+            prior_expired_position_ids=set(),
+            instruments={"RB2610": _instrument()},
+            instruments_by_id={1: _instrument()},
+            prices={("SHFE", "RB2610"): Decimal("120")},
+            has_prior_batch=False,
+            previous_prices={},
+        )
+
+    assert error.value.error_code == "REPLAY_PREVIOUS_LAST_TICK_MISSING"
+
+
 def test_close_trade_without_allocation_is_rejected():
     with pytest.raises(DataAccessError) as error:
         SettlementReplayService().replay(

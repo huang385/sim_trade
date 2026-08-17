@@ -10,9 +10,14 @@ from sqlalchemy.pool import StaticPool
 from app.core.database import Base
 from app.models.daily_settlement import (
     DailySettlementBatch,
+    InstrumentSettlementPrice,
 )
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.infrastructure.market_data.settlement_last_tick_provider import (
+    SettlementLastTick,
+    SettlementLastTickPair,
+)
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.services.daily_settlement_service import (
     DailySettlementError,
@@ -147,6 +152,71 @@ def test_validate_tick_rejects_invalid_facts(values, error_code):
         )
 
     assert raised.value.error_code == error_code
+
+
+def test_freeze_prices_persists_both_last_ticks_and_reuses_frozen_facts(
+    sqlite_session_factory,
+):
+    engine, factory = sqlite_session_factory
+
+    class Provider:
+        calls = 0
+
+        def fetch_many(self, codes, trading_day):
+            self.calls += 1
+            assert list(codes) == ["FU2608"]
+            assert trading_day == TRADING_DAY
+            return {
+                "FU2608": SettlementLastTickPair(
+                    current=SettlementLastTick(
+                        order_book_id="FU2608",
+                        trading_day=TRADING_DAY,
+                        event_time=NOW,
+                        last_price=Decimal("123"),
+                        source_event_id="CURRENT",
+                    ),
+                    previous=SettlementLastTick(
+                        order_book_id="FU2608",
+                        trading_day=date(2026, 8, 5),
+                        event_time=NOW - timedelta(days=1),
+                        last_price=Decimal("120"),
+                        source_event_id="PREVIOUS",
+                    ),
+                )
+            }
+
+    provider = Provider()
+    service = DailySettlementService(
+        session_factory=factory,
+        database_engine=engine,
+        settlement_price_provider=provider,
+        time_provider=lambda: NOW,
+        redis_recovery_enabled=False,
+    )
+    instrument = _instrument()
+    kwargs = {
+        "batch": SimpleNamespace(batch_id="B-LAST-TICK"),
+        "trading_day": TRADING_DAY,
+        "instruments": {instrument.order_book_id: instrument},
+        "instruments_by_id": {instrument.id: instrument},
+    }
+
+    first = service._freeze_prices(**kwargs)
+    second = service._freeze_prices(**kwargs)
+
+    assert provider.calls == 1
+    assert first[("TEST", "FU2608")].price == Decimal("123")
+    assert first[("TEST", "FU2608")].previous_price == Decimal("120")
+    assert second[("TEST", "FU2608")].price == Decimal("123.000000")
+    assert second[("TEST", "FU2608")].previous_price == Decimal("120.000000")
+    with factory() as db:
+        row = db.scalar(select(InstrumentSettlementPrice))
+        assert row is not None
+        assert row.price_source == "YMM_DATA_SDK_LAST_TICK"
+        assert row.settlement_price == Decimal("123.000000")
+        assert row.previous_last_price == Decimal("120.000000")
+        assert row.source_event_id == "CURRENT"
+        assert row.previous_source_event_id == "PREVIOUS"
 
 
 def test_allocate_margin_is_exact_and_assigns_rounding_remainder():

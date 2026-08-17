@@ -66,7 +66,7 @@ class DailySettlementBatch(Base):
 
 
 class InstrumentSettlementPrice(Base):
-    """批次内唯一冻结的合约结算价；统一采用经过校验的 last_price。"""
+    """批次内冻结的当日及前一交易日最后 Tick 价格。"""
 
     __tablename__ = "instrument_settlement_price"
     __table_args__ = (
@@ -77,6 +77,10 @@ class InstrumentSettlementPrice(Base):
             name="uq_instrument_settlement_price_day_contract",
         ),
         CheckConstraint("settlement_price > 0", name="ck_settlement_price_positive"),
+        CheckConstraint(
+            "previous_last_price IS NULL OR previous_last_price > 0",
+            name="ck_settlement_previous_last_price_positive",
+        ),
         Index("ix_instrument_settlement_price_batch", "batch_id", "id"),
     )
 
@@ -94,6 +98,12 @@ class InstrumentSettlementPrice(Base):
     )
     source_tick_trading_day: Mapped[date] = mapped_column(Date, nullable=False)
     source_event_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    previous_last_price: Mapped[Decimal | None] = mapped_column(MONEY)
+    previous_source_tick_time: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    previous_source_tick_trading_day: Mapped[date | None] = mapped_column(Date)
+    previous_source_event_id: Mapped[str | None] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )

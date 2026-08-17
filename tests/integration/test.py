@@ -13,8 +13,8 @@ ymm_data_sdk.init(
 
 data = ymm_data_sdk.get_price(
     "JD2608",
-    start_date="2026-08-13",
-    end_date="2026-08-13",
+    start_date="2026-08-14",
+    end_date="2026-08-1",
     frequency="tick",
 )
 

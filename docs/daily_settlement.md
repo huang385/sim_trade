@@ -27,16 +27,18 @@ session exclusive lock，直到整批退出。这样排他锁成功本身就是�
 
 ## 结算价
 
-结算统一使用现有 `MarketTick.last_price`，原因是当前 Tick 模型没有独立的
-交易所结算价字段，而 `last_price` 是真实行情链路稳定提供且具有事件时间、
-交易日和事件编号审计信息的唯一成交价格。实现不使用 `pre_close`、开高低价
-或静默回退链。
+结算命令专用取价链通过 `ymm_data_sdk.get_price(..., frequency="tick")`
+批量查询目标交易日及前一交易日数据。前一交易日由
+`get_previous_trading_date()` 确定；每个合约分别按照返回索引中的 `datetime`
+排序，采用对应交易日最后一条 Tick 的 `last`。不使用 SDK 日线的 `close`、
+`settlement`，也不回退到本地 Redis 最新行情。
 
-每个唯一 `(exchange_id, symbol)` 只调用一次
-`tick_store.get_latest(exchange_id, symbol)`。必须同时满足 Tick 存在、标识
-完整匹配、`last_price` 是有限正 Decimal、交易日一致、时间不过旧且不来自
-未来。期货、期权及期权标的全部验证后，在任何账户过账前一次性写入
-`instrument_settlement_price`。失败续跑只读取数据库冻结价。
+当日最后 Tick 作为本次结算价；前一交易日最后 Tick 作为历史持仓的期初
+基准。当日新开仓仍以真实开仓成交价为基准。`last` 必须是有限正 Decimal，
+且 Tick 的 `trading_date` 必须精确匹配目标日期。期货、期权及期权标的全部
+验证后，在任何账户过账前，将当日和前一交易日的价格、行情时间及派生来源
+编号一次性写入 `instrument_settlement_price`。失败续跑只读取数据库冻结事实，
+不会重复查询 SDK；历史持仓缺少前一交易日 Tick 时整批失败。
 
 ## 会计处理
 
@@ -48,11 +50,12 @@ session exclusive lock，直到整批退出。这样排他锁成功本身就是�
 期货逐日盯市：
 
 ```text
-(结算价 - PositionDetail.pnl_base_price)
+(当日最后 Tick last - 前一交易日最后 Tick last)
 × multiplier_snapshot × remaining_volume × 方向符号
 ```
 
-结果进入现金，剩余明细的 `pnl_base_price` 更新为本次结算价；原始
+当日新仓以上式中的前一交易日价格替换为开仓成交价。结果进入现金，剩余明细
+的 `pnl_base_price` 更新为本次结算价；原始
 `open_price`、开仓日、Trade 和原始保证金审计字段不变。盘中累计浮盈仍按
 原始开仓价展示，账户资金估值则只使用新结算基准后的价差，避免已入现金的
 前一日盯市盈亏被重复计入权益。

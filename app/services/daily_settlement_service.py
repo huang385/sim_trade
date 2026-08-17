@@ -27,6 +27,11 @@ from app.enums.option_enums import MarginPriceMode, OptionType
 from app.enums.order_enums import PositionDetailStatus, PositionDirection
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
+from app.infrastructure.market_data.settlement_last_tick_provider import (
+    YMM_SETTLEMENT_LAST_TICK_SOURCE,
+    SettlementLastTickError,
+    YmmSettlementLastTickProvider,
+)
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.models.daily_settlement import (
     DailyAccountSettlement,
@@ -114,6 +119,10 @@ class FrozenPrice:
     tick_time: datetime
     tick_trading_day: date
     source_event_id: str
+    previous_price: Decimal | None = None
+    previous_tick_time: datetime | None = None
+    previous_tick_trading_day: date | None = None
+    previous_source_event_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +241,7 @@ class DailySettlementService:
         order_repository: OrderRepository | None = None,
         cancellation_service: OrderCancellationService | None = None,
         tick_store: MarketTickStore | None = None,
+        settlement_price_provider: YmmSettlementLastTickProvider | None = None,
         outbox_repository: OutboxRepository | None = None,
         option_margin_resolver: OptionMarginCalculatorResolver | None = None,
         time_provider: Callable[[], datetime] = utc_now,
@@ -248,6 +258,7 @@ class DailySettlementService:
         self.tick_store = tick_store or MarketTickStore(
             redis_client, stream_name=settings.market_tick_stream_name
         )
+        self.settlement_price_provider = settlement_price_provider
         self.option_margin_resolver = (
             option_margin_resolver or OptionMarginCalculatorResolver()
         )
@@ -635,6 +646,14 @@ class DailySettlementService:
                         item.source_tick_time,
                         item.source_tick_trading_day,
                         item.source_event_id,
+                        (
+                            Decimal(item.previous_last_price)
+                            if item.previous_last_price is not None
+                            else None
+                        ),
+                        item.previous_source_tick_time,
+                        item.previous_source_tick_trading_day,
+                        item.previous_source_event_id,
                     )
                     for item in existing
                 }
@@ -652,12 +671,63 @@ class DailySettlementService:
 
         frozen: dict[tuple[str, str], FrozenPrice] = {}
         # 公共业务接口逐唯一合约恰好调用一次，禁止直接拼 Redis Key。
-        for key, instrument in sorted(required.items()):
-            frozen[key] = self._validate_tick(
-                values=self.tick_store.get_latest(*key),
-                instrument=instrument,
-                trading_day=trading_day,
-            )
+        price_source = "YMM_LIVE_DATA_LAST_PRICE"
+        if self.settlement_price_provider is not None:
+            try:
+                pairs = self.settlement_price_provider.fetch_many(
+                    (item.order_book_id for item in required.values()),
+                    trading_day,
+                )
+            except Exception as exc:
+                message = (
+                    str(exc)
+                    if isinstance(exc, SettlementLastTickError)
+                    else f"数据库最后 Tick 查询失败: {type(exc).__name__}"
+                )
+                raise DailySettlementError(
+                    message,
+                    stage=DailySettlementStage.PRICES_FROZEN.value,
+                    error_code="SETTLEMENT_LAST_TICK_QUERY_FAILED",
+                    batch_id=batch.batch_id,
+                ) from exc
+            for key, instrument in sorted(required.items()):
+                pair = pairs.get(instrument.order_book_id)
+                if pair is None:
+                    raise DailySettlementError(
+                        f"数据库最后 Tick 缺少合约: {instrument.order_book_id}",
+                        stage=DailySettlementStage.PRICES_FROZEN.value,
+                        error_code="SETTLEMENT_LAST_TICK_MISSING",
+                        batch_id=batch.batch_id,
+                    )
+                previous = pair.previous
+                frozen[key] = FrozenPrice(
+                    exchange_id=instrument.exchange_id,
+                    symbol=instrument.symbol,
+                    price=pair.current.last_price,
+                    tick_time=pair.current.event_time,
+                    tick_trading_day=pair.current.trading_day,
+                    source_event_id=pair.current.source_event_id,
+                    previous_price=(
+                        previous.last_price if previous is not None else None
+                    ),
+                    previous_tick_time=(
+                        previous.event_time if previous is not None else None
+                    ),
+                    previous_tick_trading_day=(
+                        previous.trading_day if previous is not None else None
+                    ),
+                    previous_source_event_id=(
+                        previous.source_event_id if previous is not None else None
+                    ),
+                )
+            price_source = YMM_SETTLEMENT_LAST_TICK_SOURCE
+        else:
+            for key, instrument in sorted(required.items()):
+                frozen[key] = self._validate_tick(
+                    values=self.tick_store.get_latest(*key),
+                    instrument=instrument,
+                    trading_day=trading_day,
+                )
         now = self._now()
         with self.session_factory() as db:
             for key, item in frozen.items():
@@ -672,10 +742,16 @@ class DailySettlementService:
                         order_book_id=instrument.order_book_id,
                         instrument_type=instrument.instrument_type,
                         settlement_price=item.price,
-                        price_source="YMM_LIVE_DATA_LAST_PRICE",
+                        price_source=price_source,
                         source_tick_time=item.tick_time,
                         source_tick_trading_day=item.tick_trading_day,
                         source_event_id=item.source_event_id,
+                        previous_last_price=item.previous_price,
+                        previous_source_tick_time=item.previous_tick_time,
+                        previous_source_tick_trading_day=(
+                            item.previous_tick_trading_day
+                        ),
+                        previous_source_event_id=item.previous_source_event_id,
                         created_at=now,
                     ),
                 )
@@ -849,6 +925,15 @@ class DailySettlementService:
                 price_values = {
                     key: item.price for key, item in prices.items()
                 }
+                previous_price_values = (
+                    {
+                        key: item.previous_price
+                        for key, item in prices.items()
+                        if item.previous_price is not None
+                    }
+                    if self.settlement_price_provider is not None
+                    else None
+                )
                 replay = self.replay_service.replay(
                     trading_day=trading_day,
                     details=details,
@@ -860,6 +945,7 @@ class DailySettlementService:
                     instruments_by_id=instruments_by_id,
                     prices=price_values,
                     has_prior_batch=bool(prior_account_rows),
+                    previous_prices=previous_price_values,
                 )
 
                 account_by_id = {item.account_id: item for item in accounts}

@@ -19,6 +19,9 @@ def test_parse_trading_day_is_strict(value):
 
 def test_cli_success_returns_zero_and_json(monkeypatch, capsys):
     class Service:
+        def __init__(self, **kwargs):
+            assert kwargs["settlement_price_provider"] is not None
+
         def run(self, trading_day):
             return SimpleNamespace(
                 batch_id="B-1",
@@ -43,6 +46,9 @@ def test_cli_success_returns_zero_and_json(monkeypatch, capsys):
 
 def test_cli_business_failure_is_nonzero_and_has_retry_context(monkeypatch, capsys):
     class Service:
+        def __init__(self, **kwargs):
+            assert kwargs["settlement_price_provider"] is not None
+
         def run(self, trading_day):
             raise DailySettlementError(
                 "行情缺失",
@@ -73,4 +79,3 @@ def test_cli_business_failure_is_nonzero_and_has_retry_context(monkeypatch, caps
         "status": "FAILED",
         "trading_day": date(2026, 8, 6).isoformat(),
     }
-

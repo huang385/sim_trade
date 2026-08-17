@@ -4,6 +4,9 @@ import re
 import sys
 from datetime import date
 
+from app.infrastructure.market_data.settlement_last_tick_provider import (
+    YmmSettlementLastTickProvider,
+)
 from app.services.daily_settlement_service import (
     DailySettlementError,
     DailySettlementService,
@@ -42,7 +45,9 @@ def main(argv: list[str] | None = None) -> int:
         f"--trading-day {args.trading_day.isoformat()}"
     )
     try:
-        result = DailySettlementService().run(args.trading_day)
+        result = DailySettlementService(
+            settlement_price_provider=YmmSettlementLastTickProvider()
+        ).run(args.trading_day)
     except DailySettlementError as exc:
         print(
             json.dumps(
@@ -84,4 +89,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
