@@ -8,7 +8,7 @@ from app.core.config import Settings, settings
 
 YMM_LIVE_DATA_SOURCE = "YMM_LIVE_DATA"
 YMM_LIVE_DATA_SDK_DISTRIBUTION = "ymm-live-data-sdk"
-YMM_LIVE_DATA_SDK_VERSION = "0.4.0"
+YMM_LIVE_DATA_SDK_VERSION = "0.7.0"
 
 
 class RemoteMarketDataConfigurationError(ValueError):
@@ -86,7 +86,7 @@ def load_remote_sdk_client_class():
         from ymm_live_data_sdk import LiveMarketDataClient
     except ModuleNotFoundError as exc:
         raise RemoteMarketDataSdkUnavailableError(
-            "未安装ymm-live-data-sdk==0.4.0；请从内部发布源安装客户端wheel"
+            "未安装ymm-live-data-sdk==0.7.0；请从内部发布源安装客户端wheel"
         ) from exc
     return LiveMarketDataClient
 
@@ -247,17 +247,22 @@ class RemoteFeedClient:
             raise RuntimeError("同一个客户端只能启动一个行情消费者")
         self.sdk_client = self._sdk_factory()
 
-        def handle_tick(message: Any) -> None:
-            try:
-                data = _stable_mapping(message)
-                raw = {
-                    "action": data.get("action"),
-                    "channel": data.get("channel"),
-                }
-                on_quote(data, raw)
-            except Exception as exc:
-                # 回调异常不能杀死SDK行情线程；只向Worker传递脱敏错误类型。
-                on_error({"raw": {"code": type(exc).__name__}})
+        def handle_tick(messages: Any) -> None:
+            """兼容 SDK 0.6 的单条回调和 0.7 的批量回调。"""
+
+            batch = messages if isinstance(messages, tuple) else (messages,)
+            for message in batch:
+                try:
+                    data = _stable_mapping(message)
+                    raw = {
+                        "action": data.get("action"),
+                        "channel": data.get("channel"),
+                    }
+                    on_quote(data, raw)
+                except Exception as exc:
+                    # 单条坏行情不能影响同批其他行情，更不能杀死 SDK
+                    # 行情线程；只向 Worker 传递脱敏错误类型。
+                    on_error({"raw": {"code": type(exc).__name__}})
 
         def handle_status(event: Any) -> None:
             try:

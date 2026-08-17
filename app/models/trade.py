@@ -48,6 +48,11 @@ class Trade(Base):
             "commission >= 0",
             name="ck_trade_commission_nonnegative",
         ),
+        CheckConstraint(
+            "(instrument_type = 'STOCK' AND offset_flag IS NULL) OR "
+            "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
+            name="ck_trade_stock_offset_flag_semantics",
+        ),
         Index("ix_trade_exchange_symbol", "exchange_id", "symbol"),
     )
 
@@ -95,7 +100,7 @@ class Trade(Base):
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
 
     # 原订单开平标志：OPEN、CLOSE、CLOSE_TODAY或CLOSE_YESTERDAY
-    offset_flag: Mapped[str] = mapped_column(String(32), nullable=False)
+    offset_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # 实际成交价格：买入使用卖一价，卖出使用买一价
     trade_price: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)

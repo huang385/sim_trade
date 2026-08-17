@@ -34,7 +34,7 @@ class TradeResponse(BaseModel):
     instrument_type: str = "FUTURES"
     # 原订单买卖方向和开平标志
     direction: str
-    offset_flag: str
+    offset_flag: str | None
     # 本次成交价格和手数
     trade_price: Decimal
     trade_volume: int

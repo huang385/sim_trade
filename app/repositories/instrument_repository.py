@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -112,6 +112,75 @@ class InstrumentRepository:
                 Instrument.is_tradeable.is_(True),
             )
             .order_by(Instrument.exchange_id, Instrument.symbol)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
+    def search_tradeable_derivatives(
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[Instrument]:
+        """按相关度搜索可交易期货、商品期权和股指期权。"""
+
+        escaped = (
+            query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        upper_query = escaped.upper()
+        contains = f"%{upper_query}%"
+        prefix = f"{upper_query}%"
+
+        order_book_id = func.upper(Instrument.order_book_id)
+        symbol = func.upper(Instrument.symbol)
+        product_id = func.upper(func.coalesce(Instrument.product_id, ""))
+        instrument_name = func.upper(
+            func.coalesce(Instrument.instrument_name, "")
+        )
+
+        relevance = case(
+            (order_book_id == upper_query, 0),
+            (symbol == upper_query, 0),
+            (order_book_id.like(prefix, escape="\\"), 1),
+            (symbol.like(prefix, escape="\\"), 1),
+            (product_id == upper_query, 2),
+            (product_id.like(prefix, escape="\\"), 3),
+            (instrument_name.like(prefix, escape="\\"), 4),
+            else_=5,
+        )
+        type_order = case(
+            (Instrument.instrument_type == "FUTURES", 0),
+            (Instrument.instrument_type == "FUTURES_OPTION", 1),
+            else_=2,
+        )
+
+        statement = (
+            select(Instrument)
+            .where(
+                Instrument.instrument_type.in_(
+                    ("FUTURES", "FUTURES_OPTION", "INDEX_OPTION")
+                ),
+                Instrument.is_active.is_(True),
+                Instrument.is_tradeable.is_(True),
+                or_(
+                    order_book_id.like(contains, escape="\\"),
+                    symbol.like(contains, escape="\\"),
+                    product_id.like(contains, escape="\\"),
+                    instrument_name.like(contains, escape="\\"),
+                ),
+            )
+            .order_by(
+                relevance,
+                type_order,
+                case((Instrument.expire_date.is_(None), 1), else_=0),
+                Instrument.expire_date,
+                Instrument.strike_price,
+                Instrument.exchange_id,
+                Instrument.symbol,
+            )
+            .limit(limit)
         )
         return db.scalars(statement).all()
 

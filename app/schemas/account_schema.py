@@ -59,6 +59,7 @@ class AccountResponse(BaseModel):
     long_option_market_value: Decimal = Decimal("0")
     short_option_market_value: Decimal = Decimal("0")
     net_option_market_value: Decimal = Decimal("0")
+    stock_market_value: Decimal = Decimal("0")
     risk_available_cash: Decimal = Decimal("0")
     risk_state: str = "NORMAL"
     risk_version: int = 0

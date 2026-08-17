@@ -56,6 +56,10 @@ class Account(Base):
             "short_option_market_value >= 0",
             name="ck_account_short_option_value_nonnegative",
         ),
+        CheckConstraint(
+            "stock_market_value >= 0",
+            name="ck_account_stock_market_value_nonnegative",
+        ),
     )
 
     # 数据库内部自增主键
@@ -206,6 +210,14 @@ class Account(Base):
         Numeric(24, 6),
         nullable=False,
         default=Decimal("0"),
+    )
+
+    # 股票账户未来用于保存股票持仓市值；本阶段只保存该字段，不接入估值。
+    stock_market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6),
+        nullable=False,
+        default=Decimal("0"),
+        server_default="0",
     )
 
     # 使用实时风险保证金计算的可用资金。available_cash继续表示数据库

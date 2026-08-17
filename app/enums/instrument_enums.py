@@ -8,3 +8,4 @@ class InstrumentType(str, Enum):
     FUTURES_OPTION = "FUTURES_OPTION"
     INDEX = "INDEX"
     INDEX_OPTION = "INDEX_OPTION"
+    STOCK = "STOCK"

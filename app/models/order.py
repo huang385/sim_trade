@@ -90,6 +90,11 @@ class Order(Base):
             "('NORMAL', 'MARGIN_DEFICIT', 'VALUATION_UNAVAILABLE')",
             name="ck_order_margin_risk_state_valid",
         ),
+        CheckConstraint(
+            "(instrument_type = 'STOCK' AND offset_flag IS NULL) OR "
+            "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
+            name="ck_order_stock_offset_flag_semantics",
+        ),
     )
 
     # 数据库内部自增主键
@@ -165,9 +170,9 @@ class Order(Base):
         nullable=False,
     )
     # 开平标志：OPEN、CLOSE、CLOSE_TODAY 或 CLOSE_YESTERDAY
-    offset_flag: Mapped[str] = mapped_column(
+    offset_flag: Mapped[str | None] = mapped_column(
         String(32),
-        nullable=False,
+        nullable=True,
     )
     # 订单类型；当前开平仓链路支持 LIMIT
     order_type: Mapped[str] = mapped_column(

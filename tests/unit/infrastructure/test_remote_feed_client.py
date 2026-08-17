@@ -113,7 +113,7 @@ def test_missing_official_sdk_reports_exact_install_requirement(monkeypatch):
     )
     with pytest.raises(
         RemoteMarketDataSdkUnavailableError,
-        match="ymm-live-data-sdk==0.4.0",
+        match="ymm-live-data-sdk==0.7.0",
     ):
         create_remote_sdk_client(make_config())
 
@@ -146,6 +146,41 @@ def test_listeners_start_before_batch_subscription_and_tick_is_copied():
     message["order_book_id"] = "MUTATED"
     assert quotes[0][0]["order_book_id"] == "AG2609"
     assert subscription.is_alive()
+
+
+def test_batch_tick_callback_is_expanded_to_individual_quotes():
+    sdk = FakeSdk()
+    quotes = []
+    errors = []
+    client = RemoteFeedClient(sdk)
+    client.start_tick_callbacks(
+        {"AG2609", "AU2608"},
+        on_quote=lambda data, raw: quotes.append((data, raw)),
+        on_subscribe=Mock(),
+        on_message=Mock(),
+        on_error=errors.append,
+    )
+
+    sdk.feed_handler(
+        (
+            {
+                "action": "feed",
+                "channel": "tick_AG2609",
+                "order_book_id": "AG2609",
+            },
+            {
+                "action": "feed",
+                "channel": "tick_AU2608",
+                "order_book_id": "AU2608",
+            },
+        )
+    )
+
+    assert [item[0]["order_book_id"] for item in quotes] == [
+        "AG2609",
+        "AU2608",
+    ]
+    assert errors == []
 
 
 def test_incremental_subscribe_unsubscribe_uses_public_sdk_methods():

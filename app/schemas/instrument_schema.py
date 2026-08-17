@@ -7,7 +7,7 @@ from app.enums.option_enums import (
     OptionType,
     SettlementType,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class InstrumentCreate(BaseModel):
@@ -67,6 +67,27 @@ class InstrumentCreate(BaseModel):
     # 数据来源
     data_source: str = "MANUAL"
 
+    @model_validator(mode="after")
+    def validate_stock_fields(self):
+        if self.instrument_type != InstrumentType.STOCK:
+            return self
+        if self.market_type != MarketType.STOCK:
+            raise ValueError("股票 Instrument 的 market_type 必须为 STOCK")
+        if self.contract_multiplier != Decimal("1"):
+            raise ValueError("股票 Instrument 的 contract_multiplier 必须为 1")
+        if any(
+            value is not None
+            for value in (
+                self.underlying_instrument_id,
+                self.option_type,
+                self.strike_price,
+                self.exercise_style,
+                self.settlement_type,
+            )
+        ):
+            raise ValueError("股票 Instrument 不能填写期权字段")
+        return self
+
 
 class InstrumentResponse(BaseModel):
     """
@@ -117,3 +138,11 @@ class InstrumentCatalogItem(BaseModel):
     symbol: str
     exchange_id: str
     instrument_name: str | None
+    product_id: str | None = None
+    instrument_type: InstrumentType = InstrumentType.FUTURES
+    underlying_order_book_id: str | None = None
+    option_type: OptionType | None = None
+    strike_price: Decimal | None = None
+    expire_date: date | None = None
+    contract_multiplier: Decimal | None = None
+    price_tick: Decimal | None = None

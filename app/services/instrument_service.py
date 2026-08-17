@@ -16,7 +16,7 @@ from app.models.instrument import Instrument
 from app.repositories.instrument_repository import (
     InstrumentRepository,
 )
-from app.schemas.instrument_schema import InstrumentCreate
+from app.schemas.instrument_schema import InstrumentCatalogItem, InstrumentCreate
 
 
 class InstrumentService:
@@ -81,6 +81,17 @@ class InstrumentService:
                 "非期权合约不能设置标的合约",
                 error_code="UNEXPECTED_UNDERLYING_INSTRUMENT",
             )
+        if request.instrument_type == InstrumentType.STOCK:
+            if request.market_type.value != "STOCK":
+                raise BusinessValidationError(
+                    "股票 Instrument 的 market_type 必须为 STOCK",
+                    error_code="STOCK_MARKET_TYPE_MISMATCH",
+                )
+            if request.contract_multiplier != 1:
+                raise BusinessValidationError(
+                    "股票 Instrument 的 contract_multiplier 必须为 1",
+                    error_code="STOCK_MULTIPLIER_INVALID",
+                )
         if request.instrument_type == InstrumentType.INDEX:
             request.is_tradeable = False
 
@@ -192,6 +203,57 @@ class InstrumentService:
         """返回桌面交易端允许浏览和订阅的有效期货合约。"""
 
         return self.repository.list_tradeable_futures(db)
+
+    def search_tradeable_derivatives(
+        self,
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[InstrumentCatalogItem]:
+        """搜索期货和期权，并批量解析期权标的合约代码。"""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise BusinessValidationError(
+                "搜索关键词不能为空",
+                error_code="INSTRUMENT_SEARCH_QUERY_EMPTY",
+            )
+
+        instruments = self.repository.search_tradeable_derivatives(
+            db,
+            query=normalized_query,
+            limit=limit,
+        )
+        underlying_ids = {
+            item.underlying_instrument_id
+            for item in instruments
+            if item.underlying_instrument_id is not None
+        }
+        underlying_codes = {
+            item.id: item.order_book_id
+            for item in self.repository.list_by_ids(db, underlying_ids)
+        }
+
+        return [
+            InstrumentCatalogItem(
+                order_book_id=item.order_book_id,
+                symbol=item.symbol,
+                exchange_id=item.exchange_id,
+                instrument_name=item.instrument_name,
+                product_id=item.product_id,
+                instrument_type=item.instrument_type,
+                underlying_order_book_id=underlying_codes.get(
+                    item.underlying_instrument_id
+                ),
+                option_type=item.option_type,
+                strike_price=item.strike_price,
+                expire_date=item.expire_date,
+                contract_multiplier=item.contract_multiplier,
+                price_tick=item.price_tick,
+            )
+            for item in instruments
+        ]
 
 
 def get_instrument_service() -> InstrumentService:

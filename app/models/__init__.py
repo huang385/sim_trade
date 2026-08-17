@@ -41,6 +41,8 @@ from app.models.daily_settlement import (
     InstrumentSettlementPrice,
     OptionExpirySettlementDetail,
 )
+from app.models.stock_daily_trading_fact import StockDailyTradingFact
+from app.models.stock_trading_rule import StockTradingRule
 
 
 __all__ = [
@@ -70,4 +72,6 @@ __all__ = [
     "DailyAccountSettlement",
     "DailyPositionSettlement",
     "OptionExpirySettlementDetail",
+    "StockDailyTradingFact",
+    "StockTradingRule",
 ]

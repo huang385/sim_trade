@@ -75,7 +75,7 @@ class CommonOrderCreateRequest(BaseModel):
 class DerivativeOrderCreateRequest(CommonOrderCreateRequest):
     """期货和期权订单字段；衍生品必须明确提交开平标志。"""
 
-    offset_flag: OffsetFlag
+    offset_flag: OffsetFlag | None
 
 
 class OrderCreateRequest(DerivativeOrderCreateRequest):

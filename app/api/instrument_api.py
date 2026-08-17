@@ -31,6 +31,22 @@ catalog_router = APIRouter(
 )
 
 
+@catalog_router.get("/search", response_model=list[InstrumentCatalogItem])
+def search_tradeable_derivatives(
+    q: str = Query(min_length=1, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    service: InstrumentService = Depends(get_instrument_service),
+):
+    """搜索可交易期货与期权，供桌面端合约下拉列表按需加载。"""
+
+    return service.search_tradeable_derivatives(
+        db,
+        query=q,
+        limit=limit,
+    )
+
+
 @catalog_router.get("", response_model=list[InstrumentCatalogItem])
 def list_tradeable_futures(
     db: Session = Depends(get_db),

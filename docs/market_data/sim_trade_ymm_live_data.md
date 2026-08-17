@@ -2,17 +2,17 @@
 
 ## 运行依赖
 
-交易程序使用客户端发行包`ymm-live-data-sdk==0.4.0`，导入模块为
+交易程序使用客户端发行包`ymm-live-data-sdk==0.7.0`，导入模块为
 `ymm_live_data_sdk`。该包由内部发布渠道提供，可使用内部索引安装：
 
 ```powershell
-python -m pip install --index-url <内部Python索引地址> ymm-live-data-sdk==0.4.0
+python -m pip install --index-url <内部Python索引地址> ymm-live-data-sdk==0.7.0
 ```
 
 也可以把管理员发放的客户端wheel放在部署目录后使用相对路径安装：
 
 ```powershell
-python -m pip install .\packages\ymm_live_data_sdk-0.4.0-py3-none-any.whl
+python -m pip install .\packages\ymm_live_data_sdk-0.7.0-py3-none-any.whl
 ```
 
 `docs/reference/ymm_live_data_hub-0.5.6-py3-none-any.whl`是服务端Hub，要求

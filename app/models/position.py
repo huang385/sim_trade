@@ -44,6 +44,10 @@ class Position(Base):
         ),
         CheckConstraint("frozen_volume >= 0", name="ck_position_frozen_nonnegative"),
         CheckConstraint(
+            "settlement_locked_volume >= 0",
+            name="ck_position_settlement_locked_nonnegative",
+        ),
+        CheckConstraint(
             "available_volume >= 0", name="ck_position_available_nonnegative"
         ),
         CheckConstraint(
@@ -51,8 +55,12 @@ class Position(Base):
             name="ck_position_day_volume_balance",
         ),
         CheckConstraint(
-            "available_volume = total_volume - frozen_volume",
+            "available_volume = total_volume - frozen_volume - settlement_locked_volume",
             name="ck_position_available_balance",
+        ),
+        CheckConstraint(
+            "frozen_volume + settlement_locked_volume <= total_volume",
+            name="ck_position_reserved_volume_within_total",
         ),
         CheckConstraint(
             "initial_occupied_margin >= 0",
@@ -115,7 +123,15 @@ class Position(Base):
     # 被尚未完成的平仓订单冻结的持仓数量
     frozen_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    # 可用于平仓的数量，必须等于总持仓量减冻结持仓量
+    # 股票当日买入且尚未完成 T+1 结转的数量；期货和期权始终保持为 0。
+    settlement_locked_volume: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+
+    # 可用于卖出或平仓的数量，扣除委托冻结量和未来 T+1 交收锁定量。
     available_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     # 按成交数量加权计算的平均开仓价格
