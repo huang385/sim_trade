@@ -7,6 +7,7 @@ from app.services.product_strategy_registry import (
     OptionProductStrategy,
     ProductFamily,
     ProductStrategyRegistry,
+    StockProductStrategy,
     resolve_product_strategy,
 )
 
@@ -31,7 +32,15 @@ def test_options_select_option_strategy(instrument_type):
     assert strategy.is_option is True
 
 
-@pytest.mark.parametrize("instrument_type", ["STOCK", "UNKNOWN", "", None])
+def test_stock_selects_non_matching_stock_strategy():
+    strategy = resolve_product_strategy("STOCK")
+
+    assert isinstance(strategy, StockProductStrategy)
+    assert strategy.family == ProductFamily.STOCKS
+    assert strategy.is_option is False
+
+
+@pytest.mark.parametrize("instrument_type", ["UNKNOWN", "", None])
 def test_unregistered_product_fails_explicitly(instrument_type):
     with pytest.raises(BusinessRuleError) as exc_info:
         resolve_product_strategy(instrument_type)

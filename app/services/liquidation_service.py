@@ -113,10 +113,14 @@ class LiquidationService:
         for position, instrument in rows:
             if position.available_volume <= 0:
                 continue
-            is_option = (
-                resolve_product_strategy(position.instrument_type).family
-                == ProductFamily.OPTIONS
-            )
+            product_family = resolve_product_strategy(
+                position.instrument_type
+            ).family
+            # 股票现金订单目前只受理与冻结，尚未实现成交、结算或自动强平；
+            # 绝不能把它当作期货持仓进入衍生品强平计算。
+            if product_family not in {ProductFamily.FUTURES, ProductFamily.OPTIONS}:
+                continue
+            is_option = product_family == ProductFamily.OPTIONS
             if is_option and position.direction == PositionDirection.LONG.value:
                 continue
             if is_option and instrument.underlying_instrument_id in protected_underlyings:

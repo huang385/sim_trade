@@ -1,15 +1,27 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
 
+from app.common.exceptions import (
+    BusinessRuleError,
+    BusinessValidationError,
+    DataAccessError,
+    ResourceConflictError,
+)
 from app.enums.order_enums import OrderDirection
-from app.schemas.order_schema import StockOrderCreateRequest
+from app.repositories.fee_rule_item_repository import FeeRuleItemRepository
+from app.schemas.order_schema import OrderCreateRequest, StockOrderCreateRequest
+from app.services.account_access_scope import AccountAccessScope
 from app.services.accepted_order_event_service import AcceptedOrderEventService
 from app.services.fee_calculator import FeeCalculator, StockFeeComponent
+from app.services.order_validation_service import OrderValidationService
 from app.services.product_strategy_registry import resolve_product_strategy
+from app.services.stock_order_cancellation_service import StockOrderCancellationService
+from app.services.stock_order_service import StockOrderService
 from app.services.stock_order_validation_service import StockOrderValidationService
 
 
@@ -85,15 +97,17 @@ def test_stock_validation_uses_daily_limits_and_configured_lots():
     )
     service.validate_buy(request=_request(), rule=reference.rule)
 
-    with pytest.raises(Exception, match="涨跌停"):
+    with pytest.raises(BusinessValidationError) as exceeded:
         service.resolve_and_validate(
             object(),
             instrument=_instrument(),
             request=_request(limit_price="111"),
             trading_day=date.today(),
         )
-    with pytest.raises(Exception, match="整数倍"):
+    assert exceeded.value.error_code == "STOCK_PRICE_LIMIT_EXCEEDED"
+    with pytest.raises(BusinessValidationError) as lot_mismatch:
         service.validate_buy(request=_request(volume=101), rule=reference.rule)
+    assert lot_mismatch.value.error_code == "STOCK_BUY_LOT_MISMATCH"
 
 
 def test_stock_sell_validation_uses_available_volume_and_long_position():
@@ -107,12 +121,13 @@ def test_stock_sell_validation_uses_available_volume_and_long_position():
         rule=reference.rule,
         position=position,
     )
-    with pytest.raises(Exception, match="可卖数量不足"):
+    with pytest.raises(BusinessRuleError) as insufficient:
         service.validate_sell(
             request=_request(direction="SELL", volume=200),
             rule=reference.rule,
             position=position,
         )
+    assert insufficient.value.error_code == "STOCK_AVAILABLE_VOLUME_INSUFFICIENT"
 
 
 def test_stock_fee_components_are_calculated_individually_with_minimums():
@@ -161,3 +176,146 @@ def test_stock_outbox_events_are_acknowledged_without_matching_index():
     )
 
     assert event.event_type == "STOCK_ORDER_ACCEPTED"
+
+
+def _existing_order(*, instrument_type="STOCK", offset_flag=None):
+    return SimpleNamespace(
+        instrument_type=instrument_type,
+        account_id="STOCK-A",
+        exchange_id="SSE",
+        symbol="600519",
+        direction="BUY",
+        offset_flag=offset_flag,
+        order_type="LIMIT",
+        submitted_limit_price=Decimal("100.000000"),
+        limit_price=Decimal("100.000000"),
+        total_volume=100,
+    )
+
+
+def test_stock_idempotency_compares_missing_offset_flag_safely():
+    OrderValidationService.validate_idempotent_order_request(
+        existing_order=_existing_order(), request=_request()
+    )
+
+
+def test_cross_product_idempotency_key_is_rejected_before_field_comparison():
+    with pytest.raises(ResourceConflictError) as stock_conflict:
+        OrderValidationService.validate_idempotent_order_request(
+            existing_order=_existing_order(instrument_type="FUTURES", offset_flag="OPEN"),
+            request=_request(),
+        )
+    assert stock_conflict.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+
+    with pytest.raises(ResourceConflictError) as derivative_conflict:
+        OrderValidationService.validate_idempotent_order_request(
+            existing_order=_existing_order(),
+            request=OrderCreateRequest(
+                client_order_id="STOCK-1",
+                account_id="STOCK-A",
+                exchange_id="SSE",
+                symbol="600519",
+                direction="BUY",
+                offset_flag="OPEN",
+                order_type="LIMIT",
+                limit_price="100",
+                volume=100,
+            ),
+        )
+    assert derivative_conflict.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_stock_service_idempotent_retry_does_not_freeze_or_emit_again(monkeypatch):
+    import app.services.stock_order_service as module
+
+    monkeypatch.setattr(module.settings, "stock_order_entry_enabled", True)
+    existing = _existing_order()
+    existing.order_id = "SO-EXISTING"
+    account = SimpleNamespace(account_type="STOCK")
+    account_repository = Mock()
+    account_repository.get_by_account_id.return_value = account
+    order_repository = Mock()
+    order_repository.get_by_client_order_id.return_value = existing
+    snapshots = Mock()
+    outbox = Mock()
+    db = Mock()
+    service = StockOrderService(
+        account_repository=account_repository,
+        order_repository=order_repository,
+        snapshot_repository=snapshots,
+        outbox_repository=outbox,
+    )
+
+    result = service.create_order(
+        db=db, request=_request(), access_scope=AccountAccessScope.admin()
+    )
+
+    assert result is existing
+    db.expunge.assert_called_once_with(existing)
+    db.commit.assert_called_once()
+    account_repository.get_by_account_id_for_update.assert_not_called()
+    snapshots.add_all.assert_not_called()
+    outbox.create_event.assert_not_called()
+
+
+def test_duplicate_highest_priority_stock_fee_rule_fails_closed():
+    first = SimpleNamespace(fee_type="BROKER_COMMISSION", id=1)
+    second = SimpleNamespace(fee_type="BROKER_COMMISSION", id=2)
+    db = Mock()
+    db.execute.return_value.all.return_value = [(first, 1), (second, 1)]
+
+    with pytest.raises(DataAccessError) as ambiguous:
+        FeeRuleItemRepository.resolve_stock_components(
+            db,
+            instrument_id=1,
+            product_id="600519",
+            exchange_id="SSE",
+            direction="BUY",
+            trading_day=date.today(),
+        )
+
+    assert ambiguous.value.error_code == "STOCK_FEE_COMPONENT_AMBIGUOUS"
+
+
+def test_stock_sell_cancel_rejects_partial_frozen_volume_and_rolls_back(monkeypatch):
+    import app.services.stock_order_cancellation_service as module
+
+    monkeypatch.setattr(module.settings, "stock_order_entry_enabled", True)
+    order = SimpleNamespace(
+        instrument_type="STOCK",
+        account_id="STOCK-A",
+        status="ACCEPTED",
+        remaining_volume=100,
+        frozen_cash=Decimal("0"),
+        frozen_commission=Decimal("0"),
+        frozen_margin=Decimal("0"),
+        frozen_position_volume=20,
+        direction="SELL",
+        cancelled_volume=0,
+        traded_volume=0,
+    )
+    account = SimpleNamespace(account_type="STOCK")
+    orders = Mock()
+    orders.get_by_order_id_for_update.return_value = order
+    accounts = Mock()
+    accounts.get_by_account_id_for_update.return_value = account
+    outbox = Mock()
+    db = Mock()
+    service = StockOrderCancellationService(
+        order_repository=orders,
+        account_repository=accounts,
+        outbox_repository=outbox,
+    )
+
+    with pytest.raises(DataAccessError) as inconsistent:
+        service.cancel_order(
+            db=db,
+            order_id="SO-1",
+            request=module.OrderCancelRequest(account_id="STOCK-A"),
+            access_scope=AccountAccessScope.admin(),
+        )
+
+    assert inconsistent.value.error_code == "STOCK_CANCEL_STATE_INCONSISTENT"
+    assert order.status == "ACCEPTED"
+    db.rollback.assert_called_once()
+    outbox.create_event.assert_not_called()

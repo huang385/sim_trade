@@ -52,6 +52,10 @@ class RealtimeEventProjectionWorker:
             self.consumer.acknowledge(message_id)
             return
         try:
+            if RealtimeEventProjectionService.is_intentionally_ignored(fields):
+                self.consumer.clear_failure(message_id)
+                self.consumer.acknowledge(message_id)
+                return
             envelope = RealtimeEventProjectionService.project(
                 source_message_id=message_id,
                 fields=fields,

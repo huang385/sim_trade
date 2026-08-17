@@ -378,7 +378,9 @@ def test_create_close_order_freezes_commission_and_position(
     position = SimpleNamespace(
         position_id="P-1",
         instrument_type="FUTURES",
+        total_volume=5,
         frozen_volume=0,
+        settlement_locked_volume=0,
         available_volume=5,
         updated_at=None,
     )
@@ -465,7 +467,9 @@ def test_plain_close_splits_yesterday_and_today_frozen_commission():
     position = SimpleNamespace(
         position_id="P-1",
         instrument_type="FUTURES",
+        total_volume=10,
         frozen_volume=0,
+        settlement_locked_volume=0,
         available_volume=10,
         updated_at=None,
     )
@@ -547,7 +551,9 @@ def test_close_order_freeze_uses_bucket_total_across_multiple_details():
     position = SimpleNamespace(
         position_id="P-1",
         instrument_type="FUTURES",
+        total_volume=2,
         frozen_volume=0,
+        settlement_locked_volume=0,
         available_volume=2,
         updated_at=None,
     )

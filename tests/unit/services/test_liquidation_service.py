@@ -1,10 +1,6 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
-import pytest
-
-from app.common.exceptions import BusinessRuleError
-
 from app.services.liquidation_service import LiquidationService
 
 
@@ -54,11 +50,11 @@ def test_no_candidate_when_only_protected_option_portfolio_exists():
     assert LiquidationService._select(rows, Decimal("1")) is None
 
 
-def test_unknown_product_never_enters_futures_liquidation():
-    with pytest.raises(BusinessRuleError) as exc_info:
+def test_stock_never_enters_derivative_liquidation():
+    assert (
         LiquidationService._select(
-            [row(position_id="UNKNOWN", kind="STOCK")],
+            [row(position_id="STOCK", kind="STOCK")],
             Decimal("1"),
         )
-
-    assert exc_info.value.error_code == "PRODUCT_STRATEGY_NOT_REGISTERED"
+        is None
+    )

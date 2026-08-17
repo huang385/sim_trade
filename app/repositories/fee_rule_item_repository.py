@@ -1,8 +1,10 @@
 from datetime import date
+from collections.abc import Sequence
 
 from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
+from app.common.exceptions import DataAccessError
 from app.models.fee_rule_item import FeeRuleItem
 
 
@@ -82,8 +84,8 @@ class FeeRuleItemRepository:
             ),
             else_=3,
         )
-        rows = db.scalars(
-            select(FeeRuleItem)
+        rows = db.execute(
+            select(FeeRuleItem, priority.label("scope_priority"))
             .where(
                 FeeRuleItem.exchange_id == exchange_id,
                 FeeRuleItem.instrument_type == "STOCK",
@@ -106,8 +108,21 @@ class FeeRuleItemRepository:
             .order_by(FeeRuleItem.fee_type, priority, FeeRuleItem.id.desc())
         ).all()
         selected: dict[str, FeeRuleItem] = {}
-        for row in rows:
-            selected.setdefault(row.fee_type, row)
+        selected_priority: dict[str, int] = {}
+        for row, scope_priority in rows:
+            fee_type = row.fee_type
+            priority_value = int(scope_priority)
+            current_priority = selected_priority.get(fee_type)
+            if current_priority is None:
+                selected[fee_type] = row
+                selected_priority[fee_type] = priority_value
+                continue
+            if current_priority == priority_value:
+                # 同一费用类型在最高适用范围内不唯一时，不能靠数据库排序猜测。
+                raise DataAccessError(
+                    "股票手续费规则存在同优先级歧义",
+                    error_code="STOCK_FEE_COMPONENT_AMBIGUOUS",
+                )
         return tuple(selected.values())
 
     @staticmethod

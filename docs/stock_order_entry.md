@@ -10,8 +10,8 @@
 `StockDailyTradingFact` 和 Instrument 校验请求；不会信任客户端传入的用户、合约类型或交易日。
 
 `STOCK_ORDER_ENTRY_ENABLED` 默认是 `false`，显式开启后才受理外部股票订单。
-`STOCK_MATCHING_ENABLED` 在本阶段保持 `false`；股票 Outbox 事件会被确认，但不会进入活动订单索引、
-衍生品撮合或成交结算链路。
+`STOCK_MATCHING_ENABLED` 是下一阶段预留开关，在本阶段不参与任何撮合逻辑；即使误设为 `true`，股票
+Outbox 事件仍只会被确认，不会进入活动订单索引、衍生品撮合或成交结算链路。
 
 买单冻结：
 

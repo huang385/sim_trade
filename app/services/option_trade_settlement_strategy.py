@@ -257,6 +257,7 @@ class OptionTradeSettlementStrategy:
                 today_volume=0,
                 yesterday_volume=0,
                 frozen_volume=0,
+                settlement_locked_volume=0,
                 available_volume=0,
                 average_open_price=Decimal("0"),
                 position_cost=Decimal("0"),

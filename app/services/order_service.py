@@ -681,7 +681,10 @@ class OrderService:
                     "账户不存在",
                     error_code="ACCOUNT_NOT_FOUND",
                 )
-            if account.account_type == AccountType.STOCK.value:
+            if (
+                getattr(account, "account_type", AccountType.FUTURES.value)
+                == AccountType.STOCK.value
+            ):
                 raise BusinessRuleError(
                     "衍生品订单不能使用 STOCK 账户",
                     error_code="DERIVATIVE_ACCOUNT_TYPE_INVALID",

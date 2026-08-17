@@ -277,8 +277,7 @@ def test_stock_rule_schema_rejects_zero_limits_and_unknown_limit_type():
         )
     with pytest.raises(ValueError):
         StockTradingRuleCreate(
-            **values,
-            price_limit_type="UNKNOWN",
+            **(values | {"price_limit_type": "UNKNOWN"}),
         )
 
 
@@ -620,6 +619,14 @@ def _order(order_id: str, **overrides) -> Order:
         "frozen_position_volume": 0,
     }
     values.update(overrides)
+    if values["instrument_type"] == "STOCK":
+        values.update(
+            {
+                "commission_type": None,
+                "commission_parameter": None,
+                "commission_contract_multiplier": None,
+            }
+        )
     return Order(**values)
 
 

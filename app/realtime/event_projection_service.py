@@ -27,9 +27,22 @@ SOURCE_EVENT_MAPPING = {
     "LIQUIDATION_FAILED": RealtimeEventType.LIQUIDATION_FAILED,
 }
 
+# 股票受理阶段尚未提供完整的实时业务事件，因此只对这两个已知 Outbox
+# 事件明确忽略；其他未知事件仍按原有失败、重试和死信策略处理。
+INTENTIONALLY_IGNORED_SOURCE_EVENT_TYPES = frozenset(
+    {"STOCK_ORDER_ACCEPTED", "STOCK_ORDER_CANCELLED"}
+)
+
 
 class RealtimeEventProjectionService:
     """把已提交Outbox消息转换为不参与业务计算的统一绝对值事件。"""
+
+    @staticmethod
+    def is_intentionally_ignored(fields: dict[str, str]) -> bool:
+        return (
+            fields.get("event_type", "").strip()
+            in INTENTIONALLY_IGNORED_SOURCE_EVENT_TYPES
+        )
 
     @staticmethod
     def project(

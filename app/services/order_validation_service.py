@@ -9,7 +9,7 @@ from app.common.exceptions import (
 from app.enums.order_enums import OffsetFlag, OrderType
 from app.models.instrument import Instrument
 from app.models.order import Order
-from app.schemas.order_schema import OrderCreateRequest
+from app.schemas.order_schema import OrderCreateRequest, StockOrderCreateRequest
 
 
 class OrderValidationService:
@@ -121,7 +121,7 @@ class OrderValidationService:
     def validate_idempotent_order_request(
         *,
         existing_order: Order,
-        request: OrderCreateRequest,
+        request: OrderCreateRequest | StockOrderCreateRequest,
     ) -> None:
         """
         校验同一client_order_id是否仍代表同一笔业务请求。
@@ -130,7 +130,27 @@ class OrderValidationService:
         Decimal精度比较，禁止经过float。任一字段变化都拒绝复用幂等键。
         """
 
+        request_instrument_type = (
+            "STOCK" if isinstance(request, StockOrderCreateRequest) else None
+        )
+        existing_instrument_type = getattr(
+            existing_order, "instrument_type", "FUTURES"
+        )
+        if (
+            request_instrument_type is not None
+            and existing_instrument_type != request_instrument_type
+        ) or (
+            request_instrument_type is None
+            and existing_instrument_type == "STOCK"
+        ):
+            raise ResourceConflictError(
+                "client_order_id 已被不同产品类型的订单使用",
+                error_code="IDEMPOTENCY_KEY_REUSED",
+            )
+
+        request_offset_flag = getattr(request, "offset_flag", None)
         existing_fields = (
+            existing_instrument_type,
             existing_order.account_id.strip().upper(),
             existing_order.exchange_id.strip().upper(),
             existing_order.symbol.strip().upper(),
@@ -147,11 +167,12 @@ class OrderValidationService:
             existing_order.total_volume,
         )
         request_fields = (
+            request_instrument_type or existing_instrument_type,
             request.account_id.strip().upper(),
             request.exchange_id.strip().upper(),
             request.symbol.strip().upper(),
             getattr(request.direction, "value", request.direction),
-            getattr(request.offset_flag, "value", request.offset_flag),
+            getattr(request_offset_flag, "value", request_offset_flag),
             getattr(request.order_type, "value", request.order_type),
             (
                 quantize_money(request.limit_price)

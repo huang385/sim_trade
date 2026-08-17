@@ -134,7 +134,7 @@ class StockOrderCancellationService:
                         "股票卖出订单不应冻结现金或手续费",
                         error_code="STOCK_CANCEL_STATE_INCONSISTENT",
                     )
-                if released_position < 0 or released_position > order.remaining_volume:
+                if released_position != order.remaining_volume:
                     raise DataAccessError(
                         "股票卖出订单冻结数量不一致",
                         error_code="STOCK_CANCEL_STATE_INCONSISTENT",
