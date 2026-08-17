@@ -913,7 +913,11 @@ class OrderService:
                         ),
                     )
                 position.frozen_volume += request.volume
-                position.available_volume -= request.volume
+                position.available_volume = (
+                    position.total_volume
+                    - position.frozen_volume
+                    - position.settlement_locked_volume
+                )
                 position.updated_at = accepted_at
                 frozen_position_volume = request.volume
 

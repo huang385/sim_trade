@@ -1110,7 +1110,18 @@ class DailySettlementService:
                         position.today_volume = 0
                         position.yesterday_volume = projection.ending_volume
                         position.frozen_volume = 0
-                        position.available_volume = projection.ending_volume
+                        if (
+                            position.settlement_locked_volume
+                            > projection.ending_volume
+                        ):
+                            raise DataAccessError(
+                                "日终重放后的交收锁定数量超过持仓总量",
+                                error_code="REPLAY_SETTLEMENT_LOCKED_VOLUME_MISMATCH",
+                            )
+                        position.available_volume = (
+                            projection.ending_volume
+                            - position.settlement_locked_volume
+                        )
                         remaining_cost = quantize_money(
                             sum(
                                 Decimal(item.open_price)
@@ -1723,7 +1734,8 @@ class DailySettlementService:
                         text(
                             "SELECT count(*) FROM position WHERE "
                             "total_volume <> today_volume + yesterday_volume "
-                            "OR available_volume <> total_volume - frozen_volume"
+                            "OR available_volume <> total_volume - frozen_volume "
+                            "- settlement_locked_volume"
                         )
                     )
                     or 0

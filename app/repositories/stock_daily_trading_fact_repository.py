@@ -6,6 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
+from app.enums.instrument_enums import InstrumentType
+from app.enums.reference_data_enums import StockDailyTradingFactUpsertResult
+from app.models.instrument import Instrument
 from app.models.stock_daily_trading_fact import StockDailyTradingFact
 
 
@@ -61,7 +64,16 @@ class StockDailyTradingFactRepository:
         data_source: str,
         synced_at: datetime,
         updated_at: datetime,
-    ) -> None:
+    ) -> StockDailyTradingFactUpsertResult:
+        """写入单调的逐日事实，拒绝旧事件覆盖新状态。"""
+
+        instrument = db.get(Instrument, instrument_id)
+        if (
+            instrument is None
+            or instrument.instrument_type != InstrumentType.STOCK.value
+        ):
+            raise ValueError("股票逐日事实只能关联 STOCK Instrument")
+
         statement = insert(StockDailyTradingFact).values(
             instrument_id=instrument_id,
             trading_day=trading_day,
@@ -74,22 +86,42 @@ class StockDailyTradingFactRepository:
             source_event_id=source_event_id,
             data_source=data_source,
             synced_at=synced_at,
+            created_at=updated_at,
             updated_at=updated_at,
         )
-        db.execute(
-            statement.on_conflict_do_update(
-                constraint="uq_stock_daily_trading_fact_instrument_day",
-                set_={
-                    "previous_close": statement.excluded.previous_close,
-                    "upper_limit_price": statement.excluded.upper_limit_price,
-                    "lower_limit_price": statement.excluded.lower_limit_price,
-                    "is_suspended": statement.excluded.is_suspended,
-                    "is_special_treatment": statement.excluded.is_special_treatment,
-                    "is_tradeable": statement.excluded.is_tradeable,
-                    "source_event_id": statement.excluded.source_event_id,
-                    "data_source": statement.excluded.data_source,
-                    "synced_at": statement.excluded.synced_at,
-                    "updated_at": statement.excluded.updated_at,
-                },
-            )
+        inserted_id = db.scalar(
+            statement.on_conflict_do_nothing(
+                constraint="uq_stock_daily_trading_fact_instrument_day"
+            ).returning(StockDailyTradingFact.id)
         )
+        if inserted_id is not None:
+            return StockDailyTradingFactUpsertResult.INSERTED
+
+        current = db.scalar(
+            select(StockDailyTradingFact)
+            .where(
+                StockDailyTradingFact.instrument_id == instrument_id,
+                StockDailyTradingFact.trading_day == trading_day,
+            )
+            .with_for_update()
+        )
+        if current is None:
+            raise RuntimeError("股票逐日事实并发写入后未找到目标记录")
+        if current.source_event_id == source_event_id:
+            return StockDailyTradingFactUpsertResult.DUPLICATE
+        if synced_at < current.synced_at:
+            return StockDailyTradingFactUpsertResult.IGNORED_STALE
+        if synced_at == current.synced_at:
+            return StockDailyTradingFactUpsertResult.CONFLICT_SAME_TIMESTAMP
+
+        current.previous_close = previous_close
+        current.upper_limit_price = upper_limit_price
+        current.lower_limit_price = lower_limit_price
+        current.is_suspended = is_suspended
+        current.is_special_treatment = is_special_treatment
+        current.is_tradeable = is_tradeable
+        current.source_event_id = source_event_id
+        current.data_source = data_source
+        current.synced_at = synced_at
+        current.updated_at = updated_at
+        return StockDailyTradingFactUpsertResult.UPDATED

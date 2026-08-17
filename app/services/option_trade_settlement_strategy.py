@@ -295,7 +295,11 @@ class OptionTradeSettlementStrategy:
         )
         position.total_volume = new_volume
         position.today_volume += fill_volume
-        position.available_volume += fill_volume
+        position.available_volume = (
+            position.total_volume
+            - position.frozen_volume
+            - position.settlement_locked_volume
+        )
         position.position_cost = quantize_money(
             position.position_cost + premium
         )

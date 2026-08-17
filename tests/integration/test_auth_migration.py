@@ -97,8 +97,8 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            # 股票数据基础迁移是当前 Head。
-            assert revision == "20260817_0023"
+            # 股票参考数据完整性迁移是当前 Head。
+            assert revision == "20260817_0024"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -119,7 +119,7 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
                 "'daily_account_settlement', 'daily_position_settlement', "
                 "'option_expiry_settlement_detail')"
             ).fetchone()[0]
-            assert revision == "20260817_0023"
+            assert revision == "20260817_0024"
             assert settlement_tables == 5
 
 

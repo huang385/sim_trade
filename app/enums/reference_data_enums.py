@@ -22,3 +22,20 @@ class ReferenceDataSource(str, Enum):
 
     # 自有数据系统同步
     INTERNAL = "INTERNAL"
+
+
+class StockPriceLimitType(str, Enum):
+    """股票逐日涨跌停规则的表达方式。"""
+
+    RATIO = "RATIO"
+    NONE = "NONE"
+
+
+class StockDailyTradingFactUpsertResult(str, Enum):
+    """逐日事实同步写入的确定性结果。"""
+
+    INSERTED = "INSERTED"
+    UPDATED = "UPDATED"
+    DUPLICATE = "DUPLICATE"
+    IGNORED_STALE = "IGNORED_STALE"
+    CONFLICT_SAME_TIMESTAMP = "CONFLICT_SAME_TIMESTAMP"

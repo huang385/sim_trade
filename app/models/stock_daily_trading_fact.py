@@ -34,8 +34,13 @@ class StockDailyTradingFact(Base):
         ),
         CheckConstraint(
             "(upper_limit_price IS NULL AND lower_limit_price IS NULL) OR "
-            "(upper_limit_price > 0 AND lower_limit_price > 0)",
+            "(upper_limit_price > 0 AND lower_limit_price > 0 AND "
+            "upper_limit_price >= lower_limit_price)",
             name="ck_stock_daily_trading_fact_limit_prices_valid",
+        ),
+        CheckConstraint(
+            "NOT is_suspended OR NOT is_tradeable",
+            name="ck_stock_daily_trading_fact_suspension_not_tradeable",
         ),
         CheckConstraint(
             "source_event_id <> '' AND data_source <> ''",

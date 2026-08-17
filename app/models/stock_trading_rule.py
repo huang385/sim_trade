@@ -34,12 +34,16 @@ class StockTradingRule(Base):
             name="ck_stock_trading_rule_volume_and_settlement_valid",
         ),
         CheckConstraint(
-            "normal_price_limit_ratio IS NULL OR normal_price_limit_ratio >= 0",
+            "normal_price_limit_ratio IS NULL OR normal_price_limit_ratio > 0",
             name="ck_stock_trading_rule_normal_limit_nonnegative",
         ),
         CheckConstraint(
-            "special_price_limit_ratio IS NULL OR special_price_limit_ratio >= 0",
+            "special_price_limit_ratio IS NULL OR special_price_limit_ratio > 0",
             name="ck_stock_trading_rule_special_limit_nonnegative",
+        ),
+        CheckConstraint(
+            "price_limit_type IN ('RATIO', 'NONE')",
+            name="ck_stock_trading_rule_price_limit_type_valid",
         ),
         CheckConstraint(
             "effective_to IS NULL OR effective_to >= effective_from",

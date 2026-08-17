@@ -423,7 +423,11 @@ class OrderCancellationService:
                         error_code="CANCEL_POSITION_INCONSISTENT",
                     )
                 position.frozen_volume -= cancel_volume
-                position.available_volume += cancel_volume
+                position.available_volume = (
+                    position.total_volume
+                    - position.frozen_volume
+                    - position.settlement_locked_volume
+                )
                 position.updated_at = cancelled_at
                 self.freeze_service.release_close_order_commission(
                     account=account,

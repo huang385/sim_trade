@@ -23,6 +23,14 @@ class StockDailyTradingFactUpsert(BaseModel):
     def validate_limit_price_pair(self):
         if (self.upper_limit_price is None) != (self.lower_limit_price is None):
             raise ValueError("涨跌停价格必须同时提供或同时为空")
+        if (
+            self.upper_limit_price is not None
+            and self.lower_limit_price is not None
+            and self.upper_limit_price < self.lower_limit_price
+        ):
+            raise ValueError("涨停价不能低于跌停价")
+        if self.is_suspended and self.is_tradeable:
+            raise ValueError("停牌股票不能标记为可交易")
         return self
 
 

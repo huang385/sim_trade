@@ -957,7 +957,9 @@ class CloseTradeSettlementHandler:
             if item.open_trading_day < order.trading_day
         )
         position.available_volume = (
-            position.total_volume - position.frozen_volume
+            position.total_volume
+            - position.frozen_volume
+            - position.settlement_locked_volume
         )
         if position.total_volume == 0:
             position.average_open_price = Decimal("0.000000")
@@ -992,7 +994,9 @@ class CloseTradeSettlementHandler:
             position.total_volume
             != position.today_volume + position.yesterday_volume
             or position.available_volume
-            != position.total_volume - position.frozen_volume
+            != position.total_volume
+            - position.frozen_volume
+            - position.settlement_locked_volume
             or order.total_volume
             != order.traded_volume
             + order.remaining_volume

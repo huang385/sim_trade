@@ -14,6 +14,8 @@ from app.enums.order_enums import (
 from app.enums.reference_data_enums import (
     CommissionType,
     ReferenceDataSource,
+    StockDailyTradingFactUpsertResult,
+    StockPriceLimitType,
 )
 from app.enums.auth_enums import TokenType, UserRole, UserStatus
 from app.enums.instrument_enums import InstrumentType
@@ -36,6 +38,8 @@ __all__ = [
     "MarketType",
     "CommissionType",
     "ReferenceDataSource",
+    "StockDailyTradingFactUpsertResult",
+    "StockPriceLimitType",
     "OrderDirection",
     "OffsetFlag",
     "OrderType",

@@ -4,6 +4,7 @@ from typing import Sequence
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.enums.instrument_enums import InstrumentType
 from app.models.instrument import Instrument
 from app.models.stock_trading_rule import StockTradingRule
 
@@ -23,6 +24,23 @@ class StockTradingRuleRepository:
                 StockTradingRule.instrument_id == instrument_id,
                 StockTradingRule.rule_version == rule_version,
             )
+        )
+
+    @staticmethod
+    def get_stock_instrument_for_update(
+        db: Session,
+        *,
+        instrument_id: int,
+    ) -> Instrument | None:
+        """串行化同一股票的规则写入，不扩大到其他股票。"""
+
+        return db.scalar(
+            select(Instrument)
+            .where(
+                Instrument.id == instrument_id,
+                Instrument.instrument_type == InstrumentType.STOCK.value,
+            )
+            .with_for_update()
         )
 
     @staticmethod
@@ -72,8 +90,11 @@ class StockTradingRuleRepository:
     def create(db: Session, rule: StockTradingRule) -> None:
         """新增规则前拒绝版本重复和会导致歧义的生效区间重叠。"""
 
-        instrument = db.get(Instrument, rule.instrument_id)
-        if instrument is None or instrument.instrument_type != "STOCK":
+        instrument = StockTradingRuleRepository.get_stock_instrument_for_update(
+            db,
+            instrument_id=rule.instrument_id,
+        )
+        if instrument is None:
             raise ValueError("股票交易规则只能关联 STOCK Instrument")
         if StockTradingRuleRepository.get_by_instrument_and_version(
             db,
