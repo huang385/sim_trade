@@ -43,6 +43,22 @@ class FeeRuleSnapshot:
 
 
 @dataclass(frozen=True)
+class StockFeeComponent:
+    """股票订单受理时解析出的单个费用组件。"""
+
+    fee_type: str
+    rule_item_id: int
+    rule_version: str
+    direction: str
+    calculation_type: str
+    commission_parameter: Decimal
+    minimum_fee: Decimal
+    aggregation_scope: str
+    contract_multiplier: Decimal
+    data_source: str
+
+
+@dataclass(frozen=True)
 class FeeBucketKey:
     """
     手续费桶的稳定分组键。
@@ -270,6 +286,35 @@ class FeeCalculator:
         # 当前版本不额外应用 discount_rate；规则同步时写入的参数应当已经
         # 表示最终费率，避免订单接受和成交阶段重复折扣。
         return quantize_money(fee)
+
+    @classmethod
+    def calculate_stock_components(
+        cls,
+        *,
+        price: Decimal,
+        volume: int,
+        components: Sequence[StockFeeComponent],
+    ) -> Decimal:
+        """逐组件量化并应用最低收费，禁止合并费率后再计算。"""
+
+        total = Decimal("0")
+        seen_types: set[str] = set()
+        for component in components:
+            if component.fee_type in seen_types:
+                raise BusinessValidationError(
+                    "同一订单不能解析到重复手续费类型",
+                    error_code="DUPLICATE_STOCK_FEE_COMPONENT",
+                )
+            seen_types.add(component.fee_type)
+            raw_fee = cls.calculate_from_snapshot(
+                price=price,
+                volume=volume,
+                commission_type=component.calculation_type,
+                commission_parameter=component.commission_parameter,
+                contract_multiplier=component.contract_multiplier,
+            )
+            total += max(raw_fee, quantize_money(component.minimum_fee))
+        return quantize_money(total)
 
     @classmethod
     def calculate_bucket_allocations(

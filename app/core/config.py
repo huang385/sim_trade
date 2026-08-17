@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     option_exercise_enabled: bool = False
     option_collateral_ratio: Decimal = Decimal("0")
 
+    # 股票受理与撮合严格分开：本阶段只允许显式开启订单受理，撮合保持关闭。
+    stock_order_entry_enabled: bool = False
+    stock_matching_enabled: bool = False
+
     # 订单事件消费配置。Consumer 名称为空时由主机名和进程号自动生成。
     order_stream_name: str = "stream:orders"
     order_consumer_group: str = "group:order-engine"

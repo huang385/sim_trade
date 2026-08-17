@@ -175,6 +175,63 @@ class OrderFreezeService:
         )
 
     @staticmethod
+    def freeze_stock_buy(
+        *,
+        account: Account | None,
+        frozen_cash: Decimal,
+        frozen_commission: Decimal,
+    ) -> None:
+        """股票买入只冻结成交额和预计费用，不触及保证金或风险保证金口径。"""
+
+        OrderFreezeService.validate_account_tradable(account)
+        if frozen_cash < Decimal("0") or frozen_commission < Decimal("0"):
+            raise BusinessValidationError(
+                "股票买入冻结金额不能小于 0",
+                error_code="INVALID_STOCK_FROZEN_RESOURCE",
+            )
+        required = quantize_money(frozen_cash + frozen_commission)
+        if quantize_money(account.available_cash) < required:
+            raise BusinessRuleError(
+                "账户可用资金不足", error_code="INSUFFICIENT_AVAILABLE_CASH"
+            )
+        account.available_cash = quantize_money(account.available_cash - required)
+        account.frozen_cash = quantize_money(account.frozen_cash + frozen_cash)
+        account.frozen_commission = quantize_money(
+            account.frozen_commission + frozen_commission
+        )
+
+    @staticmethod
+    def release_stock_buy(
+        *,
+        account: Account | None,
+        frozen_cash: Decimal,
+        frozen_commission: Decimal,
+    ) -> None:
+        """撤销股票买单时，只反向释放本订单剩余冻结。"""
+
+        if account is None:
+            raise ResourceNotFoundError(
+                "账户不存在", error_code="ACCOUNT_NOT_FOUND"
+            )
+        cash = quantize_money(frozen_cash)
+        commission = quantize_money(frozen_commission)
+        if cash < Decimal("0") or commission < Decimal("0"):
+            raise BusinessValidationError(
+                "股票释放金额不能小于 0",
+                error_code="INVALID_STOCK_RELEASE_RESOURCE",
+            )
+        if account.frozen_cash < cash or account.frozen_commission < commission:
+            raise DataAccessError(
+                "账户冻结资金不足以释放股票订单",
+                error_code="STOCK_CANCEL_FROZEN_RESOURCE_INCONSISTENT",
+            )
+        account.available_cash = quantize_money(account.available_cash + cash + commission)
+        account.frozen_cash = quantize_money(account.frozen_cash - cash)
+        account.frozen_commission = quantize_money(
+            account.frozen_commission - commission
+        )
+
+    @staticmethod
     def freeze_close_order_commission(
         *,
         account: Account | None,

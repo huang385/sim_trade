@@ -95,6 +95,15 @@ class Order(Base):
             "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
             name="ck_order_stock_offset_flag_semantics",
         ),
+        CheckConstraint(
+            "(instrument_type = 'STOCK' AND commission_type IS NULL "
+            "AND commission_parameter IS NULL "
+            "AND commission_contract_multiplier IS NULL) OR "
+            "(instrument_type <> 'STOCK' AND commission_type IS NOT NULL "
+            "AND commission_parameter IS NOT NULL "
+            "AND commission_contract_multiplier IS NOT NULL)",
+            name="ck_order_stock_fee_snapshot_semantics",
+        ),
     )
 
     # 数据库内部自增主键
@@ -183,17 +192,17 @@ class Order(Base):
     # 手续费规则快照。预计冻结使用限价，实际成交使用成交价，但二者必须
     # 使用订单接受时固定下来的计算方式、参数和合约乘数，不能重新读取
     # 可能已经更新的当前手续费规则。
-    commission_type: Mapped[str] = mapped_column(
+    commission_type: Mapped[str | None] = mapped_column(
         String(32),
-        nullable=False,
+        nullable=True,
     )
-    commission_parameter: Mapped[Decimal] = mapped_column(
+    commission_parameter: Mapped[Decimal | None] = mapped_column(
         Numeric(24, 12),
-        nullable=False,
+        nullable=True,
     )
-    commission_contract_multiplier: Mapped[Decimal] = mapped_column(
+    commission_contract_multiplier: Mapped[Decimal | None] = mapped_column(
         Numeric(24, 6),
-        nullable=False,
+        nullable=True,
     )
     fee_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fee_rule_version: Mapped[str | None] = mapped_column(

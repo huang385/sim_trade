@@ -44,6 +44,18 @@ class OptionProductStrategy:
         return True
 
 
+@dataclass(frozen=True)
+class StockProductStrategy:
+    """股票只注册产品身份；撮合策略在下一阶段才会注册。"""
+
+    family: ProductFamily = ProductFamily.STOCKS
+    instrument_types: frozenset[str] = frozenset({InstrumentType.STOCK.value})
+
+    @property
+    def is_option(self) -> bool:
+        return False
+
+
 class ProductStrategyRegistry:
     """只根据服务端产品事实分发；未注册产品禁止回退到期货。"""
 
@@ -82,6 +94,7 @@ class ProductStrategyRegistry:
 product_strategy_registry = ProductStrategyRegistry()
 product_strategy_registry.register(FuturesProductStrategy())
 product_strategy_registry.register(OptionProductStrategy())
+product_strategy_registry.register(StockProductStrategy())
 
 
 def resolve_product_strategy(instrument_type: object) -> ProductStrategy:

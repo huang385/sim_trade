@@ -20,6 +20,7 @@ from app.common.decimal_utils import quantize_money
 from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
 from app.enums.instrument_enums import InstrumentType
+from app.enums.account_enums import AccountType
 from app.enums.order_enums import (
     OffsetFlag,
     OrderDirection,
@@ -679,6 +680,11 @@ class OrderService:
                 raise ResourceNotFoundError(
                     "账户不存在",
                     error_code="ACCOUNT_NOT_FOUND",
+                )
+            if account.account_type == AccountType.STOCK.value:
+                raise BusinessRuleError(
+                    "衍生品订单不能使用 STOCK 账户",
+                    error_code="DERIVATIVE_ACCOUNT_TYPE_INVALID",
                 )
             # 两个同client_order_id请求可能同时通过第一轮无锁查询。账户锁
             # 串行化后必须再次检查，保证只冻结一次并只创建一笔订单。

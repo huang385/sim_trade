@@ -35,6 +35,7 @@ class FeeRuleItem(Base):
             "instrument_type",
             "direction",
             "offset_flag",
+            "fee_type",
             "trading_day",
             "rule_version",
             name="uq_fee_rule_item_scope_version",
@@ -43,6 +44,24 @@ class FeeRuleItem(Base):
         CheckConstraint(
             "commission_parameter >= 0",
             name="ck_fee_rule_item_parameter_nonnegative",
+        ),
+        CheckConstraint(
+            "minimum_fee >= 0",
+            name="ck_fee_rule_item_minimum_fee_nonnegative",
+        ),
+        CheckConstraint(
+            "fee_type IN ('DERIVATIVE_COMMISSION', 'BROKER_COMMISSION', "
+            "'STAMP_DUTY', 'TRANSFER_FEE', 'HANDLING_FEE', 'OTHER')",
+            name="ck_fee_rule_item_fee_type_valid",
+        ),
+        CheckConstraint(
+            "aggregation_scope IN ('ORDER', 'TRADE')",
+            name="ck_fee_rule_item_aggregation_scope_valid",
+        ),
+        CheckConstraint(
+            "(instrument_type = 'STOCK' AND offset_flag IS NULL) OR "
+            "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
+            name="ck_fee_rule_item_stock_offset_semantics",
         ),
         Index(
             "ix_fee_rule_item_resolve",
@@ -64,10 +83,19 @@ class FeeRuleItem(Base):
     )
     instrument_type: Mapped[str] = mapped_column(String(32), nullable=False)
     direction: Mapped[str] = mapped_column(String(16), nullable=False)
-    offset_flag: Mapped[str] = mapped_column(String(32), nullable=False)
+    offset_flag: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fee_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="DERIVATIVE_COMMISSION"
+    )
     commission_type: Mapped[str] = mapped_column(String(32), nullable=False)
     commission_parameter: Mapped[Decimal] = mapped_column(
         Numeric(24, 12), nullable=False
+    )
+    minimum_fee: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0")
+    )
+    aggregation_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="TRADE"
     )
     trading_day: Mapped[date] = mapped_column(Date, nullable=False)
     rule_version: Mapped[str] = mapped_column(String(64), nullable=False)

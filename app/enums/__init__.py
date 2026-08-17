@@ -13,6 +13,8 @@ from app.enums.order_enums import (
 )
 from app.enums.reference_data_enums import (
     CommissionType,
+    FeeAggregationScope,
+    FeeType,
     ReferenceDataSource,
     StockDailyTradingFactUpsertResult,
     StockPriceLimitType,
@@ -37,6 +39,8 @@ __all__ = [
     "ExchangeID",
     "MarketType",
     "CommissionType",
+    "FeeAggregationScope",
+    "FeeType",
     "ReferenceDataSource",
     "StockDailyTradingFactUpsertResult",
     "StockPriceLimitType",

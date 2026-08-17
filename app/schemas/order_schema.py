@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -76,6 +77,15 @@ class DerivativeOrderCreateRequest(CommonOrderCreateRequest):
     """期货和期权订单字段；衍生品必须明确提交开平标志。"""
 
     offset_flag: OffsetFlag
+
+
+class StockOrderCreateRequest(CommonOrderCreateRequest):
+    """股票现金订单：请求中没有开平标志，也只接受限价单。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    order_type: Literal[OrderType.LIMIT] = OrderType.LIMIT
+    limit_price: Decimal = Field(gt=Decimal("0"))
 
 
 class OrderCreateRequest(DerivativeOrderCreateRequest):
@@ -200,3 +210,21 @@ class OrderPageResponse(BaseModel):
     items: list[OrderResponse]
     next_cursor: str | None
     has_more: bool
+
+
+class OrderFeeComponentSnapshotResponse(BaseModel):
+    """订单手续费组件快照的只读响应。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    fee_type: str
+    rule_item_id: int
+    rule_version: str
+    direction: OrderDirection
+    calculation_type: str
+    commission_parameter: Decimal
+    minimum_fee: Decimal
+    aggregation_scope: str
+    contract_multiplier: Decimal
+    data_source: str
+    created_at: datetime

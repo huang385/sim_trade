@@ -39,3 +39,21 @@ class StockDailyTradingFactUpsertResult(str, Enum):
     DUPLICATE = "DUPLICATE"
     IGNORED_STALE = "IGNORED_STALE"
     CONFLICT_SAME_TIMESTAMP = "CONFLICT_SAME_TIMESTAMP"
+
+
+class FeeType(str, Enum):
+    """可组合的订单手续费类型。"""
+
+    DERIVATIVE_COMMISSION = "DERIVATIVE_COMMISSION"
+    BROKER_COMMISSION = "BROKER_COMMISSION"
+    STAMP_DUTY = "STAMP_DUTY"
+    TRANSFER_FEE = "TRANSFER_FEE"
+    HANDLING_FEE = "HANDLING_FEE"
+    OTHER = "OTHER"
+
+
+class FeeAggregationScope(str, Enum):
+    """最低收费的累计范围。"""
+
+    ORDER = "ORDER"
+    TRADE = "TRADE"

@@ -21,6 +21,7 @@ from app.models.margin_rule_daily import MarginRuleDaily
 from app.models.fee_rule import FeeRule
 from app.models.fee_rule_daily import FeeRuleDaily
 from app.models.fee_rule_item import FeeRuleItem
+from app.models.order_fee_component_snapshot import OrderFeeComponentSnapshot
 from app.models.option_margin_rule import OptionMarginRule
 from app.models.reference_sync_log import ReferenceSyncLog
 from app.models.order import Order
@@ -54,6 +55,7 @@ __all__ = [
     "FeeRule",
     "FeeRuleDaily",
     "FeeRuleItem",
+    "OrderFeeComponentSnapshot",
     "OptionMarginRule",
     "ReferenceSyncLog",
     "Order",
