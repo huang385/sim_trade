@@ -185,6 +185,13 @@ class CashSecurityValuationPersistenceWorker:
             self.fencing_token = self.service.store.acquire_writer_lease(
                 self.owner, self.lease_ttl_seconds
             )
+            if self.fencing_token is not None and not self.service.activate_writer_fence(
+                owner=self.owner, fencing_token=self.fencing_token
+            ):
+                self.service.store.release_writer_lease(
+                    self.owner, self.fencing_token
+                )
+                self.fencing_token = None
         elif not self.service.store.renew_writer_lease(
             self.owner, self.fencing_token, self.lease_ttl_seconds
         ):

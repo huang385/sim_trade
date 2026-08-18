@@ -854,6 +854,50 @@ class RealtimePnlStore:
             return False, 0, 0
         return True, len(position_items), len(account_items)
 
+    def write_cycle_snapshots_if_lease_value_owned(
+        self,
+        *,
+        lease_key: str,
+        lease_value: str,
+        positions: Iterable[PositionRealtimePnl],
+        accounts: Iterable[AccountRealtimePnl],
+        dirty_version: str,
+        active_positions: Iterable[tuple[str, str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str, str]],
+        expected_cache_version: str | None = None,
+        mark_dirty: bool = True,
+        emit_risk_events: bool = True,
+    ) -> tuple[bool, int, int]:
+        """Atomically fence a cycle against an arbitrary lease value.
+
+        Cash valuation leases carry ``owner:token``.  The check, snapshots and
+        stream events execute in the same Lua invocation, so a stale token can
+        neither overwrite hashes nor publish an event.
+        """
+
+        position_items = list(positions)
+        account_items = list(accounts)
+        operations = self._build_cycle_operations(
+            positions=position_items,
+            accounts=account_items,
+            dirty_version=dirty_version,
+            additions=list(active_positions),
+            removals=list(closed_positions),
+            mark_dirty=mark_dirty,
+            emit_risk_events=emit_risk_events,
+        )
+        written = bool(self.redis_client.eval(
+            WRITE_CYCLE_IF_LEASE_OWNED_SCRIPT,
+            3,
+            lease_key,
+            PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY,
+            PNL_POSITION_CACHE_VERSION_KEY,
+            lease_value,
+            str(expected_cache_version or ""),
+            json.dumps(operations, ensure_ascii=False, separators=(",", ":")),
+        ))
+        return (written, len(position_items), len(account_items)) if written else (False, 0, 0)
+
     def get_positions_many(
         self,
         position_ids: Iterable[str],

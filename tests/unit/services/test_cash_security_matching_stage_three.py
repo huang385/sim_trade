@@ -125,6 +125,78 @@ def test_cash_position_daily_basis_tracks_buys_and_partial_sells():
     assert position.daily_pnl_base_cost == Decimal("670.000000")
 
 
+def test_unestablished_historical_basis_survives_first_buy():
+    position = _position(
+        total_volume=100, today_volume=0, yesterday_volume=100,
+        frozen_volume=0, available_volume=100,
+        daily_pnl_base_cost=Decimal("1200"),
+        yesterday_pnl_base_cost=Decimal("0"), today_pnl_base_cost=Decimal("0"),
+        daily_pnl_base_established=False,
+    )
+
+    CashSecurityPositionService.apply_buy(
+        position, instrument_type="STOCK", volume=10, turnover=Decimal("130")
+    )
+
+    assert position.daily_pnl_base_established is False
+    assert position.yesterday_pnl_base_cost == Decimal("0")
+    assert position.today_pnl_base_cost == Decimal("130.000000")
+    assert position.daily_pnl_base_cost == Decimal("1330.000000")
+
+
+def test_unestablished_historical_stock_sell_does_not_guess_yesterday_basis():
+    position = _position(
+        total_volume=100, today_volume=0, yesterday_volume=100,
+        frozen_volume=20, settlement_locked_volume=0, available_volume=80,
+        daily_pnl_base_cost=Decimal("1200"),
+        yesterday_pnl_base_cost=Decimal("0"), today_pnl_base_cost=Decimal("0"),
+        daily_pnl_base_established=False,
+    )
+
+    CashSecurityPositionService.apply_sell(
+        position, instrument_type="STOCK", volume=20
+    )
+
+    assert position.daily_pnl_base_established is False
+    assert position.daily_pnl_base_cost == Decimal("1200.000000")
+
+
+def test_unestablished_convertible_sell_reduces_only_known_today_bucket():
+    position = _position(
+        total_volume=110, today_volume=10, yesterday_volume=100,
+        frozen_volume=105, settlement_locked_volume=0, available_volume=5,
+        position_cost=Decimal("1130"), daily_pnl_base_cost=Decimal("1330"),
+        yesterday_pnl_base_cost=Decimal("0"), today_pnl_base_cost=Decimal("130"),
+        daily_pnl_base_established=False,
+    )
+
+    CashSecurityPositionService.apply_sell(
+        position, instrument_type="CONVERTIBLE_BOND", volume=105
+    )
+
+    assert position.yesterday_volume == 0
+    assert position.today_volume == 5
+    assert position.today_pnl_base_cost == Decimal("65.000000")
+    assert position.daily_pnl_base_cost == Decimal("1265.000000")
+
+
+def test_established_stock_sell_reduces_only_yesterday_bucket():
+    position = _position(
+        total_volume=100, today_volume=0, yesterday_volume=100,
+        frozen_volume=20, settlement_locked_volume=0, available_volume=80,
+        daily_pnl_base_cost=Decimal("1200"),
+        yesterday_pnl_base_cost=Decimal("1200"), today_pnl_base_cost=Decimal("0"),
+        daily_pnl_base_established=True,
+    )
+
+    CashSecurityPositionService.apply_sell(
+        position, instrument_type="STOCK", volume=20
+    )
+
+    assert position.yesterday_pnl_base_cost == Decimal("960.000000")
+    assert position.daily_pnl_base_cost == Decimal("960.000000")
+
+
 @pytest.mark.parametrize(
     ("instrument_type", "daily_close_pnl", "realized_pnl", "expected_daily", "expected_cumulative"),
     [

@@ -180,6 +180,9 @@ class CashSecurityValuationStore:
     def _lease_value(owner: str, fencing_token: str) -> str:
         return f"{owner}:{fencing_token}"
 
+    def writer_lease_value(self, owner: str, fencing_token: str) -> str:
+        return self._lease_value(owner, fencing_token)
+
     def acquire_writer_lease(self, owner: str, ttl_seconds: int) -> str | None:
         token = self.redis_client.eval(
             _ACQUIRE_LEASE_SCRIPT,

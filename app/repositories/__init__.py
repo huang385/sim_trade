@@ -26,6 +26,9 @@ from app.repositories.auth_refresh_session_repository import (
 )
 from app.repositories.daily_settlement_repository import DailySettlementRepository
 from app.repositories.cash_security_fee_repository import CashSecurityFeeRepository
+from app.repositories.cash_security_valuation_fence_repository import (
+    CashSecurityValuationFenceRepository,
+)
 
 
 __all__ = [
@@ -47,4 +50,5 @@ __all__ = [
     "AuthRefreshSessionRepository",
     "DailySettlementRepository",
     "CashSecurityFeeRepository",
+    "CashSecurityValuationFenceRepository",
 ]

@@ -16,6 +16,10 @@ from app.infrastructure.realtime_pnl_store import RealtimePnlStore
 from app.models.account import Account
 from app.models.position import Position
 from app.repositories.outbox_repository import OutboxRepository
+from app.repositories.cash_security_valuation_fence_repository import (
+    CashSecurityValuationFenceRepository,
+)
+from app.infrastructure.redis_keys import CASH_VALUATION_WORKER_LEASE_KEY
 from app.schemas.pnl_schema import AccountRealtimePnl, PositionRealtimePnl
 
 
@@ -41,12 +45,14 @@ class CashSecurityValuationService:
         store: CashSecurityValuationStore,
         market_tick_store: MarketTickStore,
         pnl_store: RealtimePnlStore | None = None,
+        fence_repository: CashSecurityValuationFenceRepository | None = None,
         tick_max_age_seconds: int | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.store = store
         self.market_tick_store = market_tick_store
         self.pnl_store = pnl_store or RealtimePnlStore(store.redis_client)
+        self.fence_repository = fence_repository or CashSecurityValuationFenceRepository()
         self.tick_max_age_seconds = (
             tick_max_age_seconds
             if tick_max_age_seconds is not None
@@ -83,6 +89,23 @@ class CashSecurityValuationService:
 
     def mark_account_dirty(self, *, account_id: str, source_event_id: str) -> dict[str, str]:
         return self.store.mark_accounts_dirty((account_id,), reason=f"FACT:{source_event_id}")
+
+    def activate_writer_fence(self, *, owner: str, fencing_token: str) -> bool:
+        """Publish a Redis-issued epoch to the PostgreSQL write resource."""
+
+        with self.session_factory() as db:
+            try:
+                activated = self.fence_repository.activate(
+                    db, owner=owner, fencing_token=fencing_token
+                )
+                if activated:
+                    db.commit()
+                else:
+                    db.rollback()
+                return activated
+            except Exception:
+                db.rollback()
+                raise
 
     def refresh_active_index_for_position(self, position_id: str) -> None:
         """Incrementally refresh one routing row after a committed position fact."""
@@ -198,7 +221,12 @@ class CashSecurityValuationService:
             market_value = quantize_money(tick.last_price * Decimal(position.total_volume) * Decimal(position.multiplier_snapshot))
             # 历史迁移前的记录可能尚未保存日内估值基准；首次日终前以持仓
             # 成本作为保守基准，避免凭空产生当日持仓盈亏。
-            basis = Decimal(position.daily_pnl_base_cost or position.position_cost)
+            # An unestablished bucket keeps the historical aggregate basis.
+            # A zero aggregate has no reliable day-start fact, so conservatively
+            # use carrying cost until the next verified EOD establishes one.
+            basis = Decimal(position.daily_pnl_base_cost)
+            if not getattr(position, "daily_pnl_base_established", False) and basis == ZERO:
+                basis = Decimal(position.position_cost)
             position.market_value = market_value
             position.mark_price = tick.last_price
             position.mark_time = tick.event_time
@@ -267,8 +295,8 @@ class CashSecurityValuationService:
                 try:
                     if lease_owner is not None and (
                         fencing_token is None
-                        or not self.store.writer_lease_owned(
-                            lease_owner, fencing_token
+                        or not self.fence_repository.is_current(
+                            db, owner=lease_owner, fencing_token=fencing_token
                         )
                     ):
                         break
@@ -282,15 +310,6 @@ class CashSecurityValuationService:
                             account_snapshot,
                             emit_risk_event,
                         ) = self._recalculate_locked_account(db, account)
-                    if complete and lease_owner is not None and (
-                        fencing_token is None
-                        or not self.store.writer_lease_owned(
-                            lease_owner, fencing_token
-                        )
-                    ):
-                        db.rollback()
-                        complete = False
-                        break
                     db.commit()
                 except Exception:
                     db.rollback()
@@ -299,15 +318,24 @@ class CashSecurityValuationService:
             # 更新行情或事实到达，保留任务以便下一批重新按最新数据估值。
             if account_snapshot is not None:
                 try:
-                    self.pnl_store.write_cycle_snapshots(
-                        positions=position_snapshots,
-                        accounts=(account_snapshot,),
-                        dirty_version=f"CASH:{version}",
-                        active_positions=(),
-                        closed_positions=(),
-                        mark_dirty=False,
-                        emit_risk_events=emit_risk_event,
-                    )
+                    if lease_owner is None:
+                        self.pnl_store.write_cycle_snapshots(
+                            positions=position_snapshots, accounts=(account_snapshot,),
+                            dirty_version=f"CASH:{version}", active_positions=(),
+                            closed_positions=(), mark_dirty=False,
+                            emit_risk_events=emit_risk_event,
+                        )
+                    else:
+                        written, _, _ = self.pnl_store.write_cycle_snapshots_if_lease_value_owned(
+                            lease_key=CASH_VALUATION_WORKER_LEASE_KEY,
+                            lease_value=self.store.writer_lease_value(lease_owner, fencing_token),
+                            positions=position_snapshots, accounts=(account_snapshot,),
+                            dirty_version=f"CASH:{version}", active_positions=(),
+                            closed_positions=(), mark_dirty=False,
+                            emit_risk_events=emit_risk_event,
+                        )
+                        if not written:
+                            complete = False
                 except Exception:
                     complete = False
             if complete and self.store.complete_dirty_account(account_id=account_id, expected_version=version):

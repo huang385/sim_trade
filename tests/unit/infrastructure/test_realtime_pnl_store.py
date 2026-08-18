@@ -137,6 +137,31 @@ def test_lease_guarded_cycle_write_rejects_without_pipeline_write():
     assert redis_client.eval.call_args.args[-3] == "worker-old"
 
 
+def test_token_guarded_cycle_write_uses_exact_owner_and_fencing_token():
+    redis_client = Mock()
+    redis_client.eval.return_value = 0
+    store = RealtimePnlStore(redis_client)
+
+    written, positions_written, accounts_written = (
+        store.write_cycle_snapshots_if_lease_value_owned(
+            lease_key="cash_valuation:writer:lease",
+            lease_value="worker-b:102",
+            positions=[],
+            accounts=[],
+            dirty_version="CASH:17",
+            active_positions=[],
+            closed_positions=[],
+            mark_dirty=False,
+        )
+    )
+
+    assert (written, positions_written, accounts_written) == (False, 0, 0)
+    args = redis_client.eval.call_args.args
+    assert args[2] == "cash_valuation:writer:lease"
+    assert args[5] == "worker-b:102"
+    assert "redis.call('GET', KEYS[1]) ~= ARGV[1]" in args[0]
+
+
 def test_contract_position_ids_many_uses_one_pipeline():
     redis_client = Mock()
     pipeline = redis_client.pipeline.return_value

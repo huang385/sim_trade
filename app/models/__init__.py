@@ -46,6 +46,12 @@ from app.models.stock_daily_trading_fact import StockDailyTradingFact
 from app.models.stock_trading_rule import StockTradingRule
 from app.models.cash_security_order_fee_accumulator import CashSecurityOrderFeeAccumulator
 from app.models.cash_security_trade_fee_component import CashSecurityTradeFeeComponent
+from app.models.cash_security_valuation_writer_fence import (
+    CashSecurityValuationWriterFence,
+)
+from app.models.cash_security_pnl_basis_migration_audit import (
+    CashSecurityPnlBasisMigrationAudit,
+)
 
 
 __all__ = [
@@ -80,4 +86,6 @@ __all__ = [
     "StockTradingRule",
     "CashSecurityOrderFeeAccumulator",
     "CashSecurityTradeFeeComponent",
+    "CashSecurityValuationWriterFence",
+    "CashSecurityPnlBasisMigrationAudit",
 ]

@@ -23,6 +23,22 @@ class CashSecurityPositionService:
                 error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
             )
         position.position_cost = quantize_money(position.position_cost + turnover)
+        # 0028 installed non-null zero buckets for historical rows.  A false
+        # flag means those zeros are *unknown*, not an established allocation.
+        # Keep the old aggregate basis authoritative until EOD can establish a
+        # verified yesterday bucket; only the newly bought portion is known.
+        if not getattr(position, "daily_pnl_base_established", True):
+            position.today_pnl_base_cost = quantize_money(
+                Decimal(getattr(position, "today_pnl_base_cost", Decimal("0")))
+                + turnover
+            )
+            position.daily_pnl_base_cost = quantize_money(
+                Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0"))) + turnover
+            )
+            position.average_open_price = quantize_money(
+                position.position_cost / Decimal(position.total_volume)
+            )
+            return
         # 当日买入部分按实际成交额计入基准；隔夜持仓则保留昨日收盘盯市值，
         # 两者相加后才能正确计算当日持仓盈亏。
         today_base = Decimal(getattr(position, "today_pnl_base_cost", Decimal("0")))
@@ -97,6 +113,39 @@ class CashSecurityPositionService:
         position.frozen_volume -= volume
         position.total_volume -= volume
         position.position_cost = quantize_money(position.position_cost - cost)
+        if not getattr(position, "daily_pnl_base_established", True):
+            # The legacy part has no provable today/yesterday allocation.  Do
+            # not invent one or pro-rate it: preserve that aggregate basis and
+            # only remove a known today-bucket amount actually consumed.
+            legacy_basis = quantize_money(
+                Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0"))) - today_base
+            )
+            known_today_reduction = (
+                today_base
+                if today_sold == today_before
+                else quantize_money(
+                    today_base * Decimal(today_sold) / Decimal(today_before)
+                )
+                if today_sold
+                else Decimal("0")
+            )
+            position.today_pnl_base_cost = quantize_money(
+                today_base - known_today_reduction
+            )
+            position.daily_pnl_base_cost = quantize_money(
+                legacy_basis + position.today_pnl_base_cost
+            )
+            position.available_volume = (
+                position.total_volume
+                - position.frozen_volume
+                - position.settlement_locked_volume
+            )
+            position.average_open_price = (
+                quantize_money(position.position_cost / Decimal(position.total_volume))
+                if position.total_volume
+                else Decimal("0")
+            )
+            return cost
         yesterday_reduction = (
             yesterday_base
             if yesterday_sold == yesterday_before
