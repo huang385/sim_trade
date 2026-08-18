@@ -14,6 +14,9 @@ from app.infrastructure.redis_keys import (
     CASH_VALUATION_DIRTY_SEQUENCE_KEY,
     CASH_VALUATION_INDEX_KEYS_KEY,
     CASH_VALUATION_POSITION_ACCOUNTS_KEY,
+    CASH_VALUATION_POSITION_INDEX_KEYS_KEY,
+    CASH_VALUATION_WORKER_FENCE_KEY,
+    CASH_VALUATION_WORKER_LEASE_KEY,
     cash_valuation_instrument_positions_key,
 )
 
@@ -23,6 +26,40 @@ if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 redis.call('SREM', KEYS[1], ARGV[1])
 redis.call('HDEL', KEYS[2], ARGV[1])
 return 1
+"""
+
+_MARK_DIRTY_SCRIPT = """
+local result = {}
+for index = 2, #ARGV do
+    local account_id = ARGV[index]
+    local version = redis.call('INCR', KEYS[3])
+    local value = tostring(version) .. ':' .. ARGV[1]
+    redis.call('SADD', KEYS[1], account_id)
+    redis.call('HSET', KEYS[2], account_id, value)
+    table.insert(result, account_id)
+    table.insert(result, value)
+end
+return result
+"""
+
+_ACQUIRE_LEASE_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 1 then return '' end
+local token = redis.call('INCR', KEYS[2])
+local value = ARGV[1] .. ':' .. tostring(token)
+redis.call('SET', KEYS[1], value, 'EX', ARGV[2])
+return tostring(token)
+"""
+
+_RENEW_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+_RELEASE_LEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0
 """
 
 
@@ -52,7 +89,11 @@ class CashSecurityValuationStore:
         pipe = self.redis_client.pipeline(transaction=True)
         if old_keys:
             pipe.delete(*old_keys)
-        pipe.delete(CASH_VALUATION_INDEX_KEYS_KEY, CASH_VALUATION_POSITION_ACCOUNTS_KEY)
+        pipe.delete(
+            CASH_VALUATION_INDEX_KEYS_KEY,
+            CASH_VALUATION_POSITION_ACCOUNTS_KEY,
+            CASH_VALUATION_POSITION_INDEX_KEYS_KEY,
+        )
         by_key: dict[str, dict[str, str]] = {}
         for position_id, account_id, exchange_id, order_book_id in rows:
             key = self._key(exchange_id, order_book_id)
@@ -61,6 +102,41 @@ class CashSecurityValuationStore:
             pipe.sadd(CASH_VALUATION_INDEX_KEYS_KEY, key)
             pipe.sadd(key, *members)
             pipe.hset(CASH_VALUATION_POSITION_ACCOUNTS_KEY, mapping=members)
+            pipe.hset(
+                CASH_VALUATION_POSITION_INDEX_KEYS_KEY,
+                mapping={position_id: key for position_id in members},
+            )
+        pipe.execute()
+
+    def upsert_active_position(
+        self, *, position_id: str, account_id: str, exchange_id: str, order_book_id: str
+    ) -> None:
+        """Update one routing entry after a position fact; no table-wide rebuild."""
+
+        new_key = self._key(exchange_id, order_book_id)
+        old_key = self.redis_client.hget(
+            CASH_VALUATION_POSITION_INDEX_KEYS_KEY, position_id
+        )
+        pipe = self.redis_client.pipeline(transaction=True)
+        if old_key and old_key != new_key:
+            pipe.srem(old_key, position_id)
+        pipe.sadd(new_key, position_id)
+        pipe.sadd(CASH_VALUATION_INDEX_KEYS_KEY, new_key)
+        pipe.hset(CASH_VALUATION_POSITION_ACCOUNTS_KEY, position_id, account_id)
+        pipe.hset(CASH_VALUATION_POSITION_INDEX_KEYS_KEY, position_id, new_key)
+        pipe.execute()
+
+    def remove_active_position(self, position_id: str) -> None:
+        """Remove one closed position while retaining unrelated index members."""
+
+        key = self.redis_client.hget(
+            CASH_VALUATION_POSITION_INDEX_KEYS_KEY, position_id
+        )
+        pipe = self.redis_client.pipeline(transaction=True)
+        if key:
+            pipe.srem(key, position_id)
+        pipe.hdel(CASH_VALUATION_POSITION_ACCOUNTS_KEY, position_id)
+        pipe.hdel(CASH_VALUATION_POSITION_INDEX_KEYS_KEY, position_id)
         pipe.execute()
 
     def account_ids_for_tick(self, *, exchange_id: str, order_book_id: str) -> set[str]:
@@ -76,17 +152,16 @@ class CashSecurityValuationStore:
         ids = sorted({str(item).strip() for item in account_ids if str(item).strip()})
         if not ids:
             return {}
-        pipe = self.redis_client.pipeline(transaction=True)
-        for account_id in ids:
-            pipe.incr(CASH_VALUATION_DIRTY_SEQUENCE_KEY)
-        versions = [str(item) for item in pipe.execute()]
-        pipe = self.redis_client.pipeline(transaction=True)
-        for account_id, sequence in zip(ids, versions, strict=True):
-            version = f"{sequence}:{reason}"
-            pipe.sadd(CASH_VALUATION_DIRTY_ACCOUNTS_KEY, account_id)
-            pipe.hset(CASH_VALUATION_DIRTY_ACCOUNT_VERSIONS_KEY, account_id, version)
-        pipe.execute()
-        return dict(zip(ids, (f"{seq}:{reason}" for seq in versions), strict=True))
+        rows = self.redis_client.eval(
+            _MARK_DIRTY_SCRIPT,
+            3,
+            CASH_VALUATION_DIRTY_ACCOUNTS_KEY,
+            CASH_VALUATION_DIRTY_ACCOUNT_VERSIONS_KEY,
+            CASH_VALUATION_DIRTY_SEQUENCE_KEY,
+            reason,
+            *ids,
+        )
+        return dict(zip(rows[::2], rows[1::2], strict=True))
 
     def list_dirty_accounts(self, batch_size: int) -> list[tuple[str, str]]:
         ids = sorted(self.redis_client.smembers(CASH_VALUATION_DIRTY_ACCOUNTS_KEY))[:batch_size]
@@ -99,4 +174,41 @@ class CashSecurityValuationStore:
         return bool(self.redis_client.eval(
             _COMPLETE_DIRTY_SCRIPT, 2, CASH_VALUATION_DIRTY_ACCOUNTS_KEY,
             CASH_VALUATION_DIRTY_ACCOUNT_VERSIONS_KEY, account_id, expected_version,
+        ))
+
+    @staticmethod
+    def _lease_value(owner: str, fencing_token: str) -> str:
+        return f"{owner}:{fencing_token}"
+
+    def acquire_writer_lease(self, owner: str, ttl_seconds: int) -> str | None:
+        token = self.redis_client.eval(
+            _ACQUIRE_LEASE_SCRIPT,
+            2,
+            CASH_VALUATION_WORKER_LEASE_KEY,
+            CASH_VALUATION_WORKER_FENCE_KEY,
+            owner,
+            max(ttl_seconds, 1),
+        )
+        return str(token) if token else None
+
+    def renew_writer_lease(
+        self, owner: str, fencing_token: str, ttl_seconds: int
+    ) -> bool:
+        return bool(self.redis_client.eval(
+            _RENEW_LEASE_SCRIPT,
+            1,
+            CASH_VALUATION_WORKER_LEASE_KEY,
+            self._lease_value(owner, fencing_token),
+            max(ttl_seconds, 1),
+        ))
+
+    def writer_lease_owned(self, owner: str, fencing_token: str) -> bool:
+        return self.redis_client.get(CASH_VALUATION_WORKER_LEASE_KEY) == self._lease_value(owner, fencing_token)
+
+    def release_writer_lease(self, owner: str, fencing_token: str) -> bool:
+        return bool(self.redis_client.eval(
+            _RELEASE_LEASE_SCRIPT,
+            1,
+            CASH_VALUATION_WORKER_LEASE_KEY,
+            self._lease_value(owner, fencing_token),
         ))

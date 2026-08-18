@@ -16,6 +16,7 @@ class PositionRealtimePnl(BaseModel):
     symbol: str
     direction: str
     mark_price: Decimal
+    market_value: Decimal = Decimal("0")
     cumulative_unrealized_pnl: Decimal
     daily_position_pnl: Decimal
     # 仅供统一账户权益计算；前端累计浮盈仍使用上面的原始开仓价口径。
@@ -45,6 +46,7 @@ class AccountRealtimePnl(BaseModel):
     daily_pnl: Decimal
     cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
+    stock_market_value: Decimal = Decimal("0")
     available_cash: Decimal
     futures_unrealized_pnl: Decimal = Decimal("0")
     option_realtime_required_margin: Decimal = Decimal("0")

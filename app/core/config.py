@@ -121,6 +121,7 @@ class Settings(BaseSettings):
     # 最后一笔收盘行情，同时DailySettlementService仍强制校验交易日一致，
     # 并拒绝超过60秒的未来时间，不能回退到上一交易日旧行情。
     daily_settlement_tick_max_age_seconds: int = 14400
+    cash_security_valuation_tick_max_age_seconds: int = 300
 
     # YMM Live Data客户端。Token和可选自定义地址只允许通过.env或环境变量提供。
     # mode使用官方SDK定义的lan、TS或local；若管理员要求直连，也可提供base_url。

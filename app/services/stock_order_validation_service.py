@@ -190,9 +190,8 @@ class ConvertibleBondTradingPolicy(StockTradingPolicy):
                 "可转债接口只能交易 CONVERTIBLE_BOND Instrument",
                 error_code="CONVERTIBLE_BOND_INSTRUMENT_TYPE_INVALID",
             )
-        # The rest of the rule, daily-fact, tick and price-limit checks have the
-        # same reference-data meaning as stock; call the non-product-specific
-        # portion by temporarily using the validated instrument fields below.
+        # 其余规则、日内事实、Tick 与涨跌停校验和股票具有相同的参考数据语义；
+        # 下面临时使用已校验的合约字段，复用其中与产品无关的校验部分。
         if instrument.market_type != self.market_type:
             raise BusinessRuleError(
                 "可转债合约市场类型不正确",

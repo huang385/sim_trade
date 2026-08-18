@@ -75,15 +75,22 @@ RISK_DIRTY_ACCOUNT_VERSIONS_KEY = "risk:dirty_account_versions"
 RISK_DIRTY_SCAN_CURSOR_KEY = "risk:dirty_scan_cursor"
 RISK_WORKER_LEASE_KEY = "risk:worker:lease"
 
-# Cash securities intentionally have their own valuation work queue and
-# position index.  They must never share derivative PnL dirty members.
+# 现金证券使用独立的估值任务队列和持仓索引，绝不能与期货/期权共用 PnL
+# 脏成员；两条链路的资金口径和唯一写入器不同。
 CASH_VALUATION_DIRTY_ACCOUNTS_KEY = "cash_valuation:dirty_accounts"
 CASH_VALUATION_DIRTY_ACCOUNT_VERSIONS_KEY = "cash_valuation:dirty_account_versions"
 CASH_VALUATION_DIRTY_SEQUENCE_KEY = "cash_valuation:dirty_sequence"
 CASH_VALUATION_POSITION_ACCOUNTS_KEY = "cash_valuation:position_accounts"
+CASH_VALUATION_POSITION_INDEX_KEYS_KEY = "cash_valuation:position_index_keys"
 CASH_VALUATION_INDEX_KEYS_KEY = "cash_valuation:index_keys"
 CASH_VALUATION_TICK_CONSUMER_GROUP = "cash_security_valuation"
 CASH_VALUATION_FACT_CONSUMER_GROUP = "cash_security_valuation_facts"
+CASH_VALUATION_WORKER_LEASE_KEY = "cash_valuation:writer:lease"
+CASH_VALUATION_WORKER_FENCE_KEY = "cash_valuation:writer:fence"
+
+
+def cash_valuation_tick_failure_key(message_id: str) -> str:
+    return f"cash_valuation:tick_failure:{message_id}"
 
 
 def cash_valuation_instrument_positions_key(exchange_id: str, order_book_id: str) -> str:
@@ -205,10 +212,9 @@ def order_event_failure_key(message_id: str) -> str:
 def market_latest_key(exchange_id: str, order_book_id: str) -> str:
     """返回指定交易所、合约的最新标准化行情 Hash 键名。"""
 
-    # Latest-market cache is keyed by the canonical market code.  Internal
-    # option symbols may include separators (e.g. jd2609-C-3200), while the
-    # matching/subscription code is JD2609C3200.  Keeping the separator in a
-    # Redis key makes restart recovery depend on the spelling used by callers.
+    # 最新行情缓存以外部行情标准代码为键。内部期权 symbol 可能带分隔符
+    # （如 jd2609-C-3200），而订阅/撮合使用 JD2609C3200。若把分隔符写入
+    # Redis Key，重启恢复会依赖调用方的拼写，从而无法稳定命中同一份行情。
     normalized_exchange = str(exchange_id).strip().upper()
     normalized_order_book_id = (
         str(order_book_id).strip().upper().replace("-", "")

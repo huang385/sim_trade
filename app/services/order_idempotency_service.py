@@ -16,8 +16,8 @@ class OrderIdempotencyService:
         existing_order: Order,
         request: OrderCreateRequest | StockOrderCreateRequest,
     ) -> None:
-        # ConvertibleBondOrderCreateRequest inherits the stock request shape;
-        # product identity therefore must not depend on isinstance order.
+        # 可转债请求继承股票请求结构，不能依赖 isinstance 判断产品；必须读取
+        # 服务端已加载的合约类型，避免相同请求形状被错误分派。
         request_instrument_type = getattr(
             request, "cash_security_instrument_type", None
         )

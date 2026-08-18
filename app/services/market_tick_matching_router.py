@@ -16,9 +16,8 @@ class MarketTickMatchingRouter:
         return self.derivative_service.matching_engine
 
     def process(self, *, stream_message_id: str, fields) -> MarketTickMatchResult:
-        # A Tick reads its Redis candidate set once and performs one batched
-        # PostgreSQL lookup.  Product routing happens before either executor
-        # sees an order, so neither side probes and skips the other product.
+        # 每条 Tick 只读取一次 Redis 候选订单集合，并批量查询一次 PostgreSQL。
+        # 在任一执行器看到订单前先按产品分流，避免双方反复探测、跳过对方订单。
         event = self.derivative_service.parse_event(fields)
         order_ids = sorted(
             self.derivative_service.active_order_index.list_instrument_order_ids(

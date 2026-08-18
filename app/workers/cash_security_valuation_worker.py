@@ -1,4 +1,4 @@
-"""Consumers that route cash-security ticks and facts to the valuation queue."""
+"""将现金证券行情和业务事实路由到估值队列的消费者。"""
 
 import json
 import logging
@@ -7,16 +7,16 @@ import signal
 import socket
 from threading import Event
 
-from redis.exceptions import ResponseError
-
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from app.infrastructure.cash_security_valuation_store import CashSecurityValuationStore
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
+from app.infrastructure.market_tick_stream_consumer import MarketTickStreamConsumer
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.redis_keys import (
     CASH_VALUATION_TICK_CONSUMER_GROUP,
     MARKET_TICK_STREAM,
+    cash_valuation_tick_failure_key,
 )
 from app.services.cash_security_valuation_service import (
     CASH_TYPES,
@@ -25,6 +25,8 @@ from app.services.cash_security_valuation_service import (
 
 
 logger = logging.getLogger(__name__)
+MAX_FAILURES = 10
+FAILURE_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def _consumer_name(prefix: str) -> str:
@@ -32,7 +34,7 @@ def _consumer_name(prefix: str) -> str:
 
 
 class CashSecurityValuationFactWorker:
-    """Invalidate/rebuild only cash valuation state after committed facts."""
+    """消费已提交业务事实，只使现金证券估值状态失效或重建路由索引。"""
 
     def __init__(self, *, stream_consumer: OrderStreamConsumer, service: CashSecurityValuationService) -> None:
         self.stream_consumer = stream_consumer
@@ -42,20 +44,26 @@ class CashSecurityValuationFactWorker:
     def request_stop(self, *_args) -> None:
         self.stop_event.set()
 
-    def handle_message(self, message_id: str, fields: dict[str, str]) -> str:
+    def handle_message(self, message_id: str, fields: dict[str, str] | None) -> str:
+        if fields is None:
+            self.stream_consumer.acknowledge(message_id)
+            self.stream_consumer.clear_failure(message_id)
+            return "tombstone"
         try:
             payload = json.loads(fields.get("payload", "{}"))
             if payload.get("fact_reason") == "CASH_SECURITY_REALTIME_VALUATION":
-                # This worker is the producer of these absolute facts.  Feeding
-                # them back into Dirty would create a valuation/event loop.
+                # 本 Worker 自己写出的账户、持仓绝对事实无需再次标脏；回灌会形成
+                # “估值 -> 事件 -> 标脏 -> 再估值”的无限循环。
                 action = "self_valuation_ignored"
             elif payload.get("instrument_type") not in CASH_TYPES and payload.get("account_type") not in {"SECURITIES_CASH", "STOCK"}:
                 action = "ignored"
             else:
-                # Position changes alter the rebuildable routing index.  The
-                # authoritative row is read after the outbox transaction.
-                if payload.get("event_type") in {"TRADE_CREATED", "POSITION_UPDATED", "POSITION_CLOSED", "DAILY_SETTLEMENT_REPLAY"}:
-                    self.service.rebuild_active_index()
+                # 持仓变化会改变“行情 -> 账户”的可重建路由索引。Outbox 事件已提交，
+                # 此处再读取数据库，确保索引只基于权威的最终持仓状态。
+                if payload.get("event_type") in {"POSITION_UPDATED", "POSITION_CLOSED"}:
+                    position_id = payload.get("position_id") or payload.get("entity_id")
+                    if position_id:
+                        self.service.refresh_active_index_for_position(position_id)
                 account_id = payload.get("account_id")
                 if account_id:
                     self.service.mark_account_dirty(account_id=account_id, source_event_id=payload.get("event_id", message_id))
@@ -63,8 +71,18 @@ class CashSecurityValuationFactWorker:
             self.stream_consumer.acknowledge(message_id)
             self.stream_consumer.clear_failure(message_id)
             return action
-        except Exception:
+        except Exception as exc:
             logger.exception("cash valuation fact processing failed id=%s", message_id)
+            failures = self.stream_consumer.increment_failure(message_id)
+            if failures >= MAX_FAILURES:
+                self.stream_consumer.publish_dead_letter(
+                    source_message_id=message_id,
+                    fields=fields,
+                    error=repr(exc),
+                )
+                self.stream_consumer.acknowledge(message_id)
+                self.stream_consumer.clear_failure(message_id)
+                return "dead_letter"
             return "retry"
 
     def run_once(self) -> None:
@@ -88,41 +106,58 @@ class CashSecurityValuationTickWorker:
     """Consume the standard tick stream without creating a second quote feed."""
 
     def __init__(self, *, redis, service: CashSecurityValuationService, stream_name: str = MARKET_TICK_STREAM) -> None:
-        self.redis = redis
         self.service = service
-        self.stream_name = stream_name
         self.consumer_name = _consumer_name("cash-val-tick")
+        self.stream_consumer = MarketTickStreamConsumer(
+            redis,
+            stream_name=stream_name,
+            group_name=CASH_VALUATION_TICK_CONSUMER_GROUP,
+            consumer_name=self.consumer_name,
+            dead_letter_stream="stream:market-ticks:cash-valuation:dead-letter",
+            failure_ttl_seconds=FAILURE_TTL_SECONDS,
+            failure_key_factory=cash_valuation_tick_failure_key,
+        )
         self.stop_event = Event()
 
     def request_stop(self, *_args) -> None:
         self.stop_event.set()
 
-    def ensure_group(self) -> None:
-        try:
-            self.redis.xgroup_create(self.stream_name, CASH_VALUATION_TICK_CONSUMER_GROUP, id="0", mkstream=True)
-        except ResponseError as exc:
-            if "BUSYGROUP" not in str(exc):
-                raise
-
     def run_once(self) -> int:
-        rows = self.redis.xreadgroup(CASH_VALUATION_TICK_CONSUMER_GROUP, self.consumer_name, {self.stream_name: ">"}, count=100, block=500)
         count = 0
-        for _stream, messages in rows:
-            for message_id, fields in messages:
-                try:
-                    payload = json.loads(fields.get("payload", "{}"))
-                    self.service.mark_tick_dirty(
-                        exchange_id=payload["exchange_id"], order_book_id=payload["order_book_id"],
-                        source_event_id=payload.get("source_event_id", fields.get("event_id", message_id)),
+        messages = self.stream_consumer.claim_stale_messages(
+            pending_idle_ms=30_000, batch_size=100
+        )
+        messages += self.stream_consumer.read_new_messages(batch_size=100, block_ms=500)
+        for message_id, fields in messages:
+            if fields is None:
+                self.stream_consumer.acknowledge(message_id)
+                self.stream_consumer.clear_failure(message_id)
+                continue
+            try:
+                payload = json.loads(fields.get("payload", "{}"))
+                self.service.mark_tick_dirty(
+                    exchange_id=payload["exchange_id"],
+                    order_book_id=payload["order_book_id"],
+                    source_event_id=payload.get("source_event_id", fields.get("event_id", message_id)),
+                )
+                self.stream_consumer.acknowledge(message_id)
+                self.stream_consumer.clear_failure(message_id)
+                count += 1
+            except Exception as exc:
+                logger.exception("cash valuation tick processing failed id=%s", message_id)
+                failures = self.stream_consumer.increment_failure(message_id)
+                if failures >= MAX_FAILURES:
+                    self.stream_consumer.publish_dead_letter(
+                        source_message_id=message_id,
+                        fields=fields,
+                        error=repr(exc),
                     )
-                    self.redis.xack(self.stream_name, CASH_VALUATION_TICK_CONSUMER_GROUP, message_id)
-                    count += 1
-                except Exception:
-                    logger.exception("cash valuation tick processing failed id=%s", message_id)
+                    self.stream_consumer.acknowledge(message_id)
+                    self.stream_consumer.clear_failure(message_id)
         return count
 
     def run_forever(self) -> None:
-        self.ensure_group()
+        self.stream_consumer.ensure_group()
         self.service.rebuild_active_index()
         while not self.stop_event.is_set():
             try:
@@ -133,17 +168,34 @@ class CashSecurityValuationTickWorker:
 
 
 class CashSecurityValuationPersistenceWorker:
-    """Batch persistent writer; it is the only component that writes money."""
+    """批量持久化估值结果；它是唯一允许写入估值金额的组件。"""
 
     def __init__(self, *, service: CashSecurityValuationService) -> None:
         self.service = service
         self.stop_event = Event()
+        self.owner = _consumer_name("cash-val-writer")
+        self.fencing_token: str | None = None
+        self.lease_ttl_seconds = 15
 
     def request_stop(self, *_args) -> None:
         self.stop_event.set()
 
     def run_once(self):
-        return self.service.persist_batch(100)
+        if self.fencing_token is None:
+            self.fencing_token = self.service.store.acquire_writer_lease(
+                self.owner, self.lease_ttl_seconds
+            )
+        elif not self.service.store.renew_writer_lease(
+            self.owner, self.fencing_token, self.lease_ttl_seconds
+        ):
+            self.fencing_token = None
+        if self.fencing_token is None:
+            return None
+        return self.service.persist_batch(
+            100,
+            lease_owner=self.owner,
+            fencing_token=self.fencing_token,
+        )
 
     def run_forever(self) -> None:
         while not self.stop_event.is_set():
@@ -152,6 +204,10 @@ class CashSecurityValuationPersistenceWorker:
             except Exception:
                 logger.exception("cash valuation persistence failed")
             self.stop_event.wait(0.5)
+        if self.fencing_token is not None:
+            self.service.store.release_writer_lease(
+                self.owner, self.fencing_token
+            )
 
 
 def build_service() -> CashSecurityValuationService:
@@ -163,8 +219,8 @@ def build_service() -> CashSecurityValuationService:
 
 
 def main() -> None:
-    # A supervisor may launch fact/tick/persistence instances separately.  The
-    # persistence loop is the safe default command entry point.
+    # 生产环境可分别启动事实、Tick 和持久化 Worker；直接运行本模块时默认启动
+    # 持久化写入器，避免多个入口同时写入账户估值金额。
     worker = CashSecurityValuationPersistenceWorker(service=build_service())
     signal.signal(signal.SIGINT, worker.request_stop)
     signal.signal(signal.SIGTERM, worker.request_stop)

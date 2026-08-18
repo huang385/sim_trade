@@ -173,20 +173,6 @@ class RealtimeFactEventService:
                 "position_cost": _decimal_string(
                     _field(position, "position_cost", Decimal("0"))
                 ),
-                "market_value": _decimal_string(
-                    _field(position, "market_value", Decimal("0"))
-                ),
-                "mark_price": (
-                    _decimal_string(_field(position, "mark_price"))
-                    if _field(position, "mark_price") is not None
-                    else None
-                ),
-                "mark_time": (
-                    _field(position, "mark_time").isoformat()
-                    if _field(position, "mark_time") is not None
-                    else None
-                ),
-                "mark_source_event_id": _field(position, "mark_source_event_id"),
                 "daily_pnl_base_cost": _decimal_string(
                     _field(position, "daily_pnl_base_cost", Decimal("0"))
                 ),
@@ -203,12 +189,9 @@ class RealtimeFactEventService:
                 "realized_pnl": _decimal_string(
                     _field(position, "realized_pnl", Decimal("0"))
                 ),
-                "unrealized_pnl": _decimal_string(
-                    _field(position, "unrealized_pnl", Decimal("0"))
-                ),
-                "daily_position_pnl": _decimal_string(
-                    _field(position, "daily_position_pnl", Decimal("0"))
-                ),
+                # Mark-derived fields deliberately stay out of a business-fact
+                # event.  A trade can change quantity before the valuation
+                # worker recomputes it; clients must wait for PNL_UPDATED.
                 "daily_close_pnl": _decimal_string(
                     _field(position, "daily_close_pnl", Decimal("0"))
                 ),

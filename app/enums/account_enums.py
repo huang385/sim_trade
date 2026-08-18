@@ -10,8 +10,8 @@ class AccountType(str, Enum):
     # 股票账户
     STOCK = "STOCK"
 
-    # Canonical cash-securities account identity.  STOCK remains readable for
-    # records created before the cash-security boundary was introduced.
+    # 现金证券账户的标准类型。为兼容现金证券边界引入前创建的历史记录，
+    # 仍保留 STOCK 类型的可读与处理能力。
     SECURITIES_CASH = "SECURITIES_CASH"
 
     # 期权账户

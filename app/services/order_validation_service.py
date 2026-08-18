@@ -130,8 +130,8 @@ class OrderValidationService:
         Decimal精度比较，禁止经过float。任一字段变化都拒绝复用幂等键。
         """
 
-        # ConvertibleBondOrderCreateRequest inherits the stock request shape;
-        # product identity must therefore be explicit rather than isinstance.
+        # 可转债请求继承股票请求结构，产品身份必须显式由合约类型确定，不能仅靠
+        # isinstance 判断，以免共享请求模型时走错校验规则。
         request_instrument_type = getattr(
             request, "cash_security_instrument_type", None
         )

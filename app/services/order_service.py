@@ -709,8 +709,8 @@ class OrderService:
             # POSITION_NOT_FOUND。实际资金修改仍由对应冻结分支完成。
             self.freeze_service.validate_account_tradable(account)
             if account.trading_day is None:
-                # A newly created account has no prior settlement facts. Bind it
-                # once to the already resolved order trading day under the account lock.
+        # 新建账户尚无历史结算事实；必须在账户行锁内一次性绑定本次已解析的
+        # 交易日，避免并发首单各自写入不同交易日。
                 account.trading_day = trading_day
             elif account.trading_day != trading_day:
                 raise BusinessRuleError(

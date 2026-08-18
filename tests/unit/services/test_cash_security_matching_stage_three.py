@@ -119,10 +119,10 @@ def test_cash_position_daily_basis_tracks_buys_and_partial_sells():
         volume=55,
     )
 
-    # The remaining daily base belongs to the remaining real position rather
-    # than a synthetic OPEN/CLOSE allocation.
+    # The sold convertible bonds consume the yesterday bucket first; the
+    # same-day buy basis stays intact.  This must not use aggregate pro rata.
     assert position.total_volume == 55
-    assert position.daily_pnl_base_cost == Decimal("665.000000")
+    assert position.daily_pnl_base_cost == Decimal("670.000000")
 
 
 @pytest.mark.parametrize(

@@ -475,6 +475,8 @@ function applyRealtimeEvent(event) {
                 ? {daily_position_pnl: values.daily_position_pnl} : {}),
             ...(values.daily_pnl !== undefined ? {daily_pnl: values.daily_pnl} : {}),
             ...(values.equity !== undefined ? {equity: values.equity} : {}),
+            ...(values.stock_market_value !== undefined
+                ? {stock_market_value: values.stock_market_value} : {}),
             ...(values.available_cash !== undefined
                 ? {available_cash: values.available_cash} : {}),
             ...(values.futures_unrealized_pnl !== undefined
@@ -613,6 +615,7 @@ function applyRealtimeEvent(event) {
         row.pnl = {
             ...row.pnl,
             mark_price: values.mark_price,
+            market_value: values.market_value,
             unrealized_pnl: values.cumulative_unrealized_pnl,
             daily_position_pnl: values.daily_position_pnl,
             event_time: values.event_time,
@@ -746,7 +749,7 @@ function renderAccount(account, pnl) {
 function renderPositions(positions) {
     elements.positionCount.textContent = `${positions.length} 条持仓`;
     if (!positions.length) {
-        elements.positionsBody.innerHTML = emptyRow(14, "当前账户暂无持仓");
+        elements.positionsBody.innerHTML = emptyRow(15, "当前账户暂无持仓");
         return;
     }
 
@@ -770,6 +773,7 @@ function renderPositions(positions) {
                 </td>
                 <td class="number">${formatPrice(position.average_open_price)}</td>
                 <td class="number">${formatPrice(pnl.mark_price)}</td>
+                <td class="number">${formatMoney(pnl.market_value)}</td>
                 <td class="number ${pnlClass(pnl.unrealized_pnl)}">
                     ${formatMoney(pnl.unrealized_pnl)}
                 </td>

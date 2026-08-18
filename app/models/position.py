@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -73,6 +74,27 @@ class Position(Base):
         CheckConstraint(
             "option_market_value >= 0",
             name="ck_position_option_market_value_nonnegative",
+        ),
+        CheckConstraint(
+            "market_value >= 0",
+            name="ck_position_market_value_nonnegative",
+        ),
+        CheckConstraint(
+            "daily_pnl_base_cost >= 0",
+            name="ck_position_daily_pnl_base_cost_nonnegative",
+        ),
+        CheckConstraint(
+            "yesterday_pnl_base_cost >= 0 AND today_pnl_base_cost >= 0",
+            name="ck_position_daily_pnl_bucket_cost_nonnegative",
+        ),
+        CheckConstraint(
+            "mark_price IS NULL OR mark_price > 0",
+            name="ck_position_mark_price_positive",
+        ),
+        CheckConstraint(
+            "(mark_price IS NULL AND mark_time IS NULL AND mark_source_event_id IS NULL) "
+            "OR (mark_price IS NOT NULL AND mark_time IS NOT NULL AND mark_source_event_id IS NOT NULL)",
+            name="ck_position_mark_fields_consistent",
         ),
         CheckConstraint(
             "multiplier_snapshot > 0",
@@ -163,18 +185,30 @@ class Position(Base):
     option_market_value: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
-    # Cash securities keep their last durable mark separately from option
-    # market value.  These fields are facts, not an input to matching.
+    # 现金证券单独保存最近一次已持久化的盯市结果，不与期权市值字段混用。
+    # 它们是估值事实，只用于展示、风控与日终基准，不能作为撮合输入。
     market_value: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
     )
     mark_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
     mark_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     mark_source_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # Daily cash-security holding PnL is the latest market value minus this
-    # value.  It is rolled at EOD and adjusted proportionally on sells.
+    # 现金证券当日持仓盈亏 = 最新市值 - 此基准。日终将其滚动为下一日基准，
+    # 卖出时按剩余持仓比例同步调整。
     daily_pnl_base_cost: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    # Cash securities have T+1 / same-day buckets.  Their daily PnL basis
+    # must be reduced from the bucket actually sold, never proportionally from
+    # the aggregate position.
+    yesterday_pnl_base_cost: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    today_pnl_base_cost: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    daily_pnl_base_established: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
     )
     margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     margin_rule_version: Mapped[str | None] = mapped_column(

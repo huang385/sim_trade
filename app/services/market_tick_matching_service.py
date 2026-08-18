@@ -158,8 +158,8 @@ class MarketTickMatchingService:
         """Redis 只提供候选编号，是否活动必须以 PostgreSQL 为准。"""
 
         if order is not None:
-            # Cash securities are routed by the dedicated coordinator.  They do
-            # not have an offset flag and must never enter this derivative path.
+        # 股票和可转债由专用协调器处理；它们没有开平标志，绝不能进入此处的
+        # 期货/期权撮合路径，否则会按衍生品规则错误冻结或释放持仓。
             if order.instrument_type in {"STOCK", "CONVERTIBLE_BOND"}:
                 return False
             self.product_registry.resolve(order.instrument_type)

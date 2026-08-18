@@ -537,6 +537,7 @@ class RealtimePnlStore:
         additions: list[tuple[str, str, str, str, str]],
         removals: list[tuple[str, str, str, str, str]],
         mark_dirty: bool = True,
+        emit_risk_events: bool = True,
     ) -> list[list[str]]:
         """
         生成一个PnL周期的Redis绝对写入命令。
@@ -639,7 +640,9 @@ class RealtimePnlStore:
                     "cumulative_unrealized_pnl",
                     "daily_position_pnl",
                     "daily_pnl",
+                    "cumulative_net_pnl",
                     "equity",
+                    "stock_market_value",
                     "available_cash",
                     "futures_unrealized_pnl",
                     "option_realtime_required_margin",
@@ -680,7 +683,8 @@ class RealtimePnlStore:
                 f"RISK:{dirty_version}:{item.account_id}:"
                 f"{item.updated_at.isoformat()}"
             )
-            operations.append(
+            if emit_risk_events:
+                operations.append(
                 [
                     "XADD_REALTIME_EVENT",
                     REALTIME_EVENT_STREAM,
@@ -759,6 +763,7 @@ class RealtimePnlStore:
         closed_positions: Iterable[tuple[str, str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
+        emit_risk_events: bool = True,
     ) -> tuple[int, int]:
         """
         一个500ms批次内原子写快照、Dirty标记和必要的静态索引变化。
@@ -777,6 +782,7 @@ class RealtimePnlStore:
             additions=list(active_positions),
             removals=list(closed_positions),
             mark_dirty=mark_dirty,
+            emit_risk_events=emit_risk_events,
         )
         written = self.redis_client.eval(
             WRITE_CYCLE_SCRIPT,
@@ -807,6 +813,7 @@ class RealtimePnlStore:
         closed_positions: Iterable[tuple[str, str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
+        emit_risk_events: bool = True,
     ) -> tuple[bool, int, int]:
         """
         仅在当前实例仍持有租约时原子写入一个PnL周期的全部Redis变化。
@@ -824,6 +831,7 @@ class RealtimePnlStore:
             additions=list(active_positions),
             removals=list(closed_positions),
             mark_dirty=mark_dirty,
+            emit_risk_events=emit_risk_events,
         )
 
         written = bool(

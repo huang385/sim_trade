@@ -290,7 +290,7 @@ class Account(Base):
     # 账户风险率
     #
     # 第一版可以使用：
-    # risk_ratio = used_margin / equity
+    # 风险度 = 占用保证金 / 动态权益。
     risk_ratio: Mapped[Decimal] = mapped_column(
         Numeric(18, 8),
         nullable=False,

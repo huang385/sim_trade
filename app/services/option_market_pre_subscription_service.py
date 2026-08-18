@@ -138,9 +138,8 @@ class OptionMarketPreSubscriptionService:
         instruments = (context.option, context.underlying)
         snapshots = self.market_tick_store.get_latest_many(
             {
-                # Latest market hashes are keyed by order_book_id.  Do not
-                # use the internal option symbol here: it can contain
-                # separators/lowercase and would not match a restored cache.
+                # 最新行情 Hash 按 order_book_id 建键。此处不能使用内部期权 symbol：
+                # 它可能包含分隔符或小写字母，重启恢复后的标准行情缓存将无法命中。
                 (instrument.exchange_id, instrument.order_book_id)
                 for instrument in instruments
             }

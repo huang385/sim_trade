@@ -136,6 +136,8 @@ class CashSecuritySettlementService:
             average_open_price=Decimal("0"), position_cost=Decimal("0"),
             market_value=Decimal("0"), mark_price=None, mark_time=None,
             mark_source_event_id=None, daily_pnl_base_cost=Decimal("0"),
+            yesterday_pnl_base_cost=Decimal("0"),
+            today_pnl_base_cost=Decimal("0"), daily_pnl_base_established=True,
             used_margin=Decimal("0"), initial_occupied_margin=Decimal("0"),
             realtime_required_margin=Decimal("0"), option_market_value=Decimal("0"),
             margin_rule_id=None, margin_rule_version=None, margin_rule_snapshot=None,
@@ -218,10 +220,8 @@ class CashSecuritySettlementService:
                 prior_frozen_cash = order.frozen_cash
                 prior_frozen_commission = order.frozen_commission
                 remaining_cash = quantize_money(order.limit_price * Decimal(remaining_after) * Decimal(instrument.contract_multiplier))
-                # The acceptance freeze is deliberately retained until all
-                # remaining shares are either matched or cancelled.  A fill can
-                # consume no more than the frozen estimate; a higher actual fee
-                # is still checked against presently available cash below.
+                # 接单时冻结的预计资金必须保留到剩余数量全部成交或撤单。单笔成交
+                # 最多消耗该预计冻结；若实际手续费更高，仍需在下方校验实时可用资金。
                 remaining_commission = max(
                     Decimal("0"), quantize_money(order.frozen_commission - commission)
                 )
@@ -268,11 +268,9 @@ class CashSecuritySettlementService:
                 cost = CashSecurityPositionService.apply_sell(
                     position, instrument_type=order.instrument_type, volume=volume
                 )
-                # Realized PnL is deliberately gross.  Commission is recorded
-                # independently in ``daily_commission`` / ``used_commission``
-                # and is already reflected in cash movement.  Netting it here
-                # would make daily and cumulative PnL subtract the same fee
-                # twice.
+                # 已实现盈亏按毛额记录。手续费单独计入 daily_commission /
+                # used_commission，且已经反映在现金变动中；这里再扣一次会导致
+                # 当日和累计盈亏重复扣减手续费。
                 realized_pnl = quantize_money(turnover - cost)
                 order.frozen_position_volume -= volume
                 account.available_cash = quantize_money(account.available_cash + turnover - commission)
@@ -286,9 +284,8 @@ class CashSecuritySettlementService:
                     position.daily_close_pnl + realized_pnl
                 )
                 if position.total_volume == 0:
-                    # A closed cash position cannot retain a tradable market
-                    # value or unrealised PnL while the valuation worker waits
-                    # for the corresponding durable fact event.
+                    # 已平完的现金证券持仓不能保留可交易市值或浮动盈亏；即使估值
+                    # Worker 尚未消费对应的持久化事实事件，也要在成交事务中清零。
                     position.market_value = Decimal("0")
                     position.unrealized_pnl = Decimal("0")
                     position.daily_position_pnl = Decimal("0")

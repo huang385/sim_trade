@@ -75,9 +75,8 @@ class TradeCreatedPnlService:
             raise TradeCreatedPnlValidationError(
                 "PnL事实事件payload必须是对象"
             )
-        # Cash securities have their own account/position facts.  Until a
-        # dedicated cash valuation worker exists they must not enter the
-        # derivative Dirty/Risk pipeline and be marked valuation-unavailable.
+        # 股票和可转债拥有独立的账户、持仓估值事实链路，不能进入衍生品的
+        # Dirty/Risk 管道；否则两个估值写者会并发覆盖同一账户字段。
         if str(payload.get("instrument_type") or "").upper() in {
             "STOCK",
             "CONVERTIBLE_BOND",

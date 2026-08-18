@@ -23,11 +23,27 @@ class CashSecurityPositionService:
                 error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
             )
         position.position_cost = quantize_money(position.position_cost + turnover)
-        # A same-day purchase contributes from its actual fill price, while
-        # inventory carried overnight keeps the EOD mark as its daily basis.
-        position.daily_pnl_base_cost = quantize_money(
-            Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0"))) + turnover
+        # 当日买入部分按实际成交额计入基准；隔夜持仓则保留昨日收盘盯市值，
+        # 两者相加后才能正确计算当日持仓盈亏。
+        today_base = Decimal(getattr(position, "today_pnl_base_cost", Decimal("0")))
+        # Compatibility for rows/tests created before the explicit buckets:
+        # their aggregate base represented the carried (yesterday) bucket.
+        prior_daily_base = Decimal(
+            getattr(position, "daily_pnl_base_cost", Decimal("0"))
         )
+        prior_yesterday_base = getattr(position, "yesterday_pnl_base_cost", None)
+        yesterday_base = Decimal(
+            prior_daily_base - today_base
+            if prior_yesterday_base is None
+            else prior_yesterday_base
+        )
+        position.yesterday_pnl_base_cost = yesterday_base
+        position.today_pnl_base_cost = quantize_money(today_base + turnover)
+        position.daily_pnl_base_cost = quantize_money(
+            position.yesterday_pnl_base_cost
+            + Decimal(position.today_pnl_base_cost)
+        )
+        position.daily_pnl_base_established = True
         position.average_open_price = quantize_money(
             position.position_cost / Decimal(position.total_volume)
         )
@@ -39,19 +55,35 @@ class CashSecurityPositionService:
                 "现金证券卖出冻结事实不一致",
                 error_code="CASH_SECURITY_SELL_FREEZE_INCONSISTENT",
             )
+        total_before = position.total_volume
+        yesterday_before = position.yesterday_volume
+        today_before = position.today_volume
+        prior_yesterday_base = getattr(position, "yesterday_pnl_base_cost", None)
+        yesterday_base = Decimal(
+            getattr(position, "daily_pnl_base_cost", Decimal("0"))
+            if prior_yesterday_base is None
+            else prior_yesterday_base
+        )
+        today_base = Decimal(
+            getattr(position, "today_pnl_base_cost", Decimal("0"))
+        )
         if instrument_type == "STOCK":
-            # T+1 stock orders can only freeze yesterday's available inventory.
+            # 股票遵循 T+1：卖出委托只能冻结可用昨仓，不能使用当日买入数量。
             if position.yesterday_volume < volume:
                 raise DataAccessError(
                     "股票卖出不能消耗当日锁定持仓",
                     error_code="STOCK_T_PLUS_ONE_VIOLATION",
                 )
             position.yesterday_volume -= volume
+            yesterday_sold = volume
+            today_sold = 0
         elif instrument_type == "CONVERTIBLE_BOND":
-            # Convertible bonds may use available inventory from either bucket.
+            # 可转债不受股票 T+1 限制，可使用今仓和昨仓中的可用数量。
             from_yesterday = min(position.yesterday_volume, volume)
             position.yesterday_volume -= from_yesterday
             position.today_volume -= volume - from_yesterday
+            yesterday_sold = from_yesterday
+            today_sold = volume - from_yesterday
         else:
             raise DataAccessError(
                 "现金证券持仓产品类型无效",
@@ -59,20 +91,40 @@ class CashSecurityPositionService:
             )
         cost = (
             position.position_cost
-            if volume == position.total_volume
-            else quantize_money(position.position_cost * Decimal(volume) / Decimal(position.total_volume))
-        )
-        daily_base = Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0")))
-        daily_base_reduction = (
-            daily_base
-            if volume == position.total_volume
-            else quantize_money(daily_base * Decimal(volume) / Decimal(position.total_volume))
+            if volume == total_before
+            else quantize_money(position.position_cost * Decimal(volume) / Decimal(total_before))
         )
         position.frozen_volume -= volume
         position.total_volume -= volume
         position.position_cost = quantize_money(position.position_cost - cost)
+        yesterday_reduction = (
+            yesterday_base
+            if yesterday_sold == yesterday_before
+            else quantize_money(
+                yesterday_base * Decimal(yesterday_sold)
+                / Decimal(yesterday_before)
+            )
+            if yesterday_sold
+            else Decimal("0")
+        )
+        today_reduction = (
+            today_base
+            if today_sold == today_before
+            else quantize_money(
+                today_base * Decimal(today_sold) / Decimal(today_before)
+            )
+            if today_sold
+            else Decimal("0")
+        )
+        position.yesterday_pnl_base_cost = quantize_money(
+            yesterday_base - yesterday_reduction
+        )
+        position.today_pnl_base_cost = quantize_money(
+            today_base - today_reduction
+        )
         position.daily_pnl_base_cost = quantize_money(
-            daily_base - daily_base_reduction
+            Decimal(position.yesterday_pnl_base_cost)
+            + Decimal(position.today_pnl_base_cost)
         )
         position.available_volume = (
             position.total_volume

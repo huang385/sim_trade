@@ -659,7 +659,7 @@ class TradeSettlementService:
             self.trade_repository.add(db, trade)
 
             # 更新订单数量及加权平均成交价，并继续维持数量恒等式：
-            # total = traded + remaining + cancelled。
+        # 委托数量守恒：总量 = 已成交 + 剩余 + 已撤销。
             new_traded = traded_before + fill_volume
             new_remaining = remaining_before - fill_volume
             order.traded_volume = new_traded

@@ -901,6 +901,9 @@ class DailySettlementService:
                     for item in positions
                     if item.instrument_type in CASH_SECURITY_TYPES
                 ]
+                cash_positions_by_account: dict[str, list[Position]] = {}
+                for item in cash_positions:
+                    cash_positions_by_account.setdefault(item.account_id, []).append(item)
                 derivative_position_ids = {
                     item.position_id
                     for item in positions
@@ -1065,6 +1068,27 @@ class DailySettlementService:
                     account_id = account.account_id
                     account_positions = projections_by_account.get(
                         account_id, []
+                    )
+                    cash_account_positions = cash_positions_by_account.get(
+                        account_id, []
+                    )
+                    cash_market_value = quantize_money(
+                        sum(
+                            (Decimal(item.market_value) for item in cash_account_positions),
+                            ZERO,
+                        )
+                    )
+                    cash_unrealized_pnl = quantize_money(
+                        sum(
+                            (Decimal(item.unrealized_pnl) for item in cash_account_positions),
+                            ZERO,
+                        )
+                    )
+                    cash_daily_position_pnl = quantize_money(
+                        sum(
+                            (Decimal(item.daily_position_pnl) for item in cash_account_positions),
+                            ZERO,
+                        )
                     )
                     account_trades = all_trades_by_account.get(
                         account_id, []
@@ -1523,8 +1547,8 @@ class DailySettlementService:
                             "账户成交手续费与持仓回放汇总不守恒",
                             error_code="REPLAY_COMMISSION_CONSERVATION_FAILED",
                         )
-                    # Cash-security fees are account-level facts and do not
-                    # belong to a derivative position replay.
+                    # 现金证券手续费是账户级资金事实，不属于期货/期权逐持仓的
+                    # 结算价回放；因此直接保留当天成交手续费汇总。
                     day_commission = trade_commission
                     ending_cash = quantize_money(
                         expected_before_cash
@@ -1537,7 +1561,8 @@ class DailySettlementService:
                     account.option_realtime_required_margin = (
                         option_used_margin
                     )
-                    account.unrealized_pnl = ZERO
+                    account.stock_market_value = cash_market_value
+                    account.unrealized_pnl = cash_unrealized_pnl
                     account.long_option_market_value = long_option_value
                     account.short_option_market_value = short_option_value
                     account.net_option_market_value = quantize_money(
@@ -1572,11 +1597,13 @@ class DailySettlementService:
                     account.cumulative_net_pnl = quantize_money(
                         Decimal(account.realized_pnl)
                         + active_cumulative_economic
+                        + cash_unrealized_pnl
                         - Decimal(account.used_commission)
                     )
                     account.daily_position_pnl = quantize_money(
                         futures_holding_pnl
                         + option_economic_pnl
+                        + cash_daily_position_pnl
                         - sum(
                             (
                                 item.close_pnl
@@ -1607,6 +1634,7 @@ class DailySettlementService:
                         futures_holding_pnl
                         + futures_close_pnl
                         + option_economic_pnl
+                        + cash_daily_position_pnl
                         + sum(
                             (
                                 Decimal(item.daily_close_pnl)
@@ -1626,6 +1654,7 @@ class DailySettlementService:
                             ),
                             ZERO,
                         )
+                        + cash_daily_position_pnl
                     )
                     expected_net_pnl = quantize_money(
                         expected_position_pnl
@@ -1644,37 +1673,38 @@ class DailySettlementService:
                             "账户净盈亏与持仓、平仓及手续费不守恒",
                             error_code="REPLAY_NET_PNL_CONSERVATION_FAILED",
                         )
-                    valuation = AccountValuationCalculator.calculate(
-                        cash_balance=ending_cash,
-                        futures_unrealized_pnl=ZERO,
-                        long_option_market_value=long_option_value,
-                        short_option_market_value=short_option_value,
-                        used_margin=total_used_margin,
-                        option_used_margin=option_used_margin,
-                        option_realtime_required_margin=option_used_margin,
-                        frozen_margin=ZERO,
-                        frozen_cash=ZERO,
-                        frozen_commission=ZERO,
-                        option_collateral_ratio=(
-                            settings.option_collateral_ratio
-                        ),
-                    )
-                    account.equity = valuation.equity
-                    account.available_cash = valuation.available_cash
-                    account.risk_available_cash = (
-                        valuation.risk_available_cash
-                    )
-                    account.net_option_market_value = (
-                        valuation.net_option_market_value
-                    )
-                    account.risk_ratio = (
-                        ZERO.quantize(RISK_QUANT)
-                        if account.equity <= ZERO
-                        else (
-                            valuation.effective_required_margin
-                            / account.equity
-                        ).quantize(RISK_QUANT, rounding=ROUND_HALF_UP)
-                    )
+                    if account.account_type in {"SECURITIES_CASH", "STOCK"}:
+                        # Cash securities are fully paid: shares contribute to equity
+                        # through their mark value, never through futures margin.
+                        account.equity = quantize_money(ending_cash + cash_market_value)
+                        account.available_cash = ending_cash
+                        account.risk_available_cash = ending_cash
+                        account.risk_ratio = ZERO.quantize(RISK_QUANT)
+                    else:
+                        valuation = AccountValuationCalculator.calculate(
+                            cash_balance=ending_cash,
+                            futures_unrealized_pnl=ZERO,
+                            long_option_market_value=long_option_value,
+                            short_option_market_value=short_option_value,
+                            used_margin=total_used_margin,
+                            option_used_margin=option_used_margin,
+                            option_realtime_required_margin=option_used_margin,
+                            frozen_margin=ZERO,
+                            frozen_cash=ZERO,
+                            frozen_commission=ZERO,
+                            option_collateral_ratio=settings.option_collateral_ratio,
+                        )
+                        account.equity = valuation.equity
+                        account.available_cash = valuation.available_cash
+                        account.risk_available_cash = valuation.risk_available_cash
+                        account.net_option_market_value = valuation.net_option_market_value
+                        account.risk_ratio = (
+                            ZERO.quantize(RISK_QUANT)
+                            if account.equity <= ZERO
+                            else (
+                                valuation.effective_required_margin / account.equity
+                            ).quantize(RISK_QUANT, rounding=ROUND_HALF_UP)
+                        )
                     account.risk_state = AccountRiskStateService.evaluate(
                         current_state=account.risk_state,
                         valuation_available=True,
@@ -1767,12 +1797,9 @@ class DailySettlementService:
                         fact_reason="DAILY_SETTLEMENT_REPLAY",
                     )
 
-                # Cash securities deliberately do not have derivative
-                # PositionDetail / settlement-price replay.  Their day-end
-                # operation is a volume rollover: shares bought today become
-                # yesterday holdings and STOCK T+1 locks are released.  A
-                # frozen sell quantity at this barrier is an invariant breach,
-                # not something to silently unlock.
+                # 现金证券不走期货/期权的逐笔明细和结算价回放。日终只进行数量
+                # 结转：今日买入变为昨仓，并解除股票 T+1 锁定。此时若仍有卖出
+                # 冻结量，说明订单或持仓状态不守恒，必须报错而不能静默解冻。
                 for position in cash_positions:
                     if position.frozen_volume != 0:
                         raise DataAccessError(
@@ -1790,13 +1817,17 @@ class DailySettlementService:
                     position.yesterday_volume = position.total_volume
                     position.settlement_locked_volume = 0
                     position.available_volume = position.total_volume
-                    # Cash daily holding PnL starts from the verified durable
-                    # close mark.  Do not manufacture a zero baseline when
-                    # valuation is unavailable: the next trading day would
-                    # otherwise report a false gain/loss.
+                    # 现金证券下一交易日的持仓盈亏必须以已校验、已持久化的收盘
+                    # 盯市值为基准。估值不可用时不能伪造零基准，否则次日会产生
+                    # 虚假的涨跌盈亏。
                     if position.total_volume > 0 and (
                         getattr(position, "mark_price", None) is None
                         or getattr(position, "mark_time", None) is None
+                        or getattr(position, "mark_source_event_id", None) is None
+                        or Decimal(getattr(position, "mark_price", ZERO)) <= ZERO
+                        or position.mark_time.astimezone(SHANGHAI).date() != trading_day
+                        or (now - position.mark_time).total_seconds() < 0
+                        or (now - position.mark_time).total_seconds() > self.tick_max_age_seconds
                     ):
                         raise DataAccessError(
                             "现金证券日终缺少有效估值基准",
@@ -1805,6 +1836,11 @@ class DailySettlementService:
                     position.daily_pnl_base_cost = Decimal(
                         getattr(position, "market_value", ZERO)
                     )
+                    position.yesterday_pnl_base_cost = Decimal(
+                        getattr(position, "market_value", ZERO)
+                    )
+                    position.today_pnl_base_cost = ZERO
+                    position.daily_pnl_base_established = True
                     position.daily_position_pnl = ZERO
                     position.daily_close_pnl = ZERO
                     position.trading_day = next_trading_day
@@ -2021,7 +2057,8 @@ class DailySettlementService:
                 position_snapshots: list[PositionRealtimePnl] = []
                 for position in baseline_position_models:
                     fact = position_facts.get(position.position_id)
-                    if fact is None:
+                    is_cash_security = position.instrument_type in CASH_SECURITY_TYPES
+                    if fact is None and not is_cash_security:
                         raise RuntimeError(
                             "活动持仓缺少当日日终结算事实: "
                             f"{position.position_id}"
@@ -2035,6 +2072,25 @@ class DailySettlementService:
                             + cumulative
                         )
                     )
+                    mark_price = (
+                        Decimal(position.mark_price)
+                        if is_cash_security
+                        else Decimal(fact.settlement_price)
+                    )
+                    event_time = (
+                        position.mark_time if is_cash_security else fact.settled_at
+                    )
+                    source_event_id = (
+                        position.mark_source_event_id
+                        if is_cash_security
+                        else f"SETTLEMENT:{batch.batch_id}:{position.position_id}"
+                    )
+                    if is_cash_security and (
+                        mark_price <= ZERO or event_time is None or not source_event_id
+                    ):
+                        raise RuntimeError(
+                            f"现金证券持仓缺少已验证的日终估值基准: {position.position_id}"
+                        )
                     position_snapshots.append(
                         PositionRealtimePnl(
                             position_id=position.position_id,
@@ -2042,10 +2098,15 @@ class DailySettlementService:
                             exchange_id=position.exchange_id,
                             symbol=position.symbol,
                             direction=position.direction,
-                            mark_price=Decimal(fact.settlement_price),
+                            mark_price=mark_price,
+                            market_value=(
+                                Decimal(position.market_value)
+                                if is_cash_security
+                                else ZERO
+                            ),
                             cumulative_unrealized_pnl=cumulative,
                             daily_position_pnl=ZERO,
-                            cash_unrealized_pnl=ZERO,
+                            cash_unrealized_pnl=(cumulative if is_cash_security else ZERO),
                             instrument_type=position.instrument_type,
                             option_market_value=Decimal(
                                 position.option_market_value
@@ -2053,13 +2114,10 @@ class DailySettlementService:
                             realtime_required_margin=Decimal(
                                 position.realtime_required_margin
                             ),
-                            event_time=fact.settled_at,
-                            source_event_id=(
-                                f"SETTLEMENT:{batch.batch_id}:"
-                                f"{position.position_id}"
-                            ),
+                            event_time=event_time,
+                            source_event_id=source_event_id,
                             trading_day=position.trading_day,
-                            updated_at=fact.settled_at,
+                            updated_at=event_time,
                             data_source="DAILY_SETTLEMENT_BASELINE",
                             source_position_fact_version=(
                                 fact_versions.get(
@@ -2072,9 +2130,7 @@ class DailySettlementService:
                 account_snapshots = [
                     AccountRealtimePnl(
                         account_id=account.account_id,
-                        cumulative_unrealized_pnl=(
-                            cumulative_by_account.get(account.account_id, ZERO)
-                        ),
+                        cumulative_unrealized_pnl=Decimal(account.unrealized_pnl),
                         daily_position_pnl=ZERO,
                         daily_close_pnl=ZERO,
                         daily_commission=ZERO,
@@ -2083,6 +2139,7 @@ class DailySettlementService:
                             account.cumulative_net_pnl
                         ),
                         equity=Decimal(account.equity),
+                        stock_market_value=Decimal(account.stock_market_value),
                         available_cash=Decimal(account.available_cash),
                         futures_unrealized_pnl=ZERO,
                         option_realtime_required_margin=Decimal(
