@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -84,12 +84,16 @@ class StockOrderCreateRequest(CommonOrderCreateRequest):
 
     model_config = ConfigDict(extra="forbid")
 
+    cash_security_instrument_type: ClassVar[str] = "STOCK"
+
     order_type: Literal[OrderType.LIMIT] = OrderType.LIMIT
     limit_price: Decimal = Field(gt=Decimal("0"))
 
 
 class ConvertibleBondOrderCreateRequest(StockOrderCreateRequest):
     """Convertible-bond cash order; it deliberately has no offset flag."""
+
+    cash_security_instrument_type: ClassVar[str] = "CONVERTIBLE_BOND"
 
 
 class OrderCreateRequest(DerivativeOrderCreateRequest):

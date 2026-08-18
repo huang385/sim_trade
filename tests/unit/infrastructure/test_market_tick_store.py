@@ -31,6 +31,22 @@ def test_publish_passes_decimal_strings_and_returns_result():
     assert "HGET" not in arguments[0]
 
 
+def test_option_latest_hash_uses_order_book_id_not_internal_symbol():
+    redis_client = Mock()
+    redis_client.eval.return_value = "PUBLISHED"
+    tick = normalize().model_copy(
+        update={
+            "symbol": "jd2609-C-3200",
+            "order_book_id": "JD2609C3200",
+        }
+    )
+
+    MarketTickStore(redis_client).publish(tick)
+
+    arguments = redis_client.eval.call_args.args
+    assert arguments[2] == "market:latest:SHFE:JD2609C3200"
+
+
 def test_hash_mapping_uses_empty_string_for_none_and_iso_time():
     mapping = MarketTickStore.tick_to_mapping(normalize())
 
@@ -121,3 +137,17 @@ def test_get_latest_many_uses_one_pipeline_and_stable_contract_mapping():
     }
     redis_client.pipeline.assert_called_once_with(transaction=False)
     assert pipeline.hgetall.call_count == 2
+
+
+def test_get_latest_many_reads_option_with_canonical_order_book_key():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.execute.return_value = [{"last_price": "1019"}]
+    store = MarketTickStore(redis_client)
+
+    result = store.get_latest_many([("DCE", "jd2609-C-3200")])
+
+    assert result == {("DCE", "JD2609-C-3200"): {"last_price": "1019"}}
+    pipeline.hgetall.assert_called_once_with(
+        "market:latest:DCE:JD2609C3200"
+    )

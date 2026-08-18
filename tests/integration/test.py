@@ -12,9 +12,9 @@ ymm_data_sdk.init(
 )
 
 data = ymm_data_sdk.get_price(
-    "IF2609",
-    start_date="2026-08-17",
-    end_date="2026-08-17",
+    "JD2609C3200",
+    start_date="2026-08-18",
+    end_date="2026-08-18",
     frequency="tick",
 )
 
@@ -44,4 +44,4 @@ result = data[
         ask_price_column: "卖一价",
     }
 )
-print(result.head(100).to_string(index=False))
+print(result)

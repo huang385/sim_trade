@@ -44,6 +44,41 @@ class CashSecurityMarketTickMatchingService:
     def process(self, *, stream_message_id: str, fields: Mapping[str, str]) -> MarketTickMatchResult:
         event = parse_market_tick_event(fields)
         order_ids = sorted(self.active_order_index.list_instrument_order_ids(event.exchange_id, event.symbol))
+        return self._process_order_ids(
+            order_ids=order_ids,
+            stream_message_id=stream_message_id,
+            event=event,
+        )
+
+    def process_candidate_order(
+        self,
+        *,
+        order_id: str,
+        stream_message_id: str,
+        event,
+        order_snapshot=None,
+    ) -> MarketTickMatchResult:
+        """Match one newly accepted cash order against a fresh live tick.
+
+        The optional snapshot keeps the order-arrival coordinator compatible
+        with the derivative path.  Cash matching always reloads the row under
+        its own transaction before settlement.
+        """
+
+        _ = order_snapshot
+        return self._process_order_ids(
+            order_ids=[order_id],
+            stream_message_id=stream_message_id,
+            event=event,
+        )
+
+    def _process_order_ids(
+        self,
+        *,
+        order_ids: list[str],
+        stream_message_id: str,
+        event,
+    ) -> MarketTickMatchResult:
         matched = settled = idempotent = skipped = 0
         first_error = None
         market = CashSecurityMarketSnapshot(

@@ -38,6 +38,7 @@ from app.services.cash_security_fee_service import (
 )
 from app.services.cash_security_funds_service import CashSecurityFundsService
 from app.services.order_idempotency_service import OrderIdempotencyService
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.stock_order_validation_service import (
     CASH_SECURITY_POSITION_DIRECTION,
     StockTradingPolicy,
@@ -351,6 +352,24 @@ class CashSecurityOrderService:
                 "business_version": str(outbox_event.id),
             }
             account.updated_at = accepted_at
+            realtime_events = RealtimeFactEventService(
+                repository=self.outbox_repository
+            )
+            if request.direction == OrderDirection.BUY:
+                realtime_events.create_account_updated(
+                    db,
+                    account=account,
+                    occurred_at=accepted_at,
+                    account_type="SECURITIES_CASH",
+                    fact_reason="CASH_SECURITY_BUY_FROZEN",
+                )
+            else:
+                realtime_events.create_position_updated(
+                    db,
+                    position=position,
+                    occurred_at=accepted_at,
+                    fact_reason="CASH_SECURITY_SELL_FROZEN",
+                )
             db.commit()
             return order
         except Exception:

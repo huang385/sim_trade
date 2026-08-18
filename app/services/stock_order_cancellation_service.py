@@ -23,6 +23,7 @@ from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
 from app.services.cash_security_funds_service import CashSecurityFundsService
+from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.stock_order_validation_service import (
     CASH_SECURITY_POSITION_DIRECTION,
 )
@@ -224,6 +225,24 @@ class CashSecurityOrderCancellationService:
                 **outbox_event.payload,
                 "business_version": str(outbox_event.id),
             }
+            realtime_events = RealtimeFactEventService(
+                repository=self.outbox_repository
+            )
+            if order.direction == "BUY":
+                realtime_events.create_account_updated(
+                    db,
+                    account=account,
+                    occurred_at=cancelled_at,
+                    account_type="SECURITIES_CASH",
+                    fact_reason="CASH_SECURITY_BUY_RELEASED",
+                )
+            else:
+                realtime_events.create_position_updated(
+                    db,
+                    position=position,
+                    occurred_at=cancelled_at,
+                    fact_reason="CASH_SECURITY_SELL_RELEASED",
+                )
             db.commit()
             return order
         except Exception:

@@ -184,10 +184,18 @@ def order_event_failure_key(message_id: str) -> str:
     return f"order_event_failure:{message_id}"
 
 
-def market_latest_key(exchange_id: str, symbol: str) -> str:
+def market_latest_key(exchange_id: str, order_book_id: str) -> str:
     """返回指定交易所、合约的最新标准化行情 Hash 键名。"""
 
-    return f"market:latest:{exchange_id}:{symbol}"
+    # Latest-market cache is keyed by the canonical market code.  Internal
+    # option symbols may include separators (e.g. jd2609-C-3200), while the
+    # matching/subscription code is JD2609C3200.  Keeping the separator in a
+    # Redis key makes restart recovery depend on the spelling used by callers.
+    normalized_exchange = str(exchange_id).strip().upper()
+    normalized_order_book_id = (
+        str(order_book_id).strip().upper().replace("-", "")
+    )
+    return f"market:latest:{normalized_exchange}:{normalized_order_book_id}"
 
 
 def market_matching_failure_key(message_id: str) -> str:

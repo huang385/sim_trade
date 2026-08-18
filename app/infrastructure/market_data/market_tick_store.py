@@ -146,7 +146,7 @@ class MarketTickStore:
         result = self.redis_client.eval(
             PUBLISH_MARKET_TICK_SCRIPT,
             2,
-            market_latest_key(tick.exchange_id, tick.symbol),
+            market_latest_key(tick.exchange_id, tick.order_book_id),
             self.stream_name,
             tick.source_event_id,
             self.EVENT_TYPE,
@@ -165,8 +165,14 @@ class MarketTickStore:
             result = result.decode("utf-8")
         return MarketTickStoreResult(str(result))
 
-    def get_latest(self, exchange_id: str, symbol: str) -> dict[str, str]:
-        return self.redis_client.hgetall(market_latest_key(exchange_id, symbol))
+    def get_latest(
+        self,
+        exchange_id: str,
+        order_book_id: str,
+    ) -> dict[str, str]:
+        return self.redis_client.hgetall(
+            market_latest_key(exchange_id, order_book_id)
+        )
 
     def get_latest_many(
         self,
@@ -183,17 +189,17 @@ class MarketTickStore:
             {
                 (
                     str(exchange_id).strip().upper(),
-                    str(symbol).strip().upper(),
+                    str(order_book_id).strip().upper(),
                 )
-                for exchange_id, symbol in contract_keys
+                for exchange_id, order_book_id in contract_keys
             }
         )
         if not keys:
             return {}
 
         pipeline = self.redis_client.pipeline(transaction=False)
-        for exchange_id, symbol in keys:
-            pipeline.hgetall(market_latest_key(exchange_id, symbol))
+        for exchange_id, order_book_id in keys:
+            pipeline.hgetall(market_latest_key(exchange_id, order_book_id))
         return dict(zip(keys, pipeline.execute(), strict=True))
 
     def update_source_status(self, values: dict[str, Any]) -> None:

@@ -251,12 +251,23 @@ class CashSecuritySettlementService:
                 cost = CashSecurityPositionService.apply_sell(
                     position, instrument_type=order.instrument_type, volume=volume
                 )
-                realized_pnl = quantize_money(turnover - cost - commission)
+                # Realized PnL is deliberately gross.  Commission is recorded
+                # independently in ``daily_commission`` / ``used_commission``
+                # and is already reflected in cash movement.  Netting it here
+                # would make daily and cumulative PnL subtract the same fee
+                # twice.
+                realized_pnl = quantize_money(turnover - cost)
                 order.frozen_position_volume -= volume
                 account.available_cash = quantize_money(account.available_cash + turnover - commission)
                 account.cash_balance = quantize_money(account.cash_balance + turnover - commission)
                 account.realized_pnl = quantize_money(account.realized_pnl + realized_pnl)
+                account.daily_close_pnl = quantize_money(
+                    account.daily_close_pnl + realized_pnl
+                )
                 position.realized_pnl = quantize_money(position.realized_pnl + realized_pnl)
+                position.daily_close_pnl = quantize_money(
+                    position.daily_close_pnl + realized_pnl
+                )
             else:
                 raise DataAccessError("现金证券订单方向无效", error_code="CASH_SECURITY_DIRECTION_INVALID")
             account.used_commission = quantize_money(account.used_commission + commission)
@@ -264,7 +275,7 @@ class CashSecuritySettlementService:
             account.updated_at = now
             position.updated_at = now
             self._update_order(order, price=match.fill_price, volume=volume, now=now)
-            trade = Trade(trade_id=trade_id, order_id=order.order_id, account_id=order.account_id, market_event_id=market_event_id, market_stream_message_id=market_stream_message_id, order_book_id=order.order_book_id, exchange_id=order.exchange_id, symbol=order.symbol, trading_day=order.trading_day, instrument_type=order.instrument_type, direction=order.direction, offset_flag=None, trade_price=match.fill_price, trade_volume=volume, turnover=turnover, margin=Decimal("0"), premium_cash_flow=Decimal("0"), margin_rule_id=None, margin_rule_version=None, margin_calculation_version=None, commission=commission, realized_pnl=realized_pnl, daily_close_pnl=Decimal("0"), trade_time=tick_event_time, created_at=now)
+            trade = Trade(trade_id=trade_id, order_id=order.order_id, account_id=order.account_id, market_event_id=market_event_id, market_stream_message_id=market_stream_message_id, order_book_id=order.order_book_id, exchange_id=order.exchange_id, symbol=order.symbol, trading_day=order.trading_day, instrument_type=order.instrument_type, direction=order.direction, offset_flag=None, trade_price=match.fill_price, trade_volume=volume, turnover=turnover, margin=Decimal("0"), premium_cash_flow=Decimal("0"), margin_rule_id=None, margin_rule_version=None, margin_calculation_version=None, commission=commission, realized_pnl=realized_pnl, daily_close_pnl=realized_pnl, trade_time=tick_event_time, created_at=now)
             self.trade_repository.add(db, trade)
             self._create_events(db, order=order, trade=trade, account=account, position=position, now=now)
             db.commit()

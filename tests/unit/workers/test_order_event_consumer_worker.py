@@ -14,6 +14,8 @@ def make_worker(
     process_side_effect=None,
     failure_count=1,
     arrival_matching_service=None,
+    cash_security_arrival_matching_service=None,
+    cash_security_event_service=None,
     market_order_execution_service=None,
 ):
     db = Mock()
@@ -41,7 +43,11 @@ def make_worker(
         session_factory=session_factory,
         stream_consumer=stream_consumer,
         event_service=event_service,
+        cash_security_event_service=cash_security_event_service,
         arrival_matching_service=arrival_matching_service,
+        cash_security_arrival_matching_service=(
+            cash_security_arrival_matching_service
+        ),
         market_order_execution_service=market_order_execution_service,
         batch_size=100,
         block_ms=1,
@@ -88,6 +94,43 @@ def test_accepted_order_triggers_arrival_matching_before_ack():
         order_snapshot=None,
     )
     stream_consumer.acknowledge.assert_called_once_with("1-0")
+
+
+def test_cash_security_accepted_order_triggers_its_own_arrival_matching():
+    cash_arrival = Mock()
+    cash_arrival.match_if_ready.return_value = SimpleNamespace(
+        action="WAITING_FOR_LIVE_TICK"
+    )
+    cash_event_service = Mock()
+    cash_event_service.is_cash_security_event.return_value = True
+    cash_event_service.process.return_value = SimpleNamespace(
+        event_id="EVT-CASH-1",
+        event_type="STOCK_ORDER_ACCEPTED",
+        order_id="SO-1",
+        exchange_id="SSE",
+        symbol="600519",
+        action="REGISTERED",
+    )
+    worker, stream_consumer, event_service, _ = make_worker(
+        cash_security_event_service=cash_event_service,
+        cash_security_arrival_matching_service=cash_arrival,
+    )
+
+    result = worker.handle_message(
+        "cash-1",
+        {
+            "event_id": "EVT-CASH-1",
+            "event_type": "STOCK_ORDER_ACCEPTED",
+            "payload": '{"order_id":"SO-1"}',
+        },
+    )
+
+    assert result == "acknowledged"
+    event_service.process.assert_not_called()
+    cash_arrival.match_if_ready.assert_called_once_with(
+        order_id="SO-1", exchange_id="SSE", symbol="600519"
+    )
+    stream_consumer.acknowledge.assert_called_once_with("cash-1")
 
 
 def test_market_order_executes_and_cancels_before_ack():

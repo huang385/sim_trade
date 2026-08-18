@@ -74,7 +74,9 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
             sequence_id=0,
         ),
     ]
-    latest_key = market_latest_key(exchange_id, symbol)
+    # Latest snapshots are indexed by the canonical market code, which can
+    # differ from the internal symbol used by a Position or Instrument row.
+    latest_key = market_latest_key(exchange_id, ticks[0].order_book_id)
     cleanup_keys = [latest_key, stream_name]
 
     try:
@@ -86,7 +88,7 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
                 subscription_generation=(7 if index == len(ticks) - 1 else None),
             ) == MarketTickStoreResult.PUBLISHED
 
-        latest = store.get_latest(exchange_id, symbol)
+        latest = store.get_latest(exchange_id, ticks[0].order_book_id)
         assert latest["sequence_id"] == "0"
         assert latest["event_time"] == "2026-07-22T09:31:00+08:00"
         assert latest["bid_volume_1"] == "1"
@@ -97,7 +99,7 @@ def test_real_redis_atomically_updates_latest_hash_and_appends_every_live_tick()
         # 最新Hash保留真实Stream编号，供订单到达即时撮合继续复用同一
         # 行情事件和成交幂等键。
         assert latest["stream_message_id"] == messages[-1][0]
-        latest = store.get_latest(exchange_id, symbol)
+        latest = store.get_latest(exchange_id, ticks[0].order_book_id)
         assert latest["subscription_generation"] == "7"
         # Hash增加的内部追踪字段不会影响MarketTick类型恢复。
         assert MarketTickStore.mapping_to_tick(latest) == ticks[-1]

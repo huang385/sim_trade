@@ -9,7 +9,7 @@ from app.services.realtime_fact_event_service import RealtimeFactEventService
 NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
 
 
-def test_account_fact_event_owns_only_postgres_decimal_fields():
+def test_account_fact_event_carries_complete_absolute_cash_fact():
     repository = Mock()
     service = RealtimeFactEventService(
         repository=repository,
@@ -49,6 +49,9 @@ def test_account_fact_event_owns_only_postgres_decimal_fields():
     assert payload["frozen_commission"] == "4"
     assert payload["option_used_margin"] == "60"
     assert payload["daily_close_pnl"] == "9"
+    assert payload["available_cash"] == "880"
+    assert payload["equity"] == "1011"
+    assert payload["daily_pnl"] == "11"
     assert all(
         not isinstance(payload[field], float)
         for field in (
@@ -61,9 +64,6 @@ def test_account_fact_event_owns_only_postgres_decimal_fields():
     assert {
         "unrealized_pnl",
         "daily_position_pnl",
-        "daily_pnl",
-        "equity",
-        "available_cash",
         "risk_available_cash",
         "risk_ratio",
         "risk_state",

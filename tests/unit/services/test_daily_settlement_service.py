@@ -31,6 +31,26 @@ NEXT_DAY = date(2026, 8, 7)
 NOW = datetime(2026, 8, 6, 8, 30, tzinfo=timezone.utc)
 
 
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [
+        ("BUY", Decimal("-1005.000000")),
+        ("SELL", Decimal("995.000000")),
+    ],
+)
+def test_cash_security_trade_cash_effect_uses_turnover_and_fee_once(
+    direction, expected
+):
+    trade = SimpleNamespace(
+        instrument_type="STOCK",
+        direction=direction,
+        turnover=Decimal("1000"),
+        commission=Decimal("5"),
+    )
+
+    assert DailySettlementService._trade_cash_effect(trade) == expected
+
+
 @pytest.fixture
 def sqlite_session_factory():
     engine = create_engine(

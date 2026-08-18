@@ -93,6 +93,32 @@ def test_non_fact_event_is_skipped_without_dirty_or_snapshot_write():
     assert store.snapshot_writes == 0
 
 
+@pytest.mark.parametrize("instrument_type", ["STOCK", "CONVERTIBLE_BOND"])
+def test_cash_security_fact_does_not_enter_derivative_pnl_dirty_pipeline(
+    instrument_type,
+):
+    store = FakeStore()
+    result = TradeCreatedPnlService(
+        cache=FakeCache(),
+        pnl_store=store,
+    ).process(
+        stream_message_id="cash-1",
+        fields={
+            "event_type": "TRADE_CREATED",
+            "payload": json.dumps(
+                {
+                    "event_id": "CASH-TRADE-1",
+                    "instrument_type": instrument_type,
+                }
+            ),
+        },
+    )
+
+    assert result.action == "SKIPPED"
+    assert store.contract_dirty == []
+    assert store.account_dirty == []
+
+
 @pytest.mark.parametrize(
     "event_type",
     [

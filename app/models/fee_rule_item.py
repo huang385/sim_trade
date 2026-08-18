@@ -59,8 +59,10 @@ class FeeRuleItem(Base):
             name="ck_fee_rule_item_aggregation_scope_valid",
         ),
         CheckConstraint(
-            "(instrument_type = 'STOCK' AND offset_flag IS NULL) OR "
-            "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
+            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND') "
+            "AND offset_flag IS NULL) OR "
+            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') "
+            "AND offset_flag IS NOT NULL)",
             name="ck_fee_rule_item_stock_offset_semantics",
         ),
         Index(

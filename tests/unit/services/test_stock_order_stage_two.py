@@ -14,7 +14,11 @@ from app.common.exceptions import (
 )
 from app.enums.order_enums import OrderDirection
 from app.repositories.fee_rule_item_repository import FeeRuleItemRepository
-from app.schemas.order_schema import OrderCreateRequest, StockOrderCreateRequest
+from app.schemas.order_schema import (
+    ConvertibleBondOrderCreateRequest,
+    OrderCreateRequest,
+    StockOrderCreateRequest,
+)
 from app.services.account_access_scope import AccountAccessScope
 from app.services.cash_security_order_event_service import (
     CashSecurityOrderEventService,
@@ -280,6 +284,16 @@ def test_cross_product_idempotency_key_is_rejected_before_field_comparison():
             ),
         )
     assert derivative_conflict.value.error_code == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_convertible_bond_idempotency_uses_its_own_product_identity():
+    existing = _existing_order(instrument_type="CONVERTIBLE_BOND", offset_flag=None)
+    request = ConvertibleBondOrderCreateRequest(**_request().model_dump())
+
+    OrderValidationService.validate_idempotent_order_request(
+        existing_order=existing,
+        request=request,
+    )
 
 
 def test_stock_service_idempotent_retry_does_not_freeze_or_emit_again(monkeypatch):

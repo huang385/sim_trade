@@ -130,8 +130,10 @@ class OrderValidationService:
         Decimal精度比较，禁止经过float。任一字段变化都拒绝复用幂等键。
         """
 
-        request_instrument_type = (
-            "STOCK" if isinstance(request, StockOrderCreateRequest) else None
+        # ConvertibleBondOrderCreateRequest inherits the stock request shape;
+        # product identity must therefore be explicit rather than isinstance.
+        request_instrument_type = getattr(
+            request, "cash_security_instrument_type", None
         )
         existing_instrument_type = getattr(
             existing_order, "instrument_type", "FUTURES"
@@ -141,7 +143,7 @@ class OrderValidationService:
             and existing_instrument_type != request_instrument_type
         ) or (
             request_instrument_type is None
-            and existing_instrument_type == "STOCK"
+            and existing_instrument_type in {"STOCK", "CONVERTIBLE_BOND"}
         ):
             raise ResourceConflictError(
                 "client_order_id 已被不同产品类型的订单使用",

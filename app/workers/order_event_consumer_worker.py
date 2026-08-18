@@ -27,6 +27,9 @@ from app.services.accepted_order_event_service import (
 from app.services.cash_security_order_event_service import (
     CashSecurityOrderEventService,
 )
+from app.services.cash_security_market_tick_matching_service import (
+    CashSecurityMarketTickMatchingService,
+)
 from app.services.live_market_snapshot_service import (
     LiveMarketSnapshotService,
 )
@@ -78,6 +81,7 @@ class OrderEventConsumerWorker:
         event_service: AcceptedOrderEventService,
         cash_security_event_service: CashSecurityOrderEventService | None = None,
         arrival_matching_service: OrderArrivalMatchingService | None = None,
+        cash_security_arrival_matching_service: OrderArrivalMatchingService | None = None,
         market_order_execution_service: MarketOrderExecutionService | None = None,
         batch_size: int,
         block_ms: int,
@@ -90,6 +94,9 @@ class OrderEventConsumerWorker:
         self.event_service = event_service
         self.cash_security_event_service = cash_security_event_service
         self.arrival_matching_service = arrival_matching_service
+        self.cash_security_arrival_matching_service = (
+            cash_security_arrival_matching_service
+        )
         self.market_order_execution_service = market_order_execution_service
         self.batch_size = batch_size
         self.block_ms = block_ms
@@ -216,6 +223,23 @@ class OrderEventConsumerWorker:
                             "order_snapshot",
                             None,
                         ),
+                    )
+                )
+
+            if (
+                self.cash_security_arrival_matching_service is not None
+                and result.event_type
+                in {
+                    "STOCK_ORDER_ACCEPTED",
+                    "CONVERTIBLE_BOND_ORDER_ACCEPTED",
+                }
+                and result.action in {"REGISTERED", "DUPLICATE"}
+            ):
+                arrival_result = (
+                    self.cash_security_arrival_matching_service.match_if_ready(
+                        order_id=result.order_id,
+                        exchange_id=result.exchange_id,
+                        symbol=result.symbol,
                     )
                 )
 
@@ -405,6 +429,14 @@ def main() -> None:
         ),
         matching_service=matching_service,
     )
+    cash_security_arrival_matching_service = OrderArrivalMatchingService(
+        live_market_snapshot_service=LiveMarketSnapshotService(redis_client),
+        matching_service=CashSecurityMarketTickMatchingService(
+            session_factory=SessionLocal,
+            active_order_index=active_order_index,
+            order_repository=OrderRepository(),
+        ),
+    )
     market_order_execution_service = MarketOrderExecutionService(
         session_factory=SessionLocal,
         matching_service=matching_service,
@@ -416,6 +448,9 @@ def main() -> None:
         event_service=event_service,
         cash_security_event_service=cash_security_event_service,
         arrival_matching_service=arrival_matching_service,
+        cash_security_arrival_matching_service=(
+            cash_security_arrival_matching_service
+        ),
         market_order_execution_service=market_order_execution_service,
         batch_size=settings.order_consumer_batch_size,
         block_ms=settings.order_consumer_block_ms,

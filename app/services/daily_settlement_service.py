@@ -74,6 +74,10 @@ from app.services.product_strategy_registry import (
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RISK_QUANT = Decimal("0.00000001")
 ZERO = Decimal("0.000000")
+CASH_SECURITY_TYPES = {
+    InstrumentType.STOCK.value,
+    InstrumentType.CONVERTIBLE_BOND.value,
+}
 
 
 @dataclass(frozen=True)
@@ -303,7 +307,10 @@ class DailySettlementService:
     ) -> list[Instrument]:
         codes = set(
             db.scalars(
-                select(Position.order_book_id).where(Position.total_volume > 0)
+                select(Position.order_book_id).where(
+                    Position.total_volume > 0,
+                    Position.instrument_type.not_in(CASH_SECURITY_TYPES),
+                )
             ).all()
         )
         if include_active_orders:
@@ -312,6 +319,7 @@ class DailySettlementService:
                     select(Order.order_book_id).where(
                         Order.status.in_(("ACCEPTED", "PARTIALLY_FILLED")),
                         Order.remaining_volume > 0,
+                        Order.instrument_type.not_in(CASH_SECURITY_TYPES),
                     )
                 ).all()
             )
@@ -844,6 +852,16 @@ class DailySettlementService:
             return quantize_money(
                 Decimal(trade.premium_cash_flow) - commission
             )
+        if trade.instrument_type in CASH_SECURITY_TYPES:
+            turnover = Decimal(trade.turnover)
+            if trade.direction == "BUY":
+                return quantize_money(-turnover - commission)
+            if trade.direction == "SELL":
+                return quantize_money(turnover - commission)
+            raise DataAccessError(
+                "现金证券成交方向无效",
+                error_code="REPLAY_CASH_SECURITY_DIRECTION_INVALID",
+            )
         raise DataAccessError(
             "成交合约类型不支持现金回放",
             error_code="REPLAY_TRADE_TYPE_UNSUPPORTED",
@@ -878,6 +896,34 @@ class DailySettlementService:
                         db, trading_day
                     )
                 )
+                cash_positions = [
+                    item
+                    for item in positions
+                    if item.instrument_type in CASH_SECURITY_TYPES
+                ]
+                derivative_position_ids = {
+                    item.position_id
+                    for item in positions
+                    if item.instrument_type not in CASH_SECURITY_TYPES
+                }
+                replay_details = [
+                    item
+                    for item in details
+                    if item.position_id in derivative_position_ids
+                ]
+                replay_detail_ids = {
+                    item.position_detail_id for item in replay_details
+                }
+                replay_allocations = [
+                    item
+                    for item in allocations
+                    if item.position_detail_id in replay_detail_ids
+                ]
+                replay_trades = [
+                    item
+                    for item in trades
+                    if item.instrument_type not in CASH_SECURITY_TYPES
+                ]
                 prior_position_rows = list(
                     self.repository.list_prior_position_settlements(
                         db, trading_day
@@ -913,6 +959,7 @@ class DailySettlementService:
                 stale_expired = [
                     item.position_id
                     for item in positions
+                    if item.instrument_type not in CASH_SECURITY_TYPES
                     if item.position_id in prior_expired_ids
                     and int(item.total_volume) != 0
                 ]
@@ -936,9 +983,9 @@ class DailySettlementService:
                 )
                 replay = self.replay_service.replay(
                     trading_day=trading_day,
-                    details=details,
-                    trades=trades,
-                    allocations=allocations,
+                    details=replay_details,
+                    trades=replay_trades,
+                    allocations=replay_allocations,
                     prior_position_settlements=latest_prior_positions,
                     prior_expired_position_ids=prior_expired_ids,
                     instruments=instruments,
@@ -1460,11 +1507,25 @@ class DailySettlementService:
                             ZERO,
                         )
                     )
-                    if trade_commission != day_commission:
+                    replayed_trade_commission = quantize_money(
+                        sum(
+                            (
+                                Decimal(item.commission)
+                                for item in account_trades
+                                if item.trading_day == trading_day
+                                and item.instrument_type not in CASH_SECURITY_TYPES
+                            ),
+                            ZERO,
+                        )
+                    )
+                    if replayed_trade_commission != day_commission:
                         raise DataAccessError(
                             "账户成交手续费与持仓回放汇总不守恒",
                             error_code="REPLAY_COMMISSION_CONSERVATION_FAILED",
                         )
+                    # Cash-security fees are account-level facts and do not
+                    # belong to a derivative position replay.
+                    day_commission = trade_commission
                     ending_cash = quantize_money(
                         expected_before_cash
                         + futures_holding_pnl
@@ -1530,6 +1591,15 @@ class DailySettlementService:
                             (item.close_pnl for item in account_positions),
                             ZERO,
                         )
+                        + sum(
+                            (
+                                Decimal(item.daily_close_pnl)
+                                for item in account_trades
+                                if item.trading_day == trading_day
+                                and item.instrument_type in CASH_SECURITY_TYPES
+                            ),
+                            ZERO,
+                        )
                     )
                     account.daily_close_pnl = total_close_pnl
                     account.daily_commission = day_commission
@@ -1537,6 +1607,15 @@ class DailySettlementService:
                         futures_holding_pnl
                         + futures_close_pnl
                         + option_economic_pnl
+                        + sum(
+                            (
+                                Decimal(item.daily_close_pnl)
+                                for item in account_trades
+                                if item.trading_day == trading_day
+                                and item.instrument_type in CASH_SECURITY_TYPES
+                            ),
+                            ZERO,
+                        )
                         - day_commission
                     )
                     expected_position_pnl = quantize_money(
@@ -1688,6 +1767,35 @@ class DailySettlementService:
                         fact_reason="DAILY_SETTLEMENT_REPLAY",
                     )
 
+                # Cash securities deliberately do not have derivative
+                # PositionDetail / settlement-price replay.  Their day-end
+                # operation is a volume rollover: shares bought today become
+                # yesterday holdings and STOCK T+1 locks are released.  A
+                # frozen sell quantity at this barrier is an invariant breach,
+                # not something to silently unlock.
+                for position in cash_positions:
+                    if position.frozen_volume != 0:
+                        raise DataAccessError(
+                            "现金证券日终仍存在冻结持仓",
+                            error_code="CASH_SECURITY_SETTLEMENT_FROZEN_VOLUME",
+                        )
+                    if position.total_volume != (
+                        position.today_volume + position.yesterday_volume
+                    ):
+                        raise DataAccessError(
+                            "现金证券持仓日内数量不守恒",
+                            error_code="CASH_SECURITY_SETTLEMENT_VOLUME_MISMATCH",
+                        )
+                    position.today_volume = 0
+                    position.yesterday_volume = position.total_volume
+                    position.settlement_locked_volume = 0
+                    position.available_volume = position.total_volume
+                    position.daily_position_pnl = ZERO
+                    position.daily_close_pnl = ZERO
+                    position.trading_day = next_trading_day
+                    position.updated_at = now
+                    affected_positions.append(position)
+
                 for position in affected_positions:
                     events.create_position_updated(
                         db,
@@ -1752,7 +1860,8 @@ class DailySettlementService:
                             "SELECT position_id, sum(remaining_volume) volume, "
                             "sum(frozen_volume) frozen FROM position_detail "
                             "GROUP BY position_id) d ON d.position_id = "
-                            "p.position_id WHERE p.total_volume <> "
+                            "p.position_id WHERE p.instrument_type NOT IN "
+                            "('STOCK', 'CONVERTIBLE_BOND') AND p.total_volume <> "
                             "coalesce(d.volume, 0) OR p.frozen_volume <> "
                             "coalesce(d.frozen, 0)"
                         )
@@ -1820,7 +1929,10 @@ class DailySettlementService:
                 ).rebuild(db)
                 active_position_models = db.scalars(
                     select(Position)
-                    .where(Position.total_volume > 0)
+                    .where(
+                        Position.total_volume > 0,
+                        Position.instrument_type.not_in(CASH_SECURITY_TYPES),
+                    )
                     .order_by(Position.id)
                 ).all()
                 active_positions = [

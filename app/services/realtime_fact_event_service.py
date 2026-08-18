@@ -65,6 +65,12 @@ class RealtimeFactEventService:
                 "cash_balance": _decimal_string(
                     _field(account, "cash_balance", Decimal("0"))
                 ),
+                "available_cash": _decimal_string(
+                    _field(account, "available_cash", Decimal("0"))
+                ),
+                "equity": _decimal_string(
+                    _field(account, "equity", Decimal("0"))
+                ),
                 "used_margin": _decimal_string(
                     _field(account, "used_margin", Decimal("0"))
                 ),
@@ -91,6 +97,12 @@ class RealtimeFactEventService:
                 ),
                 "daily_commission": _decimal_string(
                     _field(account, "daily_commission", Decimal("0"))
+                ),
+                "daily_pnl": _decimal_string(
+                    _field(account, "daily_pnl", Decimal("0"))
+                ),
+                "cumulative_net_pnl": _decimal_string(
+                    _field(account, "cumulative_net_pnl", Decimal("0"))
                 ),
                 # 浮盈、动态权益和风险状态由PnL实时事件负责，数据库事实
                 # 事件不得用持久化旧值覆盖这些独立字段域。
