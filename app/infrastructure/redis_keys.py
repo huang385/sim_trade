@@ -75,6 +75,24 @@ RISK_DIRTY_ACCOUNT_VERSIONS_KEY = "risk:dirty_account_versions"
 RISK_DIRTY_SCAN_CURSOR_KEY = "risk:dirty_scan_cursor"
 RISK_WORKER_LEASE_KEY = "risk:worker:lease"
 
+# Cash securities intentionally have their own valuation work queue and
+# position index.  They must never share derivative PnL dirty members.
+CASH_VALUATION_DIRTY_ACCOUNTS_KEY = "cash_valuation:dirty_accounts"
+CASH_VALUATION_DIRTY_ACCOUNT_VERSIONS_KEY = "cash_valuation:dirty_account_versions"
+CASH_VALUATION_DIRTY_SEQUENCE_KEY = "cash_valuation:dirty_sequence"
+CASH_VALUATION_POSITION_ACCOUNTS_KEY = "cash_valuation:position_accounts"
+CASH_VALUATION_INDEX_KEYS_KEY = "cash_valuation:index_keys"
+CASH_VALUATION_TICK_CONSUMER_GROUP = "cash_security_valuation"
+CASH_VALUATION_FACT_CONSUMER_GROUP = "cash_security_valuation_facts"
+
+
+def cash_valuation_instrument_positions_key(exchange_id: str, order_book_id: str) -> str:
+    """Return the cash-security-only index for one canonical market code."""
+
+    normalized_exchange = str(exchange_id).strip().upper()
+    normalized_order_book_id = str(order_book_id).strip().upper().replace("-", "")
+    return f"cash_valuation:instrument_positions:{normalized_exchange}:{normalized_order_book_id}"
+
 
 def processed_risk_trigger_key(event_id: str) -> str:
     """同一Outbox事实重复投递时只产生一次风险Dirty版本。"""

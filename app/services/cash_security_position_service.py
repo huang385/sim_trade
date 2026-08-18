@@ -23,6 +23,11 @@ class CashSecurityPositionService:
                 error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
             )
         position.position_cost = quantize_money(position.position_cost + turnover)
+        # A same-day purchase contributes from its actual fill price, while
+        # inventory carried overnight keeps the EOD mark as its daily basis.
+        position.daily_pnl_base_cost = quantize_money(
+            Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0"))) + turnover
+        )
         position.average_open_price = quantize_money(
             position.position_cost / Decimal(position.total_volume)
         )
@@ -57,9 +62,18 @@ class CashSecurityPositionService:
             if volume == position.total_volume
             else quantize_money(position.position_cost * Decimal(volume) / Decimal(position.total_volume))
         )
+        daily_base = Decimal(getattr(position, "daily_pnl_base_cost", Decimal("0")))
+        daily_base_reduction = (
+            daily_base
+            if volume == position.total_volume
+            else quantize_money(daily_base * Decimal(volume) / Decimal(position.total_volume))
+        )
         position.frozen_volume -= volume
         position.total_volume -= volume
         position.position_cost = quantize_money(position.position_cost - cost)
+        position.daily_pnl_base_cost = quantize_money(
+            daily_base - daily_base_reduction
+        )
         position.available_volume = (
             position.total_volume
             - position.frozen_volume

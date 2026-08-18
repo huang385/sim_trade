@@ -163,6 +163,19 @@ class Position(Base):
     option_market_value: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), nullable=False, default=Decimal("0")
     )
+    # Cash securities keep their last durable mark separately from option
+    # market value.  These fields are facts, not an input to matching.
+    market_value: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
+    mark_price: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    mark_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mark_source_event_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Daily cash-security holding PnL is the latest market value minus this
+    # value.  It is rolled at EOD and adjusted proportionally on sells.
+    daily_pnl_base_cost: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0"
+    )
     margin_rule_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     margin_rule_version: Mapped[str | None] = mapped_column(
         String(64), nullable=True

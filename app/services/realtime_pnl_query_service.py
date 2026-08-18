@@ -78,6 +78,7 @@ class RealtimePnlQueryService:
                     values.get("cumulative_net_pnl", "0")
                 ),
                 equity=_decimal(values, "equity"),
+                stock_market_value=Decimal(values.get("stock_market_value", "0")),
                 available_cash=_decimal(values, "available_cash"),
                 risk_ratio=_decimal(values, "risk_ratio"),
                 risk_available_cash=Decimal(
@@ -98,6 +99,7 @@ class RealtimePnlQueryService:
                 account, "cumulative_net_pnl", Decimal("0")
             ),
             equity=account.equity,
+            stock_market_value=getattr(account, "stock_market_value", Decimal("0")),
             available_cash=account.available_cash,
             risk_ratio=account.risk_ratio,
             risk_available_cash=getattr(
@@ -124,6 +126,7 @@ class RealtimePnlQueryService:
                 symbol=values["symbol"],
                 direction=values["direction"],
                 mark_price=_decimal(values, "mark_price"),
+                market_value=Decimal(values.get("market_value", "0")),
                 unrealized_pnl=_decimal(
                     values,
                     "cumulative_unrealized_pnl",
@@ -144,11 +147,12 @@ class RealtimePnlQueryService:
             exchange_id=position.exchange_id,
             symbol=position.symbol,
             direction=position.direction,
-            mark_price=None,
+            mark_price=getattr(position, "mark_price", None),
+            market_value=getattr(position, "market_value", Decimal("0")),
             unrealized_pnl=position.unrealized_pnl,
             daily_position_pnl=position.daily_position_pnl,
-            event_time=None,
-            source_event_id=None,
+            event_time=getattr(position, "mark_time", None),
+            source_event_id=getattr(position, "mark_source_event_id", None),
             updated_at=position.updated_at,
             data_source="POSTGRES_SNAPSHOT",
         )

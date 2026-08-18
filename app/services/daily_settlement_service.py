@@ -1790,6 +1790,21 @@ class DailySettlementService:
                     position.yesterday_volume = position.total_volume
                     position.settlement_locked_volume = 0
                     position.available_volume = position.total_volume
+                    # Cash daily holding PnL starts from the verified durable
+                    # close mark.  Do not manufacture a zero baseline when
+                    # valuation is unavailable: the next trading day would
+                    # otherwise report a false gain/loss.
+                    if position.total_volume > 0 and (
+                        getattr(position, "mark_price", None) is None
+                        or getattr(position, "mark_time", None) is None
+                    ):
+                        raise DataAccessError(
+                            "现金证券日终缺少有效估值基准",
+                            error_code="CASH_SECURITY_SETTLEMENT_MARK_MISSING",
+                        )
+                    position.daily_pnl_base_cost = Decimal(
+                        getattr(position, "market_value", ZERO)
+                    )
                     position.daily_position_pnl = ZERO
                     position.daily_close_pnl = ZERO
                     position.trading_day = next_trading_day

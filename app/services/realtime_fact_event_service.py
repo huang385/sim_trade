@@ -46,6 +46,7 @@ class RealtimeFactEventService:
         account_id: str | None = None,
         account_type: str | None = None,
         fact_reason: str | None = None,
+        include_valuation_fields: bool = False,
     ) -> None:
         """记录提交后的完整账户资金绝对值，客户端无需自行累加。"""
 
@@ -112,6 +113,15 @@ class RealtimeFactEventService:
                     if fact_reason is not None
                     else {}
                 ),
+                **(
+                    {
+                        "unrealized_pnl": _decimal_string(_field(account, "unrealized_pnl", Decimal("0"))),
+                        "daily_position_pnl": _decimal_string(_field(account, "daily_position_pnl", Decimal("0"))),
+                        "stock_market_value": _decimal_string(_field(account, "stock_market_value", Decimal("0"))),
+                    }
+                    if include_valuation_fields
+                    else {}
+                ),
             },
             created_at=occurred_at,
         )
@@ -162,6 +172,23 @@ class RealtimeFactEventService:
                 ),
                 "position_cost": _decimal_string(
                     _field(position, "position_cost", Decimal("0"))
+                ),
+                "market_value": _decimal_string(
+                    _field(position, "market_value", Decimal("0"))
+                ),
+                "mark_price": (
+                    _decimal_string(_field(position, "mark_price"))
+                    if _field(position, "mark_price") is not None
+                    else None
+                ),
+                "mark_time": (
+                    _field(position, "mark_time").isoformat()
+                    if _field(position, "mark_time") is not None
+                    else None
+                ),
+                "mark_source_event_id": _field(position, "mark_source_event_id"),
+                "daily_pnl_base_cost": _decimal_string(
+                    _field(position, "daily_pnl_base_cost", Decimal("0"))
                 ),
                 "used_margin": _decimal_string(
                     _field(position, "used_margin", Decimal("0"))

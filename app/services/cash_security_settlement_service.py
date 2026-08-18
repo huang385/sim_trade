@@ -134,6 +134,8 @@ class CashSecuritySettlementService:
             total_volume=0, today_volume=0, yesterday_volume=0, frozen_volume=0,
             settlement_locked_volume=0, available_volume=0,
             average_open_price=Decimal("0"), position_cost=Decimal("0"),
+            market_value=Decimal("0"), mark_price=None, mark_time=None,
+            mark_source_event_id=None, daily_pnl_base_cost=Decimal("0"),
             used_margin=Decimal("0"), initial_occupied_margin=Decimal("0"),
             realtime_required_margin=Decimal("0"), option_market_value=Decimal("0"),
             margin_rule_id=None, margin_rule_version=None, margin_rule_snapshot=None,
@@ -283,6 +285,14 @@ class CashSecuritySettlementService:
                 position.daily_close_pnl = quantize_money(
                     position.daily_close_pnl + realized_pnl
                 )
+                if position.total_volume == 0:
+                    # A closed cash position cannot retain a tradable market
+                    # value or unrealised PnL while the valuation worker waits
+                    # for the corresponding durable fact event.
+                    position.market_value = Decimal("0")
+                    position.unrealized_pnl = Decimal("0")
+                    position.daily_position_pnl = Decimal("0")
+                    position.daily_pnl_base_cost = Decimal("0")
             else:
                 raise DataAccessError("现金证券订单方向无效", error_code="CASH_SECURITY_DIRECTION_INVALID")
             account.used_commission = quantize_money(account.used_commission + commission)

@@ -92,6 +92,39 @@ def test_convertible_bond_sell_can_consume_today_volume():
     assert position.total_volume == 80
 
 
+def test_cash_position_daily_basis_tracks_buys_and_partial_sells():
+    position = _position(
+        total_volume=100,
+        today_volume=0,
+        yesterday_volume=100,
+        frozen_volume=0,
+        settlement_locked_volume=0,
+        available_volume=100,
+        position_cost=Decimal("1000"),
+        daily_pnl_base_cost=Decimal("1200"),
+    )
+
+    CashSecurityPositionService.apply_buy(
+        position,
+        instrument_type="CONVERTIBLE_BOND",
+        volume=10,
+        turnover=Decimal("130"),
+    )
+    assert position.daily_pnl_base_cost == Decimal("1330.000000")
+
+    position.frozen_volume = 55
+    CashSecurityPositionService.apply_sell(
+        position,
+        instrument_type="CONVERTIBLE_BOND",
+        volume=55,
+    )
+
+    # The remaining daily base belongs to the remaining real position rather
+    # than a synthetic OPEN/CLOSE allocation.
+    assert position.total_volume == 55
+    assert position.daily_pnl_base_cost == Decimal("665.000000")
+
+
 @pytest.mark.parametrize(
     ("instrument_type", "daily_close_pnl", "realized_pnl", "expected_daily", "expected_cumulative"),
     [

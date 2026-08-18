@@ -70,6 +70,7 @@ class PositionRealtimePnlResponse(BaseModel):
     symbol: str
     direction: str
     mark_price: Decimal | None
+    market_value: Decimal = Decimal("0")
     unrealized_pnl: Decimal
     daily_position_pnl: Decimal
     event_time: datetime | None
@@ -89,6 +90,7 @@ class AccountRealtimePnlResponse(BaseModel):
     daily_pnl: Decimal
     cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
+    stock_market_value: Decimal = Decimal("0")
     available_cash: Decimal
     risk_ratio: Decimal
     risk_available_cash: Decimal = Decimal("0")

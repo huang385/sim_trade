@@ -34,6 +34,11 @@ class PositionResponse(BaseModel):
     # 加权平均开仓价、累计成本和实际占用保证金
     average_open_price: Decimal
     position_cost: Decimal
+    market_value: Decimal = Decimal("0")
+    mark_price: Decimal | None = None
+    mark_time: datetime | None = None
+    mark_source_event_id: str | None = None
+    daily_pnl_base_cost: Decimal = Decimal("0")
     used_margin: Decimal
     initial_occupied_margin: Decimal = Decimal("0")
     realtime_required_margin: Decimal = Decimal("0")
