@@ -85,6 +85,8 @@ const elements = {
     limitPrice: document.querySelector("#limit-price"),
     limitPriceField: document.querySelector("#limit-price-field"),
     orderPriceType: document.querySelector("#order-price-type"),
+    orderProduct: document.querySelector("#order-product"),
+    offsetFlagField: document.querySelector("#offset-flag-field"),
     priceTypeHelp: document.querySelector("#price-type-help"),
     volume: document.querySelector("#volume"),
     offsetFlag: document.querySelector("#offset-flag"),
@@ -826,7 +828,7 @@ function renderOrders(orders) {
                 <span class="${order.direction === "BUY" ? "buy" : "sell"}">
                     ${escapeHtml(order.direction)}
                 </span>
-                / ${escapeHtml(order.offset_flag)}
+                ${order.offset_flag ? `/ ${escapeHtml(order.offset_flag)}` : ""}
             </td>
             <td class="number">
                 ${formatPrice(order.resolved_price ?? order.limit_price)}/${formatPrice(order.average_price)}
@@ -1036,14 +1038,27 @@ async function submitOrder(event) {
         order_type: formData.get("order_type"),
         volume: Number(formData.get("volume")),
     };
+    const product = formData.get("product");
+    const isCashSecurity = product === "STOCK" || product === "CONVERTIBLE_BOND";
+    if (isCashSecurity) {
+        payload.order_type = "LIMIT";
+        delete payload.offset_flag;
+    }
     if (payload.order_type === "LIMIT") {
         payload.limit_price = String(formData.get("limit_price")).trim();
     }
 
     try {
-        await ensureOptionMarketReady(payload);
+        if (!isCashSecurity) await ensureOptionMarketReady(payload);
         elements.submitOrder.textContent = "正在提交…";
-        const order = await apiFetch("/api/orders", {
+        // Derivative orders continue to use apiFetch("/api/orders", ...); cash
+        // products use their explicitly separated endpoints below.
+        const endpoint = product === "STOCK"
+            ? "/api/stock/orders"
+            : product === "CONVERTIBLE_BOND"
+                ? "/api/convertible-bond/orders"
+                : "/api/orders";
+        const order = await apiFetch(endpoint, {
             method: "POST",
             body: JSON.stringify(payload),
         });
@@ -1079,6 +1094,16 @@ function updatePriceTypeForm() {
         MARKET: "市价单使用后端保护价冻结，只撮合受理快照的一档并立即撤余。",
     };
     elements.priceTypeHelp.textContent = descriptions[type];
+}
+
+function updateProductForm() {
+    const isCashSecurity = ["STOCK", "CONVERTIBLE_BOND"].includes(
+        elements.orderProduct.value,
+    );
+    elements.offsetFlagField.classList.toggle("hidden", isCashSecurity);
+    elements.orderPriceType.disabled = isCashSecurity;
+    if (isCashSecurity) elements.orderPriceType.value = "LIMIT";
+    updatePriceTypeForm();
 }
 
 function delay(milliseconds) {
@@ -1127,8 +1152,14 @@ async function cancelOrder(orderId, button) {
     if (!window.confirm(`确定撤销订单 ${orderId} 的剩余数量吗？`)) return;
     button.disabled = true;
     try {
+        const existing = state.orders.find((item) => item.order_id === orderId);
+        const endpoint = existing?.instrument_type === "STOCK"
+            ? `/api/stock/orders/${encodeURIComponent(orderId)}/cancel`
+            : existing?.instrument_type === "CONVERTIBLE_BOND"
+                ? `/api/convertible-bond/orders/${encodeURIComponent(orderId)}/cancel`
+                : `/api/orders/${encodeURIComponent(orderId)}/cancel`;
         const order = await apiFetch(
-            `/api/orders/${encodeURIComponent(orderId)}/cancel`,
+            endpoint,
             {
                 method: "POST",
                 body: JSON.stringify({account_id: state.accountId}),
@@ -1206,6 +1237,7 @@ elements.refreshNow.addEventListener("click", async () => {
 elements.autoRefresh.addEventListener("change", restartTimers);
 elements.orderForm.addEventListener("submit", submitOrder);
 elements.orderPriceType.addEventListener("change", updatePriceTypeForm);
+elements.orderProduct.addEventListener("change", updateProductForm);
 elements.regenerateId.addEventListener("click", generateClientOrderId);
 elements.accountId.addEventListener("keydown", (event) => {
     if (event.key === "Enter") loadAccount();
@@ -1214,7 +1246,7 @@ elements.accountId.addEventListener("keydown", (event) => {
 elements.loginForm.addEventListener("submit", login);
 elements.logoutButton.addEventListener("click", logout);
 generateClientOrderId();
-updatePriceTypeForm();
+updateProductForm();
 refreshAccessToken()
     .then((restored) => restored ? loadAuthorizedAccounts() : showLogin())
     .catch(showLogin);

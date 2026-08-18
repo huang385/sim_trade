@@ -81,7 +81,10 @@ class InstrumentService:
                 "非期权合约不能设置标的合约",
                 error_code="UNEXPECTED_UNDERLYING_INSTRUMENT",
             )
-        if request.instrument_type == InstrumentType.STOCK:
+        if request.instrument_type in {
+            InstrumentType.STOCK,
+            InstrumentType.CONVERTIBLE_BOND,
+        }:
             if request.market_type.value != "STOCK":
                 raise BusinessValidationError(
                     "股票 Instrument 的 market_type 必须为 STOCK",

@@ -88,6 +88,10 @@ class StockOrderCreateRequest(CommonOrderCreateRequest):
     limit_price: Decimal = Field(gt=Decimal("0"))
 
 
+class ConvertibleBondOrderCreateRequest(StockOrderCreateRequest):
+    """Convertible-bond cash order; it deliberately has no offset flag."""
+
+
 class OrderCreateRequest(DerivativeOrderCreateRequest):
     """现有统一订单API的兼容名称，本阶段仍只接收衍生品请求。"""
 

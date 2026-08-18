@@ -30,9 +30,14 @@ class CashSecurityOrderEventResult:
 
 
 class CashSecurityOrderEventService:
-    ACCEPT_EVENT = "STOCK_ORDER_ACCEPTED"
-    CANCEL_EVENT = "STOCK_ORDER_CANCELLED"
-    EVENT_TYPES = frozenset({ACCEPT_EVENT, CANCEL_EVENT})
+    ACCEPT_EVENTS = frozenset({
+        "STOCK_ORDER_ACCEPTED", "CONVERTIBLE_BOND_ORDER_ACCEPTED",
+    })
+    CANCEL_EVENTS = frozenset({
+        "STOCK_ORDER_CANCELLED", "CONVERTIBLE_BOND_ORDER_CANCELLED",
+    })
+    ORDER_STATUS_EVENTS = frozenset({"ORDER_PARTIALLY_FILLED", "ORDER_FILLED"})
+    EVENT_TYPES = ACCEPT_EVENTS | CANCEL_EVENTS | ORDER_STATUS_EVENTS
     ACTIVE_STATUSES = frozenset(
         {OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value}
     )
@@ -50,7 +55,15 @@ class CashSecurityOrderEventService:
 
     @classmethod
     def is_cash_security_event(cls, fields: Mapping[str, str]) -> bool:
-        return fields.get("event_type", "").strip() in cls.EVENT_TYPES
+        event_type = fields.get("event_type", "").strip()
+        if event_type in cls.ACCEPT_EVENTS | cls.CANCEL_EVENTS:
+            return True
+        if event_type not in cls.ORDER_STATUS_EVENTS:
+            return False
+        try:
+            return str(json.loads(fields.get("payload", "")).get("instrument_type", "")).upper() in {"STOCK", "CONVERTIBLE_BOND"}
+        except (TypeError, json.JSONDecodeError):
+            return False
 
     @classmethod
     def _parse(cls, fields: Mapping[str, str]) -> tuple[str, str, dict]:
@@ -69,7 +82,7 @@ class CashSecurityOrderEventService:
             raise CashSecurityOrderEventError("现金证券订单事件缺少定位字段")
         if payload.get("event_type") not in (None, event_type):
             raise CashSecurityOrderEventError("现金证券订单事件类型不一致")
-        if str(payload.get("instrument_type") or "").upper() != "STOCK":
+        if str(payload.get("instrument_type") or "").upper() not in {"STOCK", "CONVERTIBLE_BOND"}:
             raise CashSecurityOrderEventError("现金证券订单事件合约类型不一致")
         # 阶段二已落库而尚未发出的事件没有 account_type；它们仍需能
         # 依据数据库 STOCK 订单安全重建索引。新事件则必须使用规范值。
@@ -91,14 +104,14 @@ class CashSecurityOrderEventService:
                 event_id, event_type, order_id, exchange_id, symbol, "ORDER_NOT_FOUND"
             )
         if (
-            order.instrument_type != "STOCK"
+            order.instrument_type not in {"STOCK", "CONVERTIBLE_BOND"}
             or order.account_id != str(payload["account_id"]).strip()
             or order.exchange_id != exchange_id
             or order.symbol != symbol
         ):
             raise CashSecurityOrderEventError("现金证券订单事件与数据库事实不一致")
         should_remove = (
-            event_type == self.CANCEL_EVENT
+            event_type in self.CANCEL_EVENTS
             or order.status not in self.ACTIVE_STATUSES
             or order.remaining_volume <= 0
         )

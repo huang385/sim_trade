@@ -25,6 +25,7 @@ from app.repositories.auth_refresh_session_repository import (
     AuthRefreshSessionRepository,
 )
 from app.repositories.daily_settlement_repository import DailySettlementRepository
+from app.repositories.cash_security_fee_repository import CashSecurityFeeRepository
 
 
 __all__ = [
@@ -45,4 +46,5 @@ __all__ = [
     "UserRepository",
     "AuthRefreshSessionRepository",
     "DailySettlementRepository",
+    "CashSecurityFeeRepository",
 ]

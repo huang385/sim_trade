@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 
@@ -345,8 +345,10 @@ def test_unified_risk_state_blocks_futures_open(risk_state, direction):
 
 def test_index_option_sell_open_resolves_fee_and_margin_rules():
     instrument_repository = Mock()
-    instrument_repository.get.return_value = SimpleNamespace(
+    instrument_repository.get_by_order_book_id.return_value = SimpleNamespace(
         id=10,
+        exchange_id="CFFEX",
+        order_book_id="IO2609-C-4000",
         product_id="IO",
         underlying_instrument_id=20,
         instrument_type=InstrumentType.INDEX_OPTION.value,
@@ -383,3 +385,30 @@ def test_index_option_sell_open_resolves_fee_and_margin_rules():
     assert rules.underlying_margin_rule is None
     fee_items.resolve.assert_called_once()
     option_margins.resolve.assert_called_once()
+
+
+def test_get_instrument_uses_normalized_order_book_id_not_symbol():
+    instrument_repository = Mock()
+    instrument = SimpleNamespace(
+        exchange_id="DCE",
+        order_book_id="JD2609P3350",
+        instrument_type=InstrumentType.FUTURES_OPTION.value,
+        is_active=True,
+    )
+    instrument_repository.get_by_order_book_id.return_value = instrument
+    service = RuleQueryService(
+        instrument_repository=instrument_repository,
+        margin_repository=Mock(),
+        fee_repository=Mock(),
+    )
+
+    assert (
+        service.get_instrument(
+            Mock(), exchange_id="dce", symbol=" jd2609p3350 "
+        )
+        is instrument
+    )
+    instrument_repository.get_by_order_book_id.assert_called_once_with(
+        ANY, "JD2609P3350"
+    )
+    instrument_repository.get.assert_not_called()

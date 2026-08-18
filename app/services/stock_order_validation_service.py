@@ -172,3 +172,51 @@ class StockTradingPolicy:
 
 # 已发布的股票受理入口继续使用这个名称；新代码应依赖现金证券策略名称。
 StockOrderValidationService = StockTradingPolicy
+
+
+class ConvertibleBondTradingPolicy(StockTradingPolicy):
+    """Cash-bond policy reuses reference-data shape, never derivatives semantics."""
+
+    instrument_type = InstrumentType.CONVERTIBLE_BOND.value
+    market_type = "STOCK"
+
+    def resolve_and_validate(self, db: Session, *, instrument, request, trading_day):
+        if instrument is None:
+            raise BusinessRuleError(
+                "可转债合约不存在", error_code="CONVERTIBLE_BOND_INSTRUMENT_NOT_FOUND"
+            )
+        if instrument.instrument_type != self.instrument_type:
+            raise BusinessRuleError(
+                "可转债接口只能交易 CONVERTIBLE_BOND Instrument",
+                error_code="CONVERTIBLE_BOND_INSTRUMENT_TYPE_INVALID",
+            )
+        # The rest of the rule, daily-fact, tick and price-limit checks have the
+        # same reference-data meaning as stock; call the non-product-specific
+        # portion by temporarily using the validated instrument fields below.
+        if instrument.market_type != self.market_type:
+            raise BusinessRuleError(
+                "可转债合约市场类型不正确",
+                error_code="CONVERTIBLE_BOND_MARKET_TYPE_INVALID",
+            )
+        if not instrument.is_active or not instrument.is_tradeable:
+            raise BusinessRuleError(
+                "可转债合约当前不可交易",
+                error_code="CONVERTIBLE_BOND_INSTRUMENT_NOT_TRADEABLE",
+            )
+        try:
+            rule = self.rule_repository.resolve_for_trading_day(
+                db, instrument_id=instrument.id, trading_day=trading_day
+            )
+        except LookupError as exc:
+            raise BusinessRuleError(
+                "当前交易日不存在唯一可转债交易规则",
+                error_code="CONVERTIBLE_BOND_TRADING_RULE_UNAVAILABLE",
+            ) from exc
+        fact = self.fact_repository.get(db, instrument_id=instrument.id, trading_day=trading_day)
+        if fact is None or fact.is_suspended or not fact.is_tradeable:
+            raise BusinessRuleError(
+                "可转债当前不可交易", error_code="CONVERTIBLE_BOND_DAILY_NOT_TRADEABLE"
+            )
+        self._validate_limits(request.limit_price, rule, fact)
+        self._validate_common(request=request, instrument=instrument)
+        return StockOrderReference(instrument=instrument, rule=rule, daily_fact=fact)

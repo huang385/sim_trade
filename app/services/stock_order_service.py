@@ -67,6 +67,8 @@ class CashSecurityOrderService:
         snapshot_repository: OrderFeeComponentSnapshotRepository | None = None,
         outbox_repository: OutboxRepository | None = None,
         validation_service: StockTradingPolicy | None = None,
+        instrument_type: str = "STOCK",
+        accepted_event_type: str = "STOCK_ORDER_ACCEPTED",
         trading_day_service: TradingDayService | None = None,
         trading_day_provider: Callable[[], object] | None = None,
         time_provider: Callable[[], datetime] = utc_now,
@@ -79,13 +81,15 @@ class CashSecurityOrderService:
         self.snapshot_repository = snapshot_repository or OrderFeeComponentSnapshotRepository()
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.validation_service = validation_service or StockTradingPolicy()
+        self.instrument_type = instrument_type
+        self.accepted_event_type = accepted_event_type
         self.trading_day_service = trading_day_service or get_trading_day_service()
         self.trading_day_provider = trading_day_provider
         self.time_provider = time_provider
 
     @staticmethod
     def _require_stock_account(account) -> None:
-        if account.account_type != AccountType.STOCK.value:
+        if account.account_type not in {AccountType.STOCK.value, "SECURITIES_CASH"}:
             raise BusinessRuleError(
                 "股票订单只能使用 STOCK 账户",
                 error_code="STOCK_ACCOUNT_REQUIRED",
@@ -175,7 +179,7 @@ class CashSecurityOrderService:
                 OrderIdempotencyService.validate(
                     existing_order=existing, request=request
                 )
-                if existing.instrument_type != "STOCK":
+                if existing.instrument_type != self.instrument_type:
                     raise ResourceConflictError(
                         "client_order_id 已被非股票订单使用",
                         error_code="IDEMPOTENCY_KEY_REUSED",
@@ -197,11 +201,12 @@ class CashSecurityOrderService:
             reference = self.validation_service.resolve_and_validate(
                 db, instrument=instrument, request=request, trading_day=trading_day
             )
-            fee_items = self.fee_item_repository.resolve_stock_components(
+            fee_items = self.fee_item_repository.resolve_cash_security_components(
                 db,
                 instrument_id=reference.instrument.id,
                 product_id=reference.instrument.product_id,
                 exchange_id=reference.instrument.exchange_id,
+                instrument_type=self.instrument_type,
                 direction=request.direction.value,
                 trading_day=trading_day,
             )
@@ -234,7 +239,7 @@ class CashSecurityOrderService:
                 OrderIdempotencyService.validate(
                     existing_order=existing, request=request
                 )
-                if existing.instrument_type != "STOCK":
+                if existing.instrument_type != self.instrument_type:
                     raise ResourceConflictError(
                         "client_order_id 已被非股票订单使用",
                         error_code="IDEMPOTENCY_KEY_REUSED",
@@ -290,7 +295,7 @@ class CashSecurityOrderService:
                 symbol=reference.instrument.symbol,
                 exchange_id=reference.instrument.exchange_id,
                 trading_day=trading_day,
-                instrument_type="STOCK",
+                instrument_type=self.instrument_type,
                 direction=request.direction.value,
                 offset_flag=None,
                 order_type=request.order_type.value,
@@ -319,15 +324,15 @@ class CashSecurityOrderService:
                 event_id=event_id,
                 aggregate_type="ORDER",
                 aggregate_id=order.order_id,
-                event_type="STOCK_ORDER_ACCEPTED",
+                event_type=self.accepted_event_type,
                 created_at=accepted_at,
                 payload={
-                    "event_type": "STOCK_ORDER_ACCEPTED",
+                    "event_type": self.accepted_event_type,
                     "event_id": event_id,
                     "account_id": account.account_id,
                     "account_type": "SECURITIES_CASH",
                     "order_id": order.order_id,
-                    "instrument_type": "STOCK",
+                    "instrument_type": self.instrument_type,
                     "order_book_id": order.order_book_id,
                     "exchange_id": order.exchange_id,
                     "symbol": order.symbol,

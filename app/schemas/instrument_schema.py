@@ -69,12 +69,15 @@ class InstrumentCreate(BaseModel):
 
     @model_validator(mode="after")
     def validate_stock_fields(self):
-        if self.instrument_type != InstrumentType.STOCK:
+        if self.instrument_type not in {
+            InstrumentType.STOCK,
+            InstrumentType.CONVERTIBLE_BOND,
+        }:
             return self
         if self.market_type != MarketType.STOCK:
-            raise ValueError("股票 Instrument 的 market_type 必须为 STOCK")
+            raise ValueError("现金证券 Instrument 的 market_type 必须为 STOCK")
         if self.contract_multiplier != Decimal("1"):
-            raise ValueError("股票 Instrument 的 contract_multiplier 必须为 1")
+            raise ValueError("现金证券 Instrument 的 contract_multiplier 必须为 1")
         if any(
             value is not None
             for value in (
@@ -85,7 +88,7 @@ class InstrumentCreate(BaseModel):
                 self.settlement_type,
             )
         ):
-            raise ValueError("股票 Instrument 不能填写期权字段")
+            raise ValueError("现金证券 Instrument 不能填写期权字段")
         return self
 
 

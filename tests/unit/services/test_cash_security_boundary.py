@@ -11,6 +11,11 @@ def test_stock_core_modules_do_not_import_derivative_business_services():
         "app/services/cash_security_funds_service.py",
         "app/services/cash_security_fee_service.py",
         "app/services/cash_security_order_event_service.py",
+        "app/services/cash_security_matching_service.py",
+        "app/services/cash_security_market_tick_matching_service.py",
+        "app/services/cash_security_settlement_service.py",
+        "app/services/cash_security_position_service.py",
+        "app/services/convertible_bond_order_service.py",
     )
     forbidden_modules = {
         "app.services.futures_order_service",
@@ -42,6 +47,10 @@ def test_stock_core_modules_do_not_import_derivative_business_services():
 
 
 def test_stock_create_schema_has_no_offset_flag_field():
-    from app.schemas.order_schema import StockOrderCreateRequest
+    from app.schemas.order_schema import (
+        ConvertibleBondOrderCreateRequest,
+        StockOrderCreateRequest,
+    )
 
     assert "offset_flag" not in StockOrderCreateRequest.model_fields
+    assert "offset_flag" not in ConvertibleBondOrderCreateRequest.model_fields

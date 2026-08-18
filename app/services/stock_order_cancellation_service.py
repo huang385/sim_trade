@@ -46,12 +46,16 @@ class CashSecurityOrderCancellationService:
         account_repository: AccountRepository | None = None,
         position_repository: PositionRepository | None = None,
         outbox_repository: OutboxRepository | None = None,
+        instrument_type: str = "STOCK",
+        cancelled_event_type: str = "STOCK_ORDER_CANCELLED",
         time_provider: Callable[[], datetime] = utc_now,
     ) -> None:
         self.order_repository = order_repository or OrderRepository()
         self.account_repository = account_repository or AccountRepository()
         self.position_repository = position_repository or PositionRepository()
         self.outbox_repository = outbox_repository or OutboxRepository()
+        self.instrument_type = instrument_type
+        self.cancelled_event_type = cancelled_event_type
         self.time_provider = time_provider
 
     @staticmethod
@@ -85,7 +89,7 @@ class CashSecurityOrderCancellationService:
             )
             if order is None:
                 raise self._not_found(access_scope)
-            if order.instrument_type != "STOCK":
+            if order.instrument_type != self.instrument_type:
                 raise ResourceConflictError(
                     "该订单不是股票订单", error_code="STOCK_ORDER_REQUIRED"
                 )
@@ -98,7 +102,7 @@ class CashSecurityOrderCancellationService:
             )
             if account is None:
                 raise self._not_found(access_scope)
-            if account.account_type != AccountType.STOCK.value:
+            if account.account_type not in {AccountType.STOCK.value, "SECURITIES_CASH"}:
                 raise DataAccessError(
                     "股票订单关联的账户类型不一致",
                     error_code="STOCK_ORDER_ACCOUNT_INCONSISTENT",
@@ -196,15 +200,15 @@ class CashSecurityOrderCancellationService:
                 event_id=event_id,
                 aggregate_type="ORDER",
                 aggregate_id=order.order_id,
-                event_type="STOCK_ORDER_CANCELLED",
+                event_type=self.cancelled_event_type,
                 created_at=cancelled_at,
                 payload={
-                    "event_type": "STOCK_ORDER_CANCELLED",
+                    "event_type": self.cancelled_event_type,
                     "event_id": event_id,
                     "account_id": order.account_id,
                     "account_type": "SECURITIES_CASH",
                     "order_id": order.order_id,
-                    "instrument_type": "STOCK",
+                    "instrument_type": self.instrument_type,
                     "order_book_id": order.order_book_id,
                     "exchange_id": order.exchange_id,
                     "symbol": order.symbol,

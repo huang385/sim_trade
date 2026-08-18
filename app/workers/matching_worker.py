@@ -22,6 +22,9 @@ from app.services.market_tick_matching_service import (
     UnsupportedMarketTickEventError,
 )
 from app.services.trade_settlement_service import TradeSettlementService
+from app.services.cash_security_market_tick_matching_service import CashSecurityMarketTickMatchingService
+from app.services.cash_security_settlement_service import CashSecuritySettlementService
+from app.services.market_tick_matching_router import MarketTickMatchingRouter
 
 
 logger = logging.getLogger(__name__)
@@ -262,12 +265,22 @@ def build_matching_worker() -> MatchingWorker:
         dead_letter_stream=settings.market_matching_dead_letter_stream,
         failure_ttl_seconds=settings.market_matching_failure_ttl_seconds,
     )
-    matching_service = MarketTickMatchingService(
+    active_order_index = ActiveOrderIndex(redis_client)
+    derivative_matching_service = MarketTickMatchingService(
         session_factory=SessionLocal,
-        active_order_index=ActiveOrderIndex(redis_client),
+        active_order_index=active_order_index,
         order_repository=OrderRepository(),
         matching_engine=create_matching_engine(settings.matching_engine_name),
         settlement_service=TradeSettlementService(),
+    )
+    matching_service = MarketTickMatchingRouter(
+        derivative_service=derivative_matching_service,
+        cash_security_service=CashSecurityMarketTickMatchingService(
+            session_factory=SessionLocal,
+            active_order_index=active_order_index,
+            order_repository=OrderRepository(),
+            settlement_service=CashSecuritySettlementService(),
+        ),
     )
     return MatchingWorker(
         stream_consumer=consumer,

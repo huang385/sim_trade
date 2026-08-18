@@ -88,12 +88,17 @@ class RuleQueryService:
         exchange_id: str,
         symbol: str,
     ) -> Instrument:
-        instrument = self.instrument_repository.get(
-            db=db,
-            exchange_id=normalize_code(exchange_id),
-            symbol=normalize_code(symbol),
+        # 下单输入是行情和参考数据共用的标准合约代码（order_book_id），
+        # 不能以内部 symbol 查询。部分数据源的期权 symbol 采用带连字符或
+        # 小写格式，和对外的标准合约代码并不相同。
+        order_book_id = normalize_code(symbol)
+        instrument = self.instrument_repository.get_by_order_book_id(
+            db,
+            order_book_id,
         )
         if instrument is None:
+            raise BusinessRuleError("合约不存在")
+        if instrument.exchange_id != normalize_code(exchange_id):
             raise BusinessRuleError("合约不存在")
         return self._validate_instrument(instrument)
 

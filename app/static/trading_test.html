@@ -311,6 +311,15 @@
                                required maxlength="64" readonly>
                     </label>
 
+                    <label class="field">
+                        <span>产品</span>
+                        <select id="order-product" name="product">
+                            <option value="DERIVATIVE">期货/期权</option>
+                            <option value="STOCK">股票现金</option>
+                            <option value="CONVERTIBLE_BOND">可转债现金</option>
+                        </select>
+                    </label>
+
                     <div class="field-row">
                         <label class="field">
                             <span>交易所</span>
@@ -338,7 +347,7 @@
                         </div>
                     </fieldset>
 
-                    <label class="field">
+                    <label id="offset-flag-field" class="field">
                         <span>开平标志</span>
                         <select id="offset-flag" name="offset_flag">
                             <option value="OPEN">开仓 OPEN</option>

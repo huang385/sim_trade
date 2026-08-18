@@ -44,6 +44,7 @@ class RealtimeFactEventService:
         account: Account,
         occurred_at: datetime,
         account_id: str | None = None,
+        account_type: str | None = None,
         fact_reason: str | None = None,
     ) -> None:
         """记录提交后的完整账户资金绝对值，客户端无需自行累加。"""
@@ -60,7 +61,7 @@ class RealtimeFactEventService:
                 "event_id": event_id,
                 "event_type": "ACCOUNT_FACT_UPDATED",
                 "account_id": resolved_account_id,
-                "account_type": _field(account, "account_type", "FUTURES"),
+                "account_type": account_type or _field(account, "account_type", "FUTURES"),
                 "cash_balance": _decimal_string(
                     _field(account, "cash_balance", Decimal("0"))
                 ),
@@ -143,6 +144,7 @@ class RealtimeFactEventService:
                 "yesterday_volume": _field(position, "yesterday_volume", 0),
                 "available_volume": _field(position, "available_volume", 0),
                 "frozen_volume": _field(position, "frozen_volume", 0),
+                "settlement_locked_volume": _field(position, "settlement_locked_volume", 0),
                 "average_open_price": _decimal_string(
                     _field(position, "average_open_price", Decimal("0"))
                 ),

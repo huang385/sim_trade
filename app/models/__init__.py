@@ -44,6 +44,8 @@ from app.models.daily_settlement import (
 )
 from app.models.stock_daily_trading_fact import StockDailyTradingFact
 from app.models.stock_trading_rule import StockTradingRule
+from app.models.cash_security_order_fee_accumulator import CashSecurityOrderFeeAccumulator
+from app.models.cash_security_trade_fee_component import CashSecurityTradeFeeComponent
 
 
 __all__ = [
@@ -76,4 +78,6 @@ __all__ = [
     "OptionExpirySettlementDetail",
     "StockDailyTradingFact",
     "StockTradingRule",
+    "CashSecurityOrderFeeAccumulator",
+    "CashSecurityTradeFeeComponent",
 ]
