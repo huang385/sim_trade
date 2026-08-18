@@ -96,6 +96,14 @@ def test_stock_product_strategy_is_registered_without_matching_fallback():
     assert strategy.is_option is False
 
 
+def test_convertible_bond_policy_uses_bond_reference_market_type():
+    from app.services.stock_order_validation_service import (
+        ConvertibleBondTradingPolicy,
+    )
+
+    assert ConvertibleBondTradingPolicy.market_type == "BOND"
+
+
 def test_stock_validation_uses_daily_limits_and_configured_lots():
     service = _validator()
     reference = service.resolve_and_validate(

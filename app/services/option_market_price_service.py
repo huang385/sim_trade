@@ -46,19 +46,19 @@ class OptionMarketPriceService:
             {
                 (
                     option_instrument.exchange_id,
-                    option_instrument.symbol,
+                    option_instrument.order_book_id,
                 ),
                 (
                     underlying_instrument.exchange_id,
-                    underlying_instrument.symbol,
+                    underlying_instrument.order_book_id,
                 ),
             }
         )
         option_latest = self._last_price(
             snapshots.get(
                 (
-                    option_instrument.exchange_id,
-                    option_instrument.symbol,
+                    option_instrument.exchange_id.strip().upper(),
+                    option_instrument.order_book_id.strip().upper(),
                 ),
                 {},
             ),
@@ -67,8 +67,8 @@ class OptionMarketPriceService:
         underlying_price = self._last_price(
             snapshots.get(
                 (
-                    underlying_instrument.exchange_id,
-                    underlying_instrument.symbol,
+                    underlying_instrument.exchange_id.strip().upper(),
+                    underlying_instrument.order_book_id.strip().upper(),
                 ),
                 {},
             ),
@@ -80,4 +80,3 @@ class OptionMarketPriceService:
             option_price=max(order_limit_price, option_latest),
             underlying_price=underlying_price,
         )
-

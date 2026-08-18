@@ -80,7 +80,8 @@ class Instrument(Base):
             name="ck_instrument_derivative_multiplier_positive",
         ),
         CheckConstraint(
-            "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') OR market_type = 'STOCK'",
+            "(instrument_type <> 'STOCK' OR market_type = 'STOCK') AND "
+            "(instrument_type <> 'CONVERTIBLE_BOND' OR market_type = 'BOND')",
             name="ck_instrument_stock_market_type",
         ),
         CheckConstraint(

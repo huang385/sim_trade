@@ -138,7 +138,10 @@ class OptionMarketPreSubscriptionService:
         instruments = (context.option, context.underlying)
         snapshots = self.market_tick_store.get_latest_many(
             {
-                (instrument.exchange_id, instrument.symbol)
+                # Latest market hashes are keyed by order_book_id.  Do not
+                # use the internal option symbol here: it can contain
+                # separators/lowercase and would not match a restored cache.
+                (instrument.exchange_id, instrument.order_book_id)
                 for instrument in instruments
             }
         )
@@ -147,7 +150,10 @@ class OptionMarketPreSubscriptionService:
             for instrument in instruments
             if self._has_valid_price(
                 snapshots.get(
-                    (instrument.exchange_id, instrument.symbol),
+                    (
+                        instrument.exchange_id.strip().upper(),
+                        instrument.order_book_id.strip().upper(),
+                    ),
                     {},
                 )
             )

@@ -382,13 +382,13 @@ class PnlSnapshotPersistenceService:
         contract_keys = {
             (
                 instrument.exchange_id.strip().upper(),
-                instrument.symbol.strip().upper(),
+                instrument.order_book_id.strip().upper(),
             )
             for instrument in instruments
         } | {
             (
                 underlying.exchange_id.strip().upper(),
-                underlying.symbol.strip().upper(),
+                underlying.order_book_id.strip().upper(),
             )
             for underlying in underlying_by_id.values()
         }
@@ -422,7 +422,7 @@ class PnlSnapshotPersistenceService:
                     raise ValueError("持仓与明细乘数快照不一致")
                 key = (
                     instrument.exchange_id.strip().upper(),
-                    instrument.symbol.strip().upper(),
+                    instrument.order_book_id.strip().upper(),
                 )
                 mark_price = self._mark_price(
                     latest.get(key, {}),

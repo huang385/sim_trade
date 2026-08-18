@@ -178,7 +178,7 @@ class ConvertibleBondTradingPolicy(StockTradingPolicy):
     """Cash-bond policy reuses reference-data shape, never derivatives semantics."""
 
     instrument_type = InstrumentType.CONVERTIBLE_BOND.value
-    market_type = "STOCK"
+    market_type = "BOND"
 
     def resolve_and_validate(self, db: Session, *, instrument, request, trading_day):
         if instrument is None:

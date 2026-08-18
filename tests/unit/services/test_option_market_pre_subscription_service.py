@@ -27,12 +27,13 @@ def make_instrument(
     instrument_type: str,
     underlying_instrument_id: int | None = None,
     is_tradeable: bool = True,
+    symbol: str | None = None,
 ):
     return SimpleNamespace(
         id=instrument_id,
         order_book_id=order_book_id,
         exchange_id=exchange_id,
-        symbol=order_book_id,
+        symbol=symbol or order_book_id,
         instrument_type=instrument_type,
         underlying_instrument_id=underlying_instrument_id,
         is_active=True,
@@ -173,6 +174,48 @@ def test_prepare_waits_until_both_prices_are_available():
     assert result.status == MarketPreparationStatus.WAITING_MARKET_DATA
     assert result.ready_codes == ["JD2609-C-4000"]
     assert result.latest_prices_available is False
+
+
+def test_prepare_uses_order_book_id_for_option_market_lookup():
+    option = make_instrument(
+        instrument_id=1,
+        order_book_id="JD2609C3200",
+        symbol="jd2609-C-3200",
+        exchange_id="DCE",
+        instrument_type=InstrumentType.FUTURES_OPTION.value,
+        underlying_instrument_id=2,
+    )
+    underlying = make_instrument(
+        instrument_id=2,
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        instrument_type=InstrumentType.FUTURES.value,
+    )
+    service, _, _, tick_store, _ = make_service(
+        option,
+        underlying,
+        snapshots={
+            ("DCE", "JD2609C3200"): {"last_price": "1019"},
+            ("DCE", "JD2609"): {"last_price": "4165"},
+        },
+    )
+
+    result = service.prepare(
+        Mock(),
+        account=make_account(),
+        request=OptionMarketPrepareRequest(
+            account_id="A001",
+            exchange_id="DCE",
+            symbol="jd2609-C-3200",
+            direction="BUY",
+            offset_flag="OPEN",
+        ),
+    )
+
+    assert result.status == MarketPreparationStatus.READY
+    tick_store.get_latest_many.assert_called_once_with(
+        {("DCE", "JD2609C3200"), ("DCE", "JD2609")}
+    )
 
 
 def test_status_is_not_requested_when_account_has_no_active_pair():

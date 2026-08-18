@@ -72,12 +72,30 @@ class CashSecurityMarketTickMatchingService:
             event=event,
         )
 
+    def process_routed_orders(
+        self,
+        *,
+        order_ids: list[str],
+        stream_message_id: str,
+        event,
+        orders_by_id: Mapping[str, object],
+    ) -> MarketTickMatchResult:
+        """Match cash candidates supplied by the shared Tick router."""
+
+        return self._process_order_ids(
+            order_ids=order_ids,
+            stream_message_id=stream_message_id,
+            event=event,
+            prefetched_orders=orders_by_id,
+        )
+
     def _process_order_ids(
         self,
         *,
         order_ids: list[str],
         stream_message_id: str,
         event,
+        prefetched_orders: Mapping[str, object] | None = None,
     ) -> MarketTickMatchResult:
         matched = settled = idempotent = skipped = 0
         first_error = None
@@ -89,29 +107,19 @@ class CashSecurityMarketTickMatchingService:
         )
         for order_id in order_ids:
             try:
-                with self.session_factory() as db:
-                    order = self.order_repository.get_by_order_id(db, order_id)
-                    if (
-                        order is None
-                        or order.instrument_type not in self.instrument_types
-                        or order.offset_flag is not None
-                        or order.status not in self.active_statuses
-                        or order.remaining_volume <= 0
-                        or order.exchange_id != event.exchange_id
-                        or order.symbol != event.symbol
-                    ):
-                        skipped += 1
-                        continue
-                    result = self.matching_strategy.match(
-                        CashSecurityOrderSnapshot(
-                            order_id=order.order_id,
-                            instrument_type=order.instrument_type,
-                            direction=order.direction,
-                            limit_price=order.limit_price,
-                            remaining_volume=order.remaining_volume,
-                        ),
-                        market,
+                if prefetched_orders is None:
+                    with self.session_factory() as db:
+                        order = self.order_repository.get_by_order_id(db, order_id)
+                        result = self._match_order(order=order, event=event, market=market)
+                else:
+                    result = self._match_order(
+                        order=prefetched_orders.get(order_id),
+                        event=event,
+                        market=market,
                     )
+                if result is None:
+                    skipped += 1
+                    continue
                 if not result.matched:
                     skipped += 1
                     continue
@@ -141,4 +149,26 @@ class CashSecurityMarketTickMatchingService:
             settled_count=settled,
             idempotent_count=idempotent,
             skipped_count=skipped,
+        )
+
+    def _match_order(self, *, order, event, market):
+        if (
+            order is None
+            or order.instrument_type not in self.instrument_types
+            or order.offset_flag is not None
+            or order.status not in self.active_statuses
+            or order.remaining_volume <= 0
+            or order.exchange_id != event.exchange_id
+            or order.symbol != event.symbol
+        ):
+            return None
+        return self.matching_strategy.match(
+            CashSecurityOrderSnapshot(
+                order_id=order.order_id,
+                instrument_type=order.instrument_type,
+                direction=order.direction,
+                limit_price=order.limit_price,
+                remaining_volume=order.remaining_volume,
+            ),
+            market,
         )

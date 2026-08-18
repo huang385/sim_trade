@@ -234,6 +234,28 @@ class MarketTickMatchingService:
             allow_market=True,
         )
 
+    def process_routed_orders(
+        self,
+        *,
+        order_ids: list[str],
+        event: ParsedMarketTickEvent,
+        stream_message_id: str,
+        orders_by_id: Mapping[str, object],
+    ) -> MarketTickMatchResult:
+        """Match derivative candidates supplied by the shared Tick router.
+
+        The router has already made the one permitted candidate batch query.
+        Settlement still re-reads the selected order with ``FOR UPDATE``.
+        """
+
+        return self._process_order_ids(
+            order_ids=order_ids,
+            event=event,
+            stream_message_id=stream_message_id,
+            prefetched_orders=orders_by_id,
+            allow_market=False,
+        )
+
     def _process_order_ids(
         self,
         *,
@@ -245,6 +267,7 @@ class MarketTickMatchingService:
             MatchingOrderCandidate,
         ]
         | None = None,
+        prefetched_orders: Mapping[str, object] | None = None,
         allow_market: bool = False,
     ) -> MarketTickMatchResult:
         """对调用方明确给出的候选订单逐笔执行事实校验、撮合和结算。"""
@@ -291,6 +314,25 @@ class MarketTickMatchingService:
                         skipped += 1
                         continue
                     matching_order = candidate.order
+                elif prefetched_orders is not None:
+                    order = prefetched_orders.get(order_id)
+                    if not self._database_order_is_candidate(
+                        order,
+                        event,
+                        allow_market=allow_market,
+                    ):
+                        skipped += 1
+                        continue
+                    product_strategy = self.product_registry.resolve(
+                        order.instrument_type
+                    )
+                    matching_order = MatchingOrder(
+                        direction=OrderDirection(order.direction),
+                        offset_flag=OffsetFlag(order.offset_flag),
+                        order_type=OrderType(order.order_type),
+                        limit_price=order.limit_price,
+                        remaining_volume=order.remaining_volume,
+                    )
                 else:
                     # 普通Tick或未提供快照的兼容调用仍查询数据库。真正写入前
                     # SettlementService还会SELECT FOR UPDATE并校验最新状态。

@@ -20,7 +20,8 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_instrument_stock_market_type",
         "instrument",
-        "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') OR market_type = 'STOCK'",
+        "(instrument_type <> 'STOCK' OR market_type = 'STOCK') AND "
+        "(instrument_type <> 'CONVERTIBLE_BOND' OR market_type = 'BOND')",
     )
     op.drop_constraint("ck_instrument_stock_multiplier_one", "instrument", type_="check")
     op.create_check_constraint(

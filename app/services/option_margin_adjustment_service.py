@@ -171,11 +171,11 @@ class OptionMarginAdjustmentService:
                 )
             option_key = (
                 instrument.exchange_id.strip().upper(),
-                instrument.symbol.strip().upper(),
+                instrument.order_book_id.strip().upper(),
             )
             underlying_key = (
                 underlying.exchange_id.strip().upper(),
-                underlying.symbol.strip().upper(),
+                underlying.order_book_id.strip().upper(),
             )
             latest = self.market_tick_store.get_latest_many(
                 {

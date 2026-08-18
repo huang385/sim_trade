@@ -42,6 +42,22 @@ class OrderRepository:
         return db.scalar(statement)
 
     @staticmethod
+    def list_by_order_ids(
+        db: Session,
+        order_ids: Sequence[str],
+    ) -> Sequence[Order]:
+        """Batch-load active-index candidates without per-order queries."""
+
+        normalized_ids = tuple(sorted({str(item) for item in order_ids if item}))
+        if not normalized_ids:
+            return ()
+        return db.scalars(
+            select(Order)
+            .where(Order.order_id.in_(normalized_ids))
+            .order_by(Order.id)
+        ).all()
+
+    @staticmethod
     def get_by_order_id_for_user(
         db: Session,
         *,

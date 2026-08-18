@@ -155,6 +155,21 @@ class CashSecuritySettlementService:
         order.status = OrderStatus.FILLED.value if order.remaining_volume == 0 else OrderStatus.PARTIALLY_FILLED.value
         order.updated_at = now
 
+    @staticmethod
+    def _refresh_account_pnl_facts(account) -> None:
+        """Keep PostgreSQL account facts internally consistent per fill."""
+
+        account.daily_pnl = quantize_money(
+            Decimal(account.daily_position_pnl)
+            + Decimal(account.daily_close_pnl)
+            - Decimal(account.daily_commission)
+        )
+        account.cumulative_net_pnl = quantize_money(
+            Decimal(account.realized_pnl)
+            + Decimal(account.unrealized_pnl)
+            - Decimal(account.used_commission)
+        )
+
     def _create_events(self, db: Session, *, order, trade: Trade, account, position: Position, now: datetime) -> None:
         event_id = self._id("CSE")
         self.outbox_repository.create_event(db, event_id=event_id, aggregate_type="TRADE", aggregate_id=trade.trade_id, event_type="TRADE_CREATED", created_at=now, payload={"event_id": event_id, "event_type": "TRADE_CREATED", "trade_id": trade.trade_id, "order_id": order.order_id, "account_id": order.account_id, "account_type": "SECURITIES_CASH", "instrument_type": order.instrument_type, "exchange_id": order.exchange_id, "symbol": order.symbol, "order_book_id": order.order_book_id, "direction": order.direction, "trade_price": format(trade.trade_price, "f"), "trade_volume": trade.trade_volume, "turnover": format(trade.turnover, "f"), "commission": format(trade.commission, "f"), "realized_pnl": format(trade.realized_pnl, "f"), "market_event_id": trade.market_event_id, "updated_at": now.isoformat()})
@@ -272,6 +287,7 @@ class CashSecuritySettlementService:
                 raise DataAccessError("现金证券订单方向无效", error_code="CASH_SECURITY_DIRECTION_INVALID")
             account.used_commission = quantize_money(account.used_commission + commission)
             account.daily_commission = quantize_money(account.daily_commission + commission)
+            self._refresh_account_pnl_facts(account)
             account.updated_at = now
             position.updated_at = now
             self._update_order(order, price=match.fill_price, volume=volume, now=now)
