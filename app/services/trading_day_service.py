@@ -190,6 +190,55 @@ class TradingDayService:
             )
         return next(iter(matches))
 
+    def resolve_for_cash_security_order(
+        self,
+        db: Session,
+        *,
+        instrument: Instrument,
+        now: datetime | None = None,
+    ) -> date:
+        """解析现金证券的可下单交易日，不引入开平仓标志。"""
+
+        exchange_id = normalize_code(instrument.exchange_id)
+        product_code = normalize_code(str(instrument.product_id or ""))
+        instrument_type = normalize_code(instrument.instrument_type)
+        if not product_code:
+            raise BusinessRuleError(
+                "合约缺少品种代码，无法确定交易日",
+                error_code="TRADING_DAY_CONTEXT_MISSING",
+            )
+        local_now = now or self.now_provider()
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=SHANGHAI)
+        else:
+            local_now = local_now.astimezone(SHANGHAI)
+        schedule = self._get_schedule(
+            db,
+            key=(exchange_id, product_code, instrument_type),
+            now=local_now,
+        )
+        matches = {
+            item.trading_day
+            for item in schedule.sessions
+            if item.start_at <= local_now < item.end_at and item.allow_open
+        }
+        if len(matches) > 1:
+            raise BusinessRuleError(
+                "交易时段映射到多个交易日",
+                error_code="TRADING_DAY_AMBIGUOUS",
+            )
+        if not matches:
+            if not schedule.sessions:
+                raise BusinessRuleError(
+                    "当前品种缺少有效交易日历或交易时段",
+                    error_code="TRADING_SCHEDULE_MISSING",
+                )
+            raise BusinessRuleError(
+                "当前不在该品种允许下单的交易时段",
+                error_code="OUTSIDE_TRADING_SESSION",
+            )
+        return next(iter(matches))
+
     def invalidate(self) -> None:
         with self._lock:
             self._cache.clear()

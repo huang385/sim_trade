@@ -19,7 +19,6 @@ from app.enums.order_enums import (
     OrderDirection,
     OrderStatus,
     OrderSubmitStatus,
-    PositionDirection,
 )
 from app.models.order_fee_component_snapshot import OrderFeeComponentSnapshot
 from app.repositories.account_repository import AccountRepository
@@ -33,10 +32,16 @@ from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import StockOrderCreateRequest
 from app.services.account_access_scope import AccountAccessScope
-from app.services.fee_calculator import FeeCalculator, StockFeeComponent
-from app.services.order_freeze_service import OrderFreezeService
-from app.services.order_validation_service import OrderValidationService
-from app.services.stock_order_validation_service import StockOrderValidationService
+from app.services.cash_security_fee_service import (
+    CashSecurityFeeComponent,
+    CashSecurityFeeService,
+)
+from app.services.cash_security_funds_service import CashSecurityFundsService
+from app.services.order_idempotency_service import OrderIdempotencyService
+from app.services.stock_order_validation_service import (
+    CASH_SECURITY_POSITION_DIRECTION,
+    StockTradingPolicy,
+)
 from app.services.trading_day_service import TradingDayService, get_trading_day_service
 
 
@@ -48,7 +53,7 @@ def _event_id() -> str:
     return f"SE-{uuid4().hex.upper()}"
 
 
-class StockOrderService:
+class CashSecurityOrderService:
     """股票订单受理：仅冻结资源和持久化，绝不创建成交或进入撮合。"""
 
     def __init__(
@@ -61,7 +66,7 @@ class StockOrderService:
         fee_item_repository: FeeRuleItemRepository | None = None,
         snapshot_repository: OrderFeeComponentSnapshotRepository | None = None,
         outbox_repository: OutboxRepository | None = None,
-        validation_service: StockOrderValidationService | None = None,
+        validation_service: StockTradingPolicy | None = None,
         trading_day_service: TradingDayService | None = None,
         trading_day_provider: Callable[[], object] | None = None,
         time_provider: Callable[[], datetime] = utc_now,
@@ -73,7 +78,7 @@ class StockOrderService:
         self.fee_item_repository = fee_item_repository or FeeRuleItemRepository()
         self.snapshot_repository = snapshot_repository or OrderFeeComponentSnapshotRepository()
         self.outbox_repository = outbox_repository or OutboxRepository()
-        self.validation_service = validation_service or StockOrderValidationService()
+        self.validation_service = validation_service or StockTradingPolicy()
         self.trading_day_service = trading_day_service or get_trading_day_service()
         self.trading_day_provider = trading_day_provider
         self.time_provider = time_provider
@@ -94,9 +99,9 @@ class StockOrderService:
         )
 
     @staticmethod
-    def _components(items, *, multiplier: Decimal) -> tuple[StockFeeComponent, ...]:
+    def _components(items, *, multiplier: Decimal) -> tuple[CashSecurityFeeComponent, ...]:
         return tuple(
-            StockFeeComponent(
+            CashSecurityFeeComponent(
                 fee_type=item.fee_type,
                 rule_item_id=item.id,
                 rule_version=item.rule_version,
@@ -167,7 +172,7 @@ class StockOrderService:
                 )
             )
             if existing is not None:
-                OrderValidationService.validate_idempotent_order_request(
+                OrderIdempotencyService.validate(
                     existing_order=existing, request=request
                 )
                 if existing.instrument_type != "STOCK":
@@ -185,8 +190,8 @@ class StockOrderService:
             trading_day = (
                 self.trading_day_provider()
                 if self.trading_day_provider is not None
-                else self.trading_day_service.resolve_for_order(
-                    db, instrument=instrument, offset_flag="OPEN"
+                else self.trading_day_service.resolve_for_cash_security_order(
+                    db, instrument=instrument
                 )
             )
             reference = self.validation_service.resolve_and_validate(
@@ -208,7 +213,7 @@ class StockOrderService:
             components = self._components(
                 fee_items, multiplier=Decimal(reference.instrument.contract_multiplier)
             )
-            estimated_fee = FeeCalculator.calculate_stock_components(
+            estimated_fee = CashSecurityFeeService.calculate_components(
                 price=request.limit_price, volume=request.volume, components=components
             )
 
@@ -226,7 +231,7 @@ class StockOrderService:
                 db, request.account_id, request.client_order_id
             )
             if existing is not None:
-                OrderValidationService.validate_idempotent_order_request(
+                OrderIdempotencyService.validate(
                     existing_order=existing, request=request
                 )
                 if existing.instrument_type != "STOCK":
@@ -249,19 +254,19 @@ class StockOrderService:
                     * Decimal(reference.instrument.contract_multiplier)
                 )
                 frozen_commission = estimated_fee
-                OrderFreezeService.freeze_stock_buy(
+                CashSecurityFundsService.freeze_buy(
                     account=account,
                     frozen_cash=frozen_cash,
                     frozen_commission=frozen_commission,
                 )
             else:
-                OrderFreezeService.validate_account_tradable(account)
+                CashSecurityFundsService.validate_account_tradable(account)
                 position = self.position_repository.get_for_update(
                     db,
                     account_id=account.account_id,
                     exchange_id=reference.instrument.exchange_id,
                     symbol=reference.instrument.symbol,
-                    direction=PositionDirection.LONG.value,
+                    direction=CASH_SECURITY_POSITION_DIRECTION,
                 )
                 self.validation_service.validate_sell(
                     request=request, rule=reference.rule, position=position
@@ -308,16 +313,19 @@ class StockOrderService:
             self.snapshot_repository.add_all(
                 db, self._snapshot_rows(order.order_id, components, accepted_at)
             )
-            self.outbox_repository.create_event(
+            event_id = _event_id()
+            outbox_event = self.outbox_repository.create_event(
                 db,
-                event_id=_event_id(),
+                event_id=event_id,
                 aggregate_type="ORDER",
                 aggregate_id=order.order_id,
                 event_type="STOCK_ORDER_ACCEPTED",
                 created_at=accepted_at,
                 payload={
                     "event_type": "STOCK_ORDER_ACCEPTED",
+                    "event_id": event_id,
                     "account_id": account.account_id,
+                    "account_type": "SECURITIES_CASH",
                     "order_id": order.order_id,
                     "instrument_type": "STOCK",
                     "order_book_id": order.order_book_id,
@@ -330,6 +338,13 @@ class StockOrderService:
                     "created_at": accepted_at.isoformat(),
                 },
             )
+            # Outbox 自增主键是同一订单事件的稳定业务版本；在提交前写回
+            # payload，使重放和实时投影都能读到相同版本。
+            db.flush()
+            outbox_event.payload = {
+                **outbox_event.payload,
+                "business_version": str(outbox_event.id),
+            }
             account.updated_at = accepted_at
             db.commit()
             return order
@@ -338,8 +353,12 @@ class StockOrderService:
             raise
 
 
-_stock_order_service = StockOrderService()
+_stock_order_service = CashSecurityOrderService()
 
 
-def get_stock_order_service() -> StockOrderService:
+def get_stock_order_service() -> CashSecurityOrderService:
     return _stock_order_service
+
+
+# 保持阶段一、二已经发布的 Python 入口兼容。
+StockOrderService = CashSecurityOrderService

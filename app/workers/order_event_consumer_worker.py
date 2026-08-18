@@ -24,6 +24,9 @@ from app.services.accepted_order_event_service import (
     AcceptedOrderEventService,
     UnsupportedOrderEventError,
 )
+from app.services.cash_security_order_event_service import (
+    CashSecurityOrderEventService,
+)
 from app.services.live_market_snapshot_service import (
     LiveMarketSnapshotService,
 )
@@ -73,6 +76,7 @@ class OrderEventConsumerWorker:
         session_factory: Callable[[], Session],
         stream_consumer: OrderStreamConsumer,
         event_service: AcceptedOrderEventService,
+        cash_security_event_service: CashSecurityOrderEventService | None = None,
         arrival_matching_service: OrderArrivalMatchingService | None = None,
         market_order_execution_service: MarketOrderExecutionService | None = None,
         batch_size: int,
@@ -84,6 +88,7 @@ class OrderEventConsumerWorker:
         self.session_factory = session_factory
         self.stream_consumer = stream_consumer
         self.event_service = event_service
+        self.cash_security_event_service = cash_security_event_service
         self.arrival_matching_service = arrival_matching_service
         self.market_order_execution_service = market_order_execution_service
         self.batch_size = batch_size
@@ -173,7 +178,13 @@ class OrderEventConsumerWorker:
         try:
             with self.session_factory() as db:
                 try:
-                    result = self.event_service.process(db, fields)
+                    if (
+                        self.cash_security_event_service is not None
+                        and self.cash_security_event_service.is_cash_security_event(fields)
+                    ):
+                        result = self.cash_security_event_service.process(db, fields)
+                    else:
+                        result = self.event_service.process(db, fields)
                 except Exception:
                     db.rollback()
                     raise
@@ -374,6 +385,11 @@ def main() -> None:
         active_order_index=active_order_index,
         processed_ttl_seconds=settings.order_event_processed_ttl_seconds,
     )
+    cash_security_event_service = CashSecurityOrderEventService(
+        order_repository=OrderRepository(),
+        active_order_index=active_order_index,
+        processed_ttl_seconds=settings.order_event_processed_ttl_seconds,
+    )
     matching_service = MarketTickMatchingService(
         session_factory=SessionLocal,
         active_order_index=active_order_index,
@@ -398,6 +414,7 @@ def main() -> None:
         session_factory=SessionLocal,
         stream_consumer=stream_consumer,
         event_service=event_service,
+        cash_security_event_service=cash_security_event_service,
         arrival_matching_service=arrival_matching_service,
         market_order_execution_service=market_order_execution_service,
         batch_size=settings.order_consumer_batch_size,

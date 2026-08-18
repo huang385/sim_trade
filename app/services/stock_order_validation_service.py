@@ -6,7 +6,6 @@ from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessRuleError, BusinessValidationError
 from app.enums.instrument_enums import InstrumentType
-from app.enums.order_enums import PositionDirection
 from app.enums.reference_data_enums import StockPriceLimitType
 from app.models.instrument import Instrument
 from app.models.position import Position
@@ -19,7 +18,10 @@ from app.repositories.stock_trading_rule_repository import (
     StockTradingRuleRepository,
 )
 from app.schemas.order_schema import StockOrderCreateRequest
-from app.services.order_validation_service import OrderValidationService
+from app.services.price_tick_validation import validate_price_tick
+
+
+CASH_SECURITY_POSITION_DIRECTION = "LONG"
 
 
 @dataclass(frozen=True)
@@ -29,7 +31,7 @@ class StockOrderReference:
     daily_fact: StockDailyTradingFact
 
 
-class StockOrderValidationService:
+class StockTradingPolicy:
     """股票订单的静态规则、每日事实及买卖数量校验。"""
 
     def __init__(
@@ -106,7 +108,7 @@ class StockOrderValidationService:
                 "委托数量高于合约最大数量",
                 error_code="VOLUME_ABOVE_MAXIMUM",
             )
-        OrderValidationService.validate_price_tick(
+        validate_price_tick(
             price=request.limit_price, price_tick=instrument.price_tick
         )
 
@@ -148,7 +150,7 @@ class StockOrderValidationService:
         rule: StockTradingRule,
         position: Position | None,
     ) -> None:
-        if position is None or position.direction != PositionDirection.LONG.value:
+        if position is None or position.direction != CASH_SECURITY_POSITION_DIRECTION:
             raise BusinessRuleError(
                 "股票卖出需要已有 LONG 持仓",
                 error_code="STOCK_LONG_POSITION_REQUIRED",
@@ -166,3 +168,7 @@ class StockOrderValidationService:
                 "卖出数量必须为配置卖出单位的整数倍",
                 error_code="STOCK_SELL_UNIT_MISMATCH",
             )
+
+
+# 已发布的股票受理入口继续使用这个名称；新代码应依赖现金证券策略名称。
+StockOrderValidationService = StockTradingPolicy

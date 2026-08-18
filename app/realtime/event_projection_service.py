@@ -13,6 +13,8 @@ SOURCE_EVENT_MAPPING = {
     "ORDER_MARGIN_UPDATED": RealtimeEventType.ORDER_UPDATED,
     "ORDER_CANCELLED": RealtimeEventType.ORDER_CANCELLED,
     "ORDER_PARTIALLY_CANCELLED": RealtimeEventType.ORDER_CANCELLED,
+    "STOCK_ORDER_ACCEPTED": RealtimeEventType.ORDER_CREATED,
+    "STOCK_ORDER_CANCELLED": RealtimeEventType.ORDER_CANCELLED,
     "TRADE_CREATED": RealtimeEventType.TRADE_CREATED,
     "POSITION_UPDATED": RealtimeEventType.POSITION_UPDATED,
     "POSITION_CLOSED": RealtimeEventType.POSITION_CLOSED,
@@ -29,9 +31,7 @@ SOURCE_EVENT_MAPPING = {
 
 # 股票受理阶段尚未提供完整的实时业务事件，因此只对这两个已知 Outbox
 # 事件明确忽略；其他未知事件仍按原有失败、重试和死信策略处理。
-INTENTIONALLY_IGNORED_SOURCE_EVENT_TYPES = frozenset(
-    {"STOCK_ORDER_ACCEPTED", "STOCK_ORDER_CANCELLED"}
-)
+INTENTIONALLY_IGNORED_SOURCE_EVENT_TYPES = frozenset()
 
 
 class RealtimeEventProjectionService:

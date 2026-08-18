@@ -9,3 +9,4 @@ class InstrumentType(str, Enum):
     INDEX = "INDEX"
     INDEX_OPTION = "INDEX_OPTION"
     STOCK = "STOCK"
+    CONVERTIBLE_BOND = "CONVERTIBLE_BOND"

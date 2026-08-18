@@ -96,8 +96,6 @@ class AcceptedOrderEventService:
         "ACCOUNT_UPDATED",
         # 股票订单在撮合阶段上线前只作为可审计的业务事件确认，绝不进入
         # Redis 活动订单索引或衍生品撮合链路。
-        "STOCK_ORDER_ACCEPTED",
-        "STOCK_ORDER_CANCELLED",
     }
     SUPPORTED_OFFSET_FLAGS = {
         OffsetFlag.OPEN.value,

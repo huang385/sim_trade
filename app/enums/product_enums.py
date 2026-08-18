@@ -7,3 +7,4 @@ class ProductFamily(str, Enum):
     FUTURES = "FUTURES"
     OPTIONS = "OPTIONS"
     STOCKS = "STOCKS"
+    CONVERTIBLE_BONDS = "CONVERTIBLE_BONDS"

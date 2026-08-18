@@ -91,15 +91,15 @@ class Order(Base):
             name="ck_order_margin_risk_state_valid",
         ),
         CheckConstraint(
-            "(instrument_type = 'STOCK' AND offset_flag IS NULL) OR "
-            "(instrument_type <> 'STOCK' AND offset_flag IS NOT NULL)",
+            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND') AND offset_flag IS NULL) OR "
+            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') AND offset_flag IS NOT NULL)",
             name="ck_order_stock_offset_flag_semantics",
         ),
         CheckConstraint(
-            "(instrument_type = 'STOCK' AND commission_type IS NULL "
+            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND') AND commission_type IS NULL "
             "AND commission_parameter IS NULL "
             "AND commission_contract_multiplier IS NULL) OR "
-            "(instrument_type <> 'STOCK' AND commission_type IS NOT NULL "
+            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') AND commission_type IS NOT NULL "
             "AND commission_parameter IS NOT NULL "
             "AND commission_contract_multiplier IS NOT NULL)",
             name="ck_order_stock_fee_snapshot_semantics",

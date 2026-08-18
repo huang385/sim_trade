@@ -41,6 +41,34 @@ def test_order_accepted_projection_adds_absolute_status():
     assert event.payload["business_version"] == "1"
 
 
+def test_stock_order_events_project_with_cash_security_identity():
+    event = RealtimeEventProjectionService.project(
+        source_message_id="12-0",
+        fields={
+            "event_id": "SE-1",
+            "event_type": "STOCK_ORDER_ACCEPTED",
+            "aggregate_type": "ORDER",
+            "aggregate_id": "SO-1",
+            "business_version": "4",
+            "payload": json.dumps(
+                {
+                    "event_id": "SE-1",
+                    "account_id": "A001",
+                    "account_type": "SECURITIES_CASH",
+                    "order_id": "SO-1",
+                    "instrument_type": "STOCK",
+                    "created_at": "2026-08-17T09:30:00+08:00",
+                }
+            ),
+        },
+    )
+
+    assert event.event_type == RealtimeEventType.ORDER_CREATED
+    assert event.account_type == "SECURITIES_CASH"
+    assert event.instrument_type == "STOCK"
+    assert event.payload["business_version"] == "4"
+
+
 def test_projection_publish_is_atomic_and_idempotent():
     redis_client = Mock()
     redis_client.eval.side_effect = ["20-0", ""]

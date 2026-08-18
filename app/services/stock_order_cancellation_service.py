@@ -15,17 +15,20 @@ from app.common.exceptions import (
 from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.enums.account_enums import AccountType
-from app.enums.order_enums import OrderStatus, PositionDirection
+from app.enums.order_enums import OrderStatus
 from app.repositories.account_repository import AccountRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.repositories.position_repository import PositionRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.services.account_access_scope import AccountAccessScope
-from app.services.order_freeze_service import OrderFreezeService
+from app.services.cash_security_funds_service import CashSecurityFundsService
+from app.services.stock_order_validation_service import (
+    CASH_SECURITY_POSITION_DIRECTION,
+)
 
 
-class StockOrderCancellationService:
+class CashSecurityOrderCancellationService:
     """股票主动撤单：按 Order → Account → Position 的锁顺序释放资源。"""
 
     ACTIVE_STATUSES = {OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value}
@@ -123,7 +126,7 @@ class StockOrderCancellationService:
                         "股票买入订单冻结状态不一致",
                         error_code="STOCK_CANCEL_STATE_INCONSISTENT",
                     )
-                OrderFreezeService.release_stock_buy(
+                CashSecurityFundsService.release_buy(
                     account=account,
                     frozen_cash=released_cash,
                     frozen_commission=released_commission,
@@ -144,7 +147,7 @@ class StockOrderCancellationService:
                     account_id=order.account_id,
                     exchange_id=order.exchange_id,
                     symbol=order.symbol,
-                    direction=PositionDirection.LONG.value,
+                    direction=CASH_SECURITY_POSITION_DIRECTION,
                 )
                 if position is None or position.frozen_volume < released_position:
                     raise DataAccessError(
@@ -187,16 +190,19 @@ class StockOrderCancellationService:
                     error_code="STOCK_CANCEL_VOLUME_INCONSISTENT",
                 )
             account.updated_at = cancelled_at
-            self.outbox_repository.create_event(
+            event_id = f"SE-{uuid4().hex.upper()}"
+            outbox_event = self.outbox_repository.create_event(
                 db,
-                event_id=f"SE-{uuid4().hex.upper()}",
+                event_id=event_id,
                 aggregate_type="ORDER",
                 aggregate_id=order.order_id,
                 event_type="STOCK_ORDER_CANCELLED",
                 created_at=cancelled_at,
                 payload={
                     "event_type": "STOCK_ORDER_CANCELLED",
+                    "event_id": event_id,
                     "account_id": order.account_id,
+                    "account_type": "SECURITIES_CASH",
                     "order_id": order.order_id,
                     "instrument_type": "STOCK",
                     "order_book_id": order.order_book_id,
@@ -209,6 +215,11 @@ class StockOrderCancellationService:
                     "created_at": cancelled_at.isoformat(),
                 },
             )
+            db.flush()
+            outbox_event.payload = {
+                **outbox_event.payload,
+                "business_version": str(outbox_event.id),
+            }
             db.commit()
             return order
         except Exception:
@@ -216,8 +227,12 @@ class StockOrderCancellationService:
             raise
 
 
-_stock_order_cancellation_service = StockOrderCancellationService()
+_stock_order_cancellation_service = CashSecurityOrderCancellationService()
 
 
-def get_stock_order_cancellation_service() -> StockOrderCancellationService:
+def get_stock_order_cancellation_service() -> CashSecurityOrderCancellationService:
     return _stock_order_cancellation_service
+
+
+# 保持阶段二已发布的 Python 入口兼容。
+StockOrderCancellationService = CashSecurityOrderCancellationService

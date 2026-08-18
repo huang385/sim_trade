@@ -16,7 +16,9 @@ from app.enums.order_enums import OrderDirection
 from app.repositories.fee_rule_item_repository import FeeRuleItemRepository
 from app.schemas.order_schema import OrderCreateRequest, StockOrderCreateRequest
 from app.services.account_access_scope import AccountAccessScope
-from app.services.accepted_order_event_service import AcceptedOrderEventService
+from app.services.cash_security_order_event_service import (
+    CashSecurityOrderEventService,
+)
 from app.services.fee_calculator import FeeCalculator, StockFeeComponent
 from app.services.order_validation_service import OrderValidationService
 from app.services.product_strategy_registry import resolve_product_strategy
@@ -163,19 +165,74 @@ def test_stock_fee_components_are_calculated_individually_with_minimums():
     ) == Decimal("6.000000")
 
 
-def test_stock_outbox_events_are_acknowledged_without_matching_index():
-    event = AcceptedOrderEventService.parse_event(
+def test_stock_outbox_event_registers_a_cash_security_active_order():
+    order = SimpleNamespace(
+        order_id="O", account_id="A", exchange_id="SSE", symbol="600519",
+        instrument_type="STOCK", status="ACCEPTED", remaining_volume=100,
+    )
+    orders = Mock()
+    orders.get_by_order_id.return_value = order
+    active_index = Mock()
+    active_index.add_active_order.return_value = True
+    service = CashSecurityOrderEventService(
+        order_repository=orders,
+        active_order_index=active_index,
+        processed_ttl_seconds=60,
+    )
+    result = service.process(
+        Mock(),
         {
             "event_id": "EVENT-1",
             "event_type": "STOCK_ORDER_ACCEPTED",
             "payload": (
-                '{"event_type":"STOCK_ORDER_ACCEPTED","account_id":"A",'
-                '"order_id":"O","exchange_id":"SSE","symbol":"600519"}'
+                '{"event_type":"STOCK_ORDER_ACCEPTED","event_id":"EVENT-1",'
+                '"account_id":"A","account_type":"SECURITIES_CASH",'
+                '"order_id":"O","instrument_type":"STOCK",'
+                '"exchange_id":"SSE","symbol":"600519"}'
             ),
-        }
+        },
     )
 
-    assert event.event_type == "STOCK_ORDER_ACCEPTED"
+    assert result.action == "REGISTERED"
+    active_index.add_active_order.assert_called_once_with(
+        order, event_id="EVENT-1", processed_ttl_seconds=60
+    )
+
+
+def test_stock_cancel_event_removes_cash_security_active_order():
+    order = SimpleNamespace(
+        order_id="O", account_id="A", exchange_id="SSE", symbol="600519",
+        instrument_type="STOCK", status="CANCELLED", remaining_volume=0,
+    )
+    orders = Mock()
+    orders.get_by_order_id.return_value = order
+    active_index = Mock()
+    active_index.remove_active_order.return_value = True
+    service = CashSecurityOrderEventService(
+        order_repository=orders,
+        active_order_index=active_index,
+        processed_ttl_seconds=60,
+    )
+
+    result = service.process(
+        Mock(),
+        {
+            "event_id": "EVENT-2",
+            "event_type": "STOCK_ORDER_CANCELLED",
+            "payload": (
+                '{"event_type":"STOCK_ORDER_CANCELLED","event_id":"EVENT-2",'
+                '"account_id":"A","account_type":"SECURITIES_CASH",'
+                '"order_id":"O","instrument_type":"STOCK",'
+                '"exchange_id":"SSE","symbol":"600519"}'
+            ),
+        },
+    )
+
+    assert result.action == "REMOVED"
+    active_index.remove_active_order.assert_called_once_with(
+        order_id="O", account_id="A", exchange_id="SSE", symbol="600519",
+        event_id="EVENT-2", processed_ttl_seconds=60,
+    )
 
 
 def _existing_order(*, instrument_type="STOCK", offset_flag=None):

@@ -56,6 +56,20 @@ class StockProductStrategy:
         return False
 
 
+@dataclass(frozen=True)
+class ConvertibleBondProductStrategy:
+    """可转债是独立现金证券产品，不从证券代码推断产品身份。"""
+
+    family: ProductFamily = ProductFamily.CONVERTIBLE_BONDS
+    instrument_types: frozenset[str] = frozenset(
+        {InstrumentType.CONVERTIBLE_BOND.value}
+    )
+
+    @property
+    def is_option(self) -> bool:
+        return False
+
+
 class ProductStrategyRegistry:
     """只根据服务端产品事实分发；未注册产品禁止回退到期货。"""
 
@@ -95,6 +109,7 @@ product_strategy_registry = ProductStrategyRegistry()
 product_strategy_registry.register(FuturesProductStrategy())
 product_strategy_registry.register(OptionProductStrategy())
 product_strategy_registry.register(StockProductStrategy())
+product_strategy_registry.register(ConvertibleBondProductStrategy())
 
 
 def resolve_product_strategy(instrument_type: object) -> ProductStrategy:
