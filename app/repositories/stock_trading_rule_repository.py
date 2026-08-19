@@ -38,7 +38,7 @@ class StockTradingRuleRepository:
             select(Instrument)
             .where(
                 Instrument.id == instrument_id,
-                Instrument.instrument_type == InstrumentType.STOCK.value,
+                Instrument.instrument_type.in_((InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value)),
             )
             .with_for_update()
         )

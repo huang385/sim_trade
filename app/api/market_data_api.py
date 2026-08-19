@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
@@ -16,12 +18,39 @@ from app.services.option_market_pre_subscription_service import (
     OptionMarketPreSubscriptionService,
     get_option_market_pre_subscription_service,
 )
+from app.infrastructure.market_data.historical_price_client import YmmHistoricalPriceClient
+from app.schemas.historical_price_schema import HistoricalPriceBarResponse
+from app.services.cash_security_historical_price_query_service import (
+    CashSecurityHistoricalPriceQueryService,
+)
 
 
 router = APIRouter(
     prefix="/api/market-data/subscriptions",
     tags=["行情订阅"],
 )
+
+
+@router.get("/history-bars", response_model=list[HistoricalPriceBarResponse])
+def get_cash_security_history_bars(
+    order_book_id: str = Query(min_length=1, max_length=64),
+    start_date: date = Query(),
+    end_date: date = Query(),
+    adjustment_mode: str = Query(default="RAW", pattern="^(RAW|FORWARD|BACKWARD)$"),
+    _: AppUser = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    if end_date < start_date:
+        from app.common.exceptions import BusinessRuleError
+        raise BusinessRuleError("end_date cannot precede start_date")
+    return CashSecurityHistoricalPriceQueryService().query_daily_bars(
+        db,
+        source=YmmHistoricalPriceClient(),
+        order_book_id=order_book_id,
+        start_date=start_date,
+        end_date=end_date,
+        adjustment_mode=adjustment_mode,
+    )
 
 
 @router.post("/prepare", response_model=OptionMarketPrepareResponse)

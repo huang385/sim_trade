@@ -30,6 +30,9 @@ from app.services.cash_security_valuation_service import CashSecurityValuationSe
 from app.services.cash_security_price_adjustment_service import (
     CashSecurityPriceAdjustmentService,
 )
+from app.services.cash_security_historical_price_query_service import (
+    CashSecurityHistoricalPriceQueryService,
+)
 from app.services.daily_settlement_service import DailySettlementService
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
@@ -95,7 +98,7 @@ def test_cash_dividend_and_stock_dividend_run_from_record_to_payment_and_listing
     with session_factory() as db:
         instrument = _seed_cash_position(db)
         service = CashSecurityCorporateActionService()
-        action = service.import_action(db, payload={"instrument_id": instrument.id, "source_action_id": "DIV-1", "data_source": "TEST", "record_date": DAY, "ex_date": DAY, "payment_date": DAY, "listing_date": DAY}, components=[
+        action = service.import_action(db, payload={"instrument_id": instrument.id, "source_action_id": "DIV-1", "action_version": 7, "data_source": "TEST", "record_date": DAY, "ex_date": DAY, "payment_date": DAY, "listing_date": DAY}, components=[
             {"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "2"},
             {"component_type": "STOCK_DIVIDEND", "base_quantity": "10", "share_ratio": "1"},
         ])
@@ -114,7 +117,9 @@ def test_cash_dividend_and_stock_dividend_run_from_record_to_payment_and_listing
         assert position.pending_share_volume == 0
         assert account.cash_balance == account.available_cash == Decimal("100200.000000")
         assert account.corporate_action_receivable == Decimal("0.000000")
-        assert db.scalars(select(CashSecurityCorporateActionLedger)).all()
+        ledgers = db.scalars(select(CashSecurityCorporateActionLedger)).all()
+        assert ledgers
+        assert {row.business_version for row in ledgers} == {"7"}
 
 
 def test_rights_subscription_is_authorized_idempotent_and_creates_pending_shares(session_factory):
@@ -228,6 +233,35 @@ def test_price_adjustment_service_applies_saved_factor_to_historical_ohlc(sessio
         )
         assert adjusted[0]["close"] == Decimal("8.909090909")
         assert adjusted[1]["close"] == Decimal("8.909090909")
+
+
+def test_historical_price_query_reads_raw_bars_then_applies_adjustment(session_factory):
+    class Source:
+        def fetch_daily_bars(self, order_book_id, *, start_date, end_date):
+            assert order_book_id == "CA-STOCK"
+            return [{
+                "trading_day": date(2026, 8, 19), "open": Decimal("10"),
+                "high": Decimal("10"), "low": Decimal("10"), "close": Decimal("10"),
+            }]
+
+    with session_factory() as db:
+        instrument = _seed_cash_position(db)
+        action = CashSecurityCorporateActionService().import_action(
+            db,
+            payload={"instrument_id": instrument.id, "source_action_id": "HISTORY-FACTOR", "data_source": "TEST", "ex_date": DAY},
+            components=[{"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "1"}],
+        )
+        CashSecurityCorporateActionService().record_price_adjustment_factor(
+            db, action_id=action.action_id, trading_day=DAY,
+            raw_previous_close=Decimal("10"), official_ex_reference_price=Decimal("8.909090909"),
+            source_event_id="EX-REFERENCE", data_source="TEST",
+        )
+        bars = CashSecurityHistoricalPriceQueryService().query_daily_bars(
+            db, source=Source(), order_book_id="CA-STOCK", start_date=date(2026, 8, 19),
+            end_date=DAY, adjustment_mode="FORWARD",
+        )
+        assert bars[0]["close"] == Decimal("8.909090909")
+        assert bars[0]["adjustment_mode"] == "FORWARD"
 
 
 def test_convertible_bond_maturity_creates_principal_receivable_then_cash(session_factory):

@@ -240,6 +240,156 @@ def _publish_tick(store, *, code, trading_day, now, price, sequence):
 
 
 @pytest.mark.integration
+def test_daily_settlement_keeps_post_corporate_action_cash_security_volume(
+    isolated_settlement_database,
+):
+    """Cash securities are not reconstructed from derivative PositionDetail rows.
+
+    The position below represents a stock holding after a 10-for-1 stock
+    dividend has already been listed.  The full settlement path must only
+    carry its quantity from today to yesterday; it must not restore the old
+    100-share quantity from the derivative replay chain.
+    """
+    isolated_engine, factory = isolated_settlement_database
+    now = datetime.now(timezone.utc)
+    trading_day = now.astimezone(SHANGHAI).date()
+    next_day = trading_day + timedelta(days=1)
+    suffix = uuid4().hex[:8].upper()
+    code = f"S{suffix}"
+    account_id = f"SA{suffix}"
+    user_id = f"SU{suffix}"
+    stream_name = f"it:daily:settlement:cash-security:{suffix}"
+    tick_store = MarketTickStore(redis_client, stream_name=stream_name)
+
+    try:
+        redis_client.ping()
+    except RedisError as exc:
+        pytest.skip(f"real Redis is unavailable: {exc}")
+
+    with factory() as db:
+        db.add(
+            AppUser(
+                user_id=user_id,
+                username=f"cash_daily_{suffix.lower()}",
+                password_hash="!",
+                display_name="cash security settlement test",
+            )
+        )
+        db.flush()
+        account = _account(account_id, user_id, trading_day)
+        account.account_type = "SECURITIES_CASH"
+        account.available_cash = Decimal("10000")
+        account.risk_available_cash = Decimal("10000")
+        account.used_margin = account.frozen_margin = Decimal("0")
+        cash_stock = Instrument(
+            order_book_id=code,
+            symbol=code,
+            exchange_id="ITDS",
+            instrument_name="post corporate action stock",
+            product_id="ITP",
+            market_type="STOCK",
+            instrument_type="STOCK",
+            contract_multiplier=Decimal("1"),
+            price_tick=Decimal("0.01"),
+            min_volume=1,
+            max_volume=100000,
+            is_active=True,
+            data_source="INTERNAL",
+        )
+        # The historical cost remains 1,000 after 100 shares receive 10
+        # listed shares.  No cash-security PositionDetail is intentionally
+        # created: those details belong to the derivative replay domain.
+        position = _position(
+            position_id=f"PS{suffix}",
+            account_id=account_id,
+            code=code,
+            instrument_type="STOCK",
+            volume=110,
+            price=Decimal("10"),
+        )
+        position.multiplier_snapshot = Decimal("1")
+        position.position_cost = Decimal("1000")
+        position.average_open_price = Decimal("9.090909")
+        position.mark_price = Decimal("10")
+        position.mark_time = now
+        position.mark_source_event_id = f"POST-ACTION-MARK-{suffix}"
+        position.market_value = Decimal("1100")
+        position.unrealized_pnl = Decimal("100")
+        position.daily_pnl_base_cost = Decimal("1000")
+        position.yesterday_pnl_base_cost = Decimal("1000")
+        position.today_pnl_base_cost = Decimal("0")
+        position.daily_pnl_base_established = True
+        db.add_all([account, cash_stock, position])
+        session_end = (now - timedelta(minutes=1)).astimezone(SHANGHAI)
+        db.execute(
+            text(
+                "INSERT INTO trading_calendar "
+                "(exchange_id, trading_day, previous_trading_day, next_trading_day, "
+                "is_open, status) VALUES "
+                "(:exchange, :day, :previous, :next, true, 'OPEN')"
+            ),
+            {
+                "exchange": "ITDS",
+                "day": trading_day,
+                "previous": trading_day - timedelta(days=1),
+                "next": next_day,
+            },
+        )
+        db.execute(
+            text(
+                "INSERT INTO product_trading_schedule "
+                "(trading_day, exchange_id, product_code, instrument_type, "
+                "sessions, status, representative_order_book_id) VALUES "
+                "(:day, 'ITDS', 'ITP', 'STOCK', CAST(:sessions AS jsonb), "
+                "'READY', :representative)"
+            ),
+            {
+                "day": trading_day,
+                "sessions": json.dumps(
+                    [{
+                        "start_at": (session_end - timedelta(hours=1)).isoformat(),
+                        "end_at": session_end.isoformat(),
+                    }]
+                ),
+                "representative": code,
+            },
+        )
+        db.commit()
+
+    _publish_tick(
+        tick_store,
+        code=code,
+        trading_day=trading_day,
+        now=now,
+        price=Decimal("10"),
+        sequence=1,
+    )
+    try:
+        result = DailySettlementService(
+            session_factory=factory,
+            database_engine=isolated_engine,
+            tick_store=tick_store,
+            time_provider=lambda: now,
+            redis_recovery_enabled=False,
+        ).run(trading_day)
+        assert result.already_completed is False
+        with factory() as db:
+            settled = db.scalar(
+                select(Position).where(Position.position_id == position.position_id)
+            )
+            assert settled.total_volume == 110
+            assert settled.today_volume == 0
+            assert settled.yesterday_volume == 110
+            assert settled.available_volume == 110
+            assert settled.position_cost == Decimal("1000.000000")
+    finally:
+        pipeline = redis_client.pipeline(transaction=False)
+        pipeline.delete(market_latest_key("ITDS", code))
+        pipeline.delete(stream_name)
+        pipeline.execute()
+
+
+@pytest.mark.integration
 def test_real_postgres_redis_daily_settlement_is_concurrent_and_idempotent(
     isolated_settlement_database,
 ):

@@ -283,7 +283,7 @@ class CashSecurityCorporateActionService:
         self._event(db, event_type="CORPORATE_ACTION_ENTITLEMENT_CREATED", action_id=action_id, payload={"count": created, "business_version": str(action.action_version)})
         return CorporateActionResult(action_id, action.status, created)
 
-    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO, idempotency_token: str | None = None) -> bool:
+    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, action_version: int, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO, idempotency_token: str | None = None) -> bool:
         key = f"{entitlement.entitlement_id}:{entry_type}:{idempotency_token}" if idempotency_token else f"{entitlement.entitlement_id}:{entry_type}"
         if db.scalar(select(CashSecurityCorporateActionLedger.id).where(CashSecurityCorporateActionLedger.idempotency_key == key)) is not None:
             return False
@@ -292,7 +292,7 @@ class CashSecurityCorporateActionService:
             entitlement_id=entitlement.entitlement_id, account_id=entitlement.account_id, position_id=entitlement.position_id,
             entry_type=entry_type, cash_delta=cash, receivable_delta=receivable, position_volume_delta=volume,
             pending_volume_delta=pending, position_cost_delta=cost, corporate_action_income_delta=income,
-            business_version="1", idempotency_key=key, created_at=utc_now(),
+            business_version=str(action_version), idempotency_key=key, created_at=utc_now(),
         ))
         return True
 
@@ -378,12 +378,12 @@ class CashSecurityCorporateActionService:
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
             kind = component.component_type
             if kind in {CorporateActionComponentType.CASH_DIVIDEND.value, CorporateActionComponentType.BOND_COUPON.value}:
-                if self._ledger(db, entitlement=item, component=component, entry_type="RECEIVABLE_CREATED", receivable=item.entitled_cash_net, income=item.entitled_cash_net):
+                if self._ledger(db, entitlement=item, component=component, entry_type="RECEIVABLE_CREATED", action_version=action.action_version, receivable=item.entitled_cash_net, income=item.entitled_cash_net):
                     account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + item.entitled_cash_net)
                     account.corporate_action_income = quantize_money(account.corporate_action_income + item.entitled_cash_net)
                     item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
             elif kind in {CorporateActionComponentType.STOCK_DIVIDEND.value, CorporateActionComponentType.CAPITALIZATION_ISSUE.value, CorporateActionComponentType.RIGHTS_ISSUE.value}:
-                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value and self._ledger(db, entitlement=item, component=component, entry_type="SHARES_PENDING", pending=item.entitled_share_volume):
+                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value and self._ledger(db, entitlement=item, component=component, entry_type="SHARES_PENDING", action_version=action.action_version, pending=item.entitled_share_volume):
                     position.pending_share_volume += item.entitled_share_volume
                     item.pending_share_volume += item.entitled_share_volume
                     pending_value = quantize_money(
@@ -402,7 +402,7 @@ class CashSecurityCorporateActionService:
                 if multiplier <= ZERO:
                     raise BusinessRuleError("拆并股比例无效", error_code="CORPORATE_ACTION_SPLIT_INVALID")
                 entry_type = "STOCK_SPLIT" if kind == CorporateActionComponentType.STOCK_SPLIT.value else "REVERSE_SPLIT"
-                if self._ledger(db, entitlement=item, component=component, entry_type=entry_type):
+                if self._ledger(db, entitlement=item, component=component, entry_type=entry_type, action_version=action.action_version):
                     # The historical buckets are monetary bases, not quantities:
                     # a mechanical split must never change them or position_cost.
                     old_total = position.total_volume
@@ -426,7 +426,7 @@ class CashSecurityCorporateActionService:
                         # an asset conversion rather than dividend income.
                         item.cash_in_lieu = cash_in_lieu
                         account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + cash_in_lieu)
-                        self._ledger(db, entitlement=item, component=component, entry_type=f"{entry_type}_CASH_IN_LIEU", receivable=cash_in_lieu)
+                        self._ledger(db, entitlement=item, component=component, entry_type=f"{entry_type}_CASH_IN_LIEU", action_version=action.action_version, receivable=cash_in_lieu)
                     position.average_open_price = quantize_money(position.position_cost / Decimal(position.total_volume)) if position.total_volume else ZERO
             elif kind == CorporateActionComponentType.BOND_MATURITY_REDEMPTION.value:
                 # Principal redemption is handled after every component has
@@ -458,7 +458,7 @@ class CashSecurityCorporateActionService:
                 continue
             account = db.scalar(select(Account).where(Account.account_id == item.account_id).with_for_update())
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
-            if self._ledger(db, entitlement=item, component=component, entry_type="SHARES_LISTED", volume=volume, pending=-volume):
+            if self._ledger(db, entitlement=item, component=component, entry_type="SHARES_LISTED", action_version=action.action_version, volume=volume, pending=-volume):
                 position.pending_share_volume -= volume
                 # Listing takes place before the next open; stock shares become
                 # carried shares, convertible bonds remain T+0 available.
@@ -517,7 +517,7 @@ class CashSecurityCorporateActionService:
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
             if position.frozen_volume or position.settlement_locked_volume:
                 raise BusinessRuleError("到期兑付前仍有冻结持仓", error_code="BOND_MATURITY_POSITION_RESERVED")
-            if self._ledger(db, entitlement=item, component=component, entry_type="BOND_PRINCIPAL_RECEIVABLE", receivable=item.entitled_cash_net, volume=-position.total_volume):
+            if self._ledger(db, entitlement=item, component=component, entry_type="BOND_PRINCIPAL_RECEIVABLE", action_version=action.action_version, receivable=item.entitled_cash_net, volume=-position.total_volume):
                 account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + item.entitled_cash_net)
                 position.total_volume = position.today_volume = position.yesterday_volume = position.available_volume = 0
                 position.position_cost = position.average_open_price = ZERO
@@ -618,7 +618,7 @@ class CashSecurityCorporateActionService:
                 if component.component_type in {CorporateActionComponentType.STOCK_SPLIT.value, CorporateActionComponentType.REVERSE_SPLIT.value}
                 else item.entitled_cash_net
             )
-            if self._ledger(db, entitlement=item, component=component, entry_type="CASH_PAID", cash=amount, receivable=-amount):
+            if self._ledger(db, entitlement=item, component=component, entry_type="CASH_PAID", action_version=action.action_version, cash=amount, receivable=-amount):
                 account.corporate_action_receivable = quantize_money(account.corporate_action_receivable - amount)
                 account.cash_balance = quantize_money(account.cash_balance + amount)
                 account.available_cash = quantize_money(account.available_cash + amount)
@@ -669,7 +669,7 @@ class CashSecurityCorporateActionService:
             raise BusinessRuleError("配股认购资金不足", error_code="RIGHTS_SUBSCRIPTION_CASH_INSUFFICIENT")
         position = db.scalar(select(Position).where(Position.position_id == entitlement.position_id).with_for_update())
         request_token = sha256(client_request_id.encode()).hexdigest()[:32]
-        if self._ledger(db, entitlement=entitlement, component=component, entry_type="RIGHTS_SUBSCRIBED", cash=-cash, pending=volume, cost=cash, idempotency_token=request_token):
+        if self._ledger(db, entitlement=entitlement, component=component, entry_type="RIGHTS_SUBSCRIBED", action_version=action.action_version, cash=-cash, pending=volume, cost=cash, idempotency_token=request_token):
             account.cash_balance = quantize_money(account.cash_balance - cash)
             account.available_cash = quantize_money(account.available_cash - cash)
             position.pending_share_volume += volume

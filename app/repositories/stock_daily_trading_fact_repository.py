@@ -70,7 +70,9 @@ class StockDailyTradingFactRepository:
         instrument = db.get(Instrument, instrument_id)
         if (
             instrument is None
-            or instrument.instrument_type != InstrumentType.STOCK.value
+            or instrument.instrument_type not in {
+                InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value,
+            }
         ):
             raise ValueError("股票逐日事实只能关联 STOCK Instrument")
 
