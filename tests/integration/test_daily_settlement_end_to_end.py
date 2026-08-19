@@ -249,7 +249,7 @@ def _publish_tick(store, *, code, trading_day, now, price, sequence):
 def test_daily_settlement_replays_listed_stock_dividend_cash_security_volume(
     isolated_settlement_database,
 ):
-    """Cash securities are not reconstructed from derivative PositionDetail rows.
+    """Cash securities use their own aggregate replay layer, not derivatives.
 
     A 100-share holding receives a 10-for-1 stock dividend inside the real
     daily corporate-action barrier.  The full settlement path must retain the
@@ -414,7 +414,11 @@ def test_daily_settlement_replays_listed_stock_dividend_cash_security_volume(
                 select(CashSecurityCorporateActionPositionAdjustment)
                 .order_by(CashSecurityCorporateActionPositionAdjustment.id)
             ).all()
-            assert [item.adjustment_type for item in adjustments] == [
+            assert [
+                item.adjustment_type
+                for item in adjustments
+                if item.adjustment_type != "REPLAY_OPENING_BALANCE"
+            ] == [
                 "SHARES_PENDING",
                 "SHARES_LISTED",
             ]

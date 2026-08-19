@@ -49,6 +49,9 @@ from app.models.cash_security_corporate_action_ledger import CashSecurityCorpora
 from app.models.cash_security_corporate_action_position_adjustment import (
     CashSecurityCorporateActionPositionAdjustment,
 )
+from app.services.cash_security_position_replay_service import (
+    CashSecurityPositionReplayProjection,
+)
 from app.repositories.daily_settlement_repository import DailySettlementRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -887,7 +890,6 @@ class DailySettlementService:
     ) -> None:
         """Consume the durable, ordered corporate-action position stream."""
         previous_key: tuple[Any, ...] | None = None
-        retired = False
         for row in adjustments:
             key = (
                 row.effective_trading_day,
@@ -907,17 +909,6 @@ class DailySettlementService:
                     "公司行为持仓调整事实版本不一致",
                     error_code="CORPORATE_ACTION_ADJUSTMENT_VERSION_INVALID",
                 )
-            retired = retired or row.adjustment_type == "BOND_MATURITY_RETIRED"
-        if retired and position.total_volume != 0:
-            raise DataAccessError(
-                "可转债到期持仓被错误恢复",
-                error_code="CORPORATE_ACTION_MATURITY_REPLAY_MISMATCH",
-            )
-        if position.frozen_volume + position.settlement_locked_volume > position.total_volume:
-            raise DataAccessError(
-                "公司行为后持仓冻结数量超过总数量",
-                error_code="CORPORATE_ACTION_POSITION_RESERVATION_INVALID",
-            )
 
     def _settle_batch_from_facts(
         self,
@@ -973,6 +964,18 @@ class DailySettlementService:
                     cash_adjustments_by_position.setdefault(
                         adjustment.position_id, []
                     ).append(adjustment)
+                cash_trades_by_position_key: dict[tuple[str, str, str, str], list[Any]] = {}
+                for trade in trades:
+                    if trade.instrument_type in CASH_SECURITY_TYPES:
+                        cash_trades_by_position_key.setdefault(
+                            (
+                                trade.account_id,
+                                trade.exchange_id,
+                                trade.symbol,
+                                trade.instrument_type,
+                            ),
+                            [],
+                        ).append(trade)
                 derivative_position_ids = {
                     item.position_id
                     for item in positions
@@ -1123,9 +1126,9 @@ class DailySettlementService:
                     prior_cash, today_cash = corporate_cash_by_account.get(
                         ledger.account_id, (ZERO, ZERO)
                     )
-                    if ledger.created_at.astimezone(SHANGHAI).date() < trading_day:
+                    if ledger.effective_trading_day < trading_day:
                         prior_cash = quantize_money(prior_cash + Decimal(ledger.cash_delta))
-                    elif ledger.created_at.astimezone(SHANGHAI).date() == trading_day:
+                    elif ledger.effective_trading_day == trading_day:
                         today_cash = quantize_money(today_cash + Decimal(ledger.cash_delta))
                         corporate_income_by_account[ledger.account_id] = quantize_money(
                             corporate_income_by_account.get(ledger.account_id, ZERO)
@@ -1147,6 +1150,53 @@ class DailySettlementService:
                         position,
                         cash_adjustments_by_position.get(position.position_id, ()),
                     )
+                    replay_projection = CashSecurityPositionReplayProjection.replay(
+                        position=position,
+                        trades=cash_trades_by_position_key.get(
+                            (
+                                position.account_id,
+                                position.exchange_id,
+                                position.symbol,
+                                position.instrument_type,
+                            ),
+                            (),
+                        ),
+                        adjustments=cash_adjustments_by_position.get(
+                            position.position_id, (),
+                        ),
+                        trading_day=trading_day,
+                    )
+                    if replay_projection.authoritative:
+                        # Never use the current aggregate as replay input.  It
+                        # is a mutable projection and may have been changed by
+                        # a corporate-action worker or a failed prior run.
+                        position.total_volume = replay_projection.total_volume
+                        position.today_volume = replay_projection.today_volume
+                        position.yesterday_volume = replay_projection.yesterday_volume
+                        position.pending_share_volume = (
+                            replay_projection.pending_share_volume
+                        )
+                        position.frozen_volume = replay_projection.frozen_volume
+                        position.settlement_locked_volume = (
+                            replay_projection.settlement_locked_volume
+                        )
+                        position.available_volume = replay_projection.available_volume
+                        position.position_cost = replay_projection.position_cost
+                        position.daily_pnl_base_cost = (
+                            replay_projection.daily_pnl_base_cost
+                        )
+                        position.yesterday_pnl_base_cost = (
+                            replay_projection.yesterday_pnl_base_cost
+                        )
+                        position.today_pnl_base_cost = (
+                            replay_projection.today_pnl_base_cost
+                        )
+                        position.daily_pnl_base_established = (
+                            replay_projection.daily_pnl_base_established
+                        )
+                        position.average_open_price = (
+                            replay_projection.average_open_price
+                        )
                     position.mark_price = frozen.price
                     position.mark_time = frozen.tick_time
                     position.mark_source_event_id = frozen.source_event_id
@@ -1164,6 +1214,27 @@ class DailySettlementService:
                         basis = Decimal(position.position_cost)
                     position.daily_position_pnl = quantize_money(
                         Decimal(position.market_value) - basis
+                    )
+                # Pending shares are non-tradable but are still an economic
+                # asset.  Settlement must not rely on the realtime worker to
+                # refresh this value before calculating equity.
+                for account in accounts:
+                    account.pending_security_value = quantize_money(
+                        sum(
+                            (
+                                frozen.price
+                                * Decimal(position.pending_share_volume)
+                                * Decimal(position.multiplier_snapshot)
+                                for position in cash_positions_by_account.get(
+                                    account.account_id, ()
+                                )
+                                for frozen in [
+                                    prices.get((position.exchange_id, position.symbol))
+                                ]
+                                if frozen is not None
+                            ),
+                            ZERO,
+                        )
                     )
                 events = RealtimeFactEventService(
                     repository=self.outbox_repository

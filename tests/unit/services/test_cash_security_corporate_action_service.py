@@ -123,10 +123,14 @@ def test_cash_dividend_and_stock_dividend_run_from_record_to_payment_and_listing
         ledgers = db.scalars(select(CashSecurityCorporateActionLedger)).all()
         assert ledgers
         assert {row.business_version for row in ledgers} == {"7"}
+        assert {row.effective_trading_day for row in ledgers} == {DAY}
         adjustments = db.scalars(
             select(CashSecurityCorporateActionPositionAdjustment)
         ).all()
-        assert [(row.adjustment_type, row.pending_volume_delta) for row in adjustments] == [
+        action_adjustments = [
+            row for row in adjustments if row.adjustment_type != "REPLAY_OPENING_BALANCE"
+        ]
+        assert [(row.adjustment_type, row.pending_volume_delta) for row in action_adjustments] == [
             ("SHARES_PENDING", 100),
             ("SHARES_LISTED", -100),
         ]
@@ -174,7 +178,9 @@ def test_stock_split_changes_quantities_but_not_total_cost_or_daily_basis(sessio
         assert position.position_cost == Decimal("10000.000000")
         assert position.average_open_price == Decimal("5.000000")
         assert position.daily_pnl_base_cost == position.yesterday_pnl_base_cost == Decimal("10000.000000")
-        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment))
+        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment).where(
+            CashSecurityCorporateActionPositionAdjustment.adjustment_type == "STOCK_SPLIT"
+        ))
         assert adjustment.adjustment_type == "STOCK_SPLIT"
         assert adjustment.total_volume_delta == 1000
         assert adjustment.position_cost_delta == Decimal("0.000000")
@@ -300,7 +306,9 @@ def test_convertible_bond_maturity_creates_principal_receivable_then_cash(sessio
         assert account.cash_balance == account.available_cash == Decimal("110300.000000")
         assert account.corporate_action_receivable == Decimal("0.000000")
         assert account.corporate_action_income == Decimal("0.000000")
-        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment))
+        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment).where(
+            CashSecurityCorporateActionPositionAdjustment.adjustment_type == "BOND_MATURITY_RETIRED"
+        ))
         assert adjustment.adjustment_type == "BOND_MATURITY_RETIRED"
         assert adjustment.total_volume_delta == -100
 

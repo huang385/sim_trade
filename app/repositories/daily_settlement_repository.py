@@ -18,6 +18,7 @@ from app.models.position_detail import PositionDetail
 from app.models.cash_security_corporate_action_position_adjustment import (
     CashSecurityCorporateActionPositionAdjustment,
 )
+from app.models.cash_security_corporate_action import CashSecurityCorporateAction
 from app.models.trade import Trade
 from app.models.trade_position_allocation import TradePositionAllocation
 
@@ -145,6 +146,11 @@ class DailySettlementRepository:
     def list_replay_order_book_ids(
         db: Session, trading_day: date
     ) -> Sequence[str]:
+        # 已在此前交易日完成到期兑付的期权不再进入目标日回放。
+        # 到期归零没有普通平仓分配，不能只依赖 allocation 判断是否仍存续。
+        prior_expired_positions = select(
+            OptionExpirySettlementDetail.position_id
+        ).where(OptionExpirySettlementDetail.trading_day < trading_day)
         closed = (
             select(
                 TradePositionAllocation.position_detail_id.label("detail_id"),
@@ -160,6 +166,7 @@ class DailySettlementRepository:
             .outerjoin(closed, closed.c.detail_id == PositionDetail.position_detail_id)
             .where(
                 PositionDetail.open_trading_day <= trading_day,
+                PositionDetail.position_id.not_in(prior_expired_positions),
                 or_(
                     PositionDetail.original_volume
                     > func.coalesce(closed.c.closed_volume, 0),
@@ -194,9 +201,17 @@ class DailySettlementRepository:
 
         return db.scalars(
             select(CashSecurityCorporateActionPositionAdjustment)
+            .join(
+                CashSecurityCorporateAction,
+                CashSecurityCorporateAction.action_id
+                == CashSecurityCorporateActionPositionAdjustment.action_id,
+            )
             .where(
                 CashSecurityCorporateActionPositionAdjustment.effective_trading_day
-                <= trading_day
+                <= trading_day,
+                CashSecurityCorporateAction.status.not_in(
+                    ("MANUAL_REVIEW_REQUIRED", "SUPERSEDED", "CANCELLED")
+                ),
             )
             .order_by(
                 CashSecurityCorporateActionPositionAdjustment.effective_trading_day,

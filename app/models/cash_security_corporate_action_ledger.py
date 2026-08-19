@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.time_utils import utc_now
@@ -15,7 +15,10 @@ class CashSecurityCorporateActionLedger(Base):
     idempotency_key 防止日结重跑、消息重试或并发 Worker 重复派发。
     """
     __tablename__ = "cash_security_corporate_action_ledger"
-    __table_args__ = (UniqueConstraint("idempotency_key", name="uq_cash_corporate_ledger_idempotency"),)
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_cash_corporate_ledger_idempotency"),
+        Index("ix_cash_corporate_ledger_effective_day", "effective_trading_day"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ledger_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
@@ -34,4 +37,7 @@ class CashSecurityCorporateActionLedger(Base):
     # 执行时的业务版本/来源版本快照，便于同一 action 多次改版后的审计。
     business_version: Mapped[str] = mapped_column(String(128), nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(192), nullable=False)
+    # Business ownership is deliberately separate from the audit write time:
+    # a delayed recovery must still settle the cash on its effective day.
+    effective_trading_day: Mapped[date] = mapped_column(Date, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)

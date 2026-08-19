@@ -127,6 +127,33 @@ class SettlementReplayService:
         has_prior_batch: bool,
         previous_prices: Mapping[tuple[str, str], Decimal] | None = None,
     ) -> SettlementReplayResult:
+        # 前一交易日已经到期结算的期权，其终态已固化在到期结算事实中。
+        # 它们既不需要当日估值，也不能因为缺少已退市合约而阻断后续日结。
+        expired_detail_ids = {
+            item.position_detail_id
+            for item in details
+            if item.position_id in prior_expired_position_ids
+        }
+        excluded_trade_ids = {
+            item.open_trade_id
+            for item in details
+            if item.position_detail_id in expired_detail_ids
+        }
+        excluded_trade_ids.update(
+            item.trade_id
+            for item in allocations
+            if item.position_detail_id in expired_detail_ids
+        )
+        details = [
+            item for item in details if item.position_detail_id not in expired_detail_ids
+        ]
+        allocations = [
+            item
+            for item in allocations
+            if item.position_detail_id not in expired_detail_ids
+        ]
+        trades = [item for item in trades if item.trade_id not in excluded_trade_ids]
+
         trade_by_id = {item.trade_id: item for item in trades}
         if len(trade_by_id) != len(trades):
             raise DataAccessError(

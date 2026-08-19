@@ -8,7 +8,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
-from app.common.exceptions import DataAccessError
 from app.models.daily_settlement import (
     DailySettlementBatch,
     InstrumentSettlementPrice,
@@ -52,7 +51,7 @@ def test_cash_security_trade_cash_effect_uses_turnover_and_fee_once(
     assert DailySettlementService._trade_cash_effect(trade) == expected
 
 
-def test_cash_security_corporate_action_replay_rejects_maturity_restoration():
+def test_cash_security_corporate_action_adjustment_stream_is_only_validated_before_projection():
     position = SimpleNamespace(
         total_volume=100,
         frozen_volume=0,
@@ -68,11 +67,10 @@ def test_cash_security_corporate_action_replay_rejects_maturity_restoration():
         adjustment_type="BOND_MATURITY_RETIRED",
     )
 
-    with pytest.raises(DataAccessError) as raised:
-        DailySettlementService._consume_cash_security_adjustments(
-            position, (adjustment,)
-        )
-    assert raised.value.error_code == "CORPORATE_ACTION_MATURITY_REPLAY_MISMATCH"
+    # The mutable Position is not a replay input.  A maturity adjustment is
+    # consumed later by the cash-security projection, which will set it to
+    # zero; validation here must not reject the stale aggregate first.
+    DailySettlementService._consume_cash_security_adjustments(position, (adjustment,))
 
 
 @pytest.fixture

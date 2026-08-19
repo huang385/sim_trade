@@ -31,6 +31,7 @@ from app.models.cash_security_corporate_action_position_adjustment import (
 )
 from app.models.instrument import Instrument
 from app.models.position import Position
+from app.models.trade import Trade
 from app.models.cash_security_price_adjustment_factor import CashSecurityPriceAdjustmentFactor
 from app.repositories.outbox_repository import OutboxRepository
 from app.services.account_access_scope import AccountAccessScope
@@ -286,7 +287,7 @@ class CashSecurityCorporateActionService:
         self._event(db, event_type="CORPORATE_ACTION_ENTITLEMENT_CREATED", action_id=action_id, payload={"count": created, "business_version": str(action.action_version)})
         return CorporateActionResult(action_id, action.status, created)
 
-    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, action_version: int, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO, idempotency_token: str | None = None) -> bool:
+    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, action_version: int, effective_trading_day: date, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO, idempotency_token: str | None = None) -> bool:
         key = f"{entitlement.entitlement_id}:{entry_type}:{idempotency_token}" if idempotency_token else f"{entitlement.entitlement_id}:{entry_type}"
         if db.scalar(select(CashSecurityCorporateActionLedger.id).where(CashSecurityCorporateActionLedger.idempotency_key == key)) is not None:
             return False
@@ -295,7 +296,8 @@ class CashSecurityCorporateActionService:
             entitlement_id=entitlement.entitlement_id, account_id=entitlement.account_id, position_id=entitlement.position_id,
             entry_type=entry_type, cash_delta=cash, receivable_delta=receivable, position_volume_delta=volume,
             pending_volume_delta=pending, position_cost_delta=cost, corporate_action_income_delta=income,
-            business_version=str(action_version), idempotency_key=key, created_at=utc_now(),
+            business_version=str(action_version), idempotency_key=key,
+            effective_trading_day=effective_trading_day, created_at=utc_now(),
         ))
         return True
 
@@ -363,6 +365,75 @@ class CashSecurityCorporateActionService:
             )
         )
         return True
+
+    def _ensure_replay_opening_balance(
+        self,
+        db: Session,
+        *,
+        action: CashSecurityCorporateAction,
+        entitlement: CashSecurityCorporateActionEntitlement,
+        component: CashSecurityCorporateActionComponent,
+        position: Position,
+        effective_trading_day: date,
+    ) -> None:
+        """Capture a legacy no-Trade holding before its first action mutates it.
+
+        New cash positions are reproducible from Trades and never get this
+        baseline.  The baseline is solely an explicit bridge for imported
+        opening positions; it prevents an action from making their original
+        quantity depend on a later mutable Position row.
+        """
+        existing = db.scalar(
+            select(CashSecurityCorporateActionPositionAdjustment.id).where(
+                CashSecurityCorporateActionPositionAdjustment.position_id
+                == position.position_id
+            )
+        )
+        has_trade = db.scalar(
+            select(Trade.id)
+            .where(
+                Trade.account_id == position.account_id,
+                Trade.exchange_id == position.exchange_id,
+                Trade.symbol == position.symbol,
+                Trade.instrument_type == position.instrument_type,
+            )
+            .limit(1)
+        )
+        if existing is not None or has_trade is not None:
+            return
+        key = f"{position.position_id}:REPLAY_OPENING_BALANCE"
+        db.add(
+            CashSecurityCorporateActionPositionAdjustment(
+                adjustment_id=self._id("CAPA"),
+                action_id=action.action_id,
+                action_version=action.action_version,
+                component_id=component.component_id,
+                entitlement_id=entitlement.entitlement_id,
+                account_id=position.account_id,
+                position_id=position.position_id,
+                position_detail_id=None,
+                adjustment_type="REPLAY_OPENING_BALANCE",
+                effective_trading_day=effective_trading_day,
+                business_version=str(action.action_version),
+                idempotency_key=key,
+                total_volume_delta=position.total_volume,
+                today_volume_delta=position.today_volume,
+                yesterday_volume_delta=position.yesterday_volume,
+                pending_volume_delta=position.pending_share_volume,
+                available_volume_delta=position.available_volume,
+                frozen_volume_delta=position.frozen_volume,
+                settlement_locked_volume_delta=position.settlement_locked_volume,
+                position_cost_delta=quantize_money(position.position_cost),
+                daily_pnl_base_cost_delta=quantize_money(position.daily_pnl_base_cost),
+                average_open_price_after=position.average_open_price,
+                replay_payload={
+                    "yesterday_pnl_base_cost": format(position.yesterday_pnl_base_cost, "f"),
+                    "today_pnl_base_cost": format(position.today_pnl_base_cost, "f"),
+                    "daily_pnl_base_established": bool(position.daily_pnl_base_established),
+                },
+                created_at=utc_now(),
+            )
+        )
 
     def _maybe_mark_completed(
         self, db: Session, *, action: CashSecurityCorporateAction, trading_day: date
@@ -444,33 +515,41 @@ class CashSecurityCorporateActionService:
             component = components[item.component_id]
             account = db.scalar(select(Account).where(Account.account_id == item.account_id).with_for_update())
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
+            self._ensure_replay_opening_balance(
+                db, action=action, entitlement=item, component=component,
+                position=position, effective_trading_day=trading_day,
+            )
             kind = component.component_type
             if kind in {CorporateActionComponentType.CASH_DIVIDEND.value, CorporateActionComponentType.BOND_COUPON.value}:
-                if self._ledger(db, entitlement=item, component=component, entry_type="RECEIVABLE_CREATED", action_version=action.action_version, receivable=item.entitled_cash_net, income=item.entitled_cash_net):
+                if self._ledger(db, entitlement=item, component=component, entry_type="RECEIVABLE_CREATED", action_version=action.action_version, effective_trading_day=trading_day, receivable=item.entitled_cash_net, income=item.entitled_cash_net):
                     account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + item.entitled_cash_net)
                     account.corporate_action_income = quantize_money(account.corporate_action_income + item.entitled_cash_net)
                     item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
             elif kind in {CorporateActionComponentType.STOCK_DIVIDEND.value, CorporateActionComponentType.CAPITALIZATION_ISSUE.value, CorporateActionComponentType.RIGHTS_ISSUE.value}:
-                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value and self._ledger(
-                    db, entitlement=item, component=component,
-                    entry_type="SHARES_PENDING", action_version=action.action_version,
-                    pending=item.entitled_share_volume,
-                ) and self._position_adjustment(
-                    db, action=action, entitlement=item, component=component,
-                    adjustment_type="SHARES_PENDING",
-                    effective_trading_day=trading_day,
-                    pending_volume=item.entitled_share_volume,
-                ):
-                    position.pending_share_volume += item.entitled_share_volume
-                    item.pending_share_volume += item.entitled_share_volume
-                    pending_value = quantize_money(
-                        Decimal(item.entitled_share_volume)
-                        * Decimal(position.mark_price or ZERO)
+                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value:
+                    ledger_created = self._ledger(
+                        db, entitlement=item, component=component,
+                        entry_type="SHARES_PENDING", action_version=action.action_version,
+                        effective_trading_day=trading_day,
+                        pending=item.entitled_share_volume,
                     )
-                    account.pending_security_value = quantize_money(
-                        Decimal(account.pending_security_value) + pending_value
+                    adjustment_created = self._position_adjustment(
+                        db, action=action, entitlement=item, component=component,
+                        adjustment_type="SHARES_PENDING",
+                        effective_trading_day=trading_day,
+                        pending_volume=item.entitled_share_volume,
                     )
-                    item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
+                    if ledger_created and adjustment_created:
+                        position.pending_share_volume += item.entitled_share_volume
+                        item.pending_share_volume += item.entitled_share_volume
+                        pending_value = quantize_money(
+                            Decimal(item.entitled_share_volume)
+                            * Decimal(position.mark_price or ZERO)
+                        )
+                        account.pending_security_value = quantize_money(
+                            Decimal(account.pending_security_value) + pending_value
+                        )
+                        item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
             elif kind in {
                 CorporateActionComponentType.STOCK_SPLIT.value,
                 CorporateActionComponentType.REVERSE_SPLIT.value,
@@ -479,7 +558,7 @@ class CashSecurityCorporateActionService:
                 if multiplier <= ZERO:
                     raise BusinessRuleError("拆并股比例无效", error_code="CORPORATE_ACTION_SPLIT_INVALID")
                 entry_type = "STOCK_SPLIT" if kind == CorporateActionComponentType.STOCK_SPLIT.value else "REVERSE_SPLIT"
-                if self._ledger(db, entitlement=item, component=component, entry_type=entry_type, action_version=action.action_version):
+                if self._ledger(db, entitlement=item, component=component, entry_type=entry_type, action_version=action.action_version, effective_trading_day=trading_day):
                     # The historical buckets are monetary bases, not quantities:
                     # a mechanical split must never change them or position_cost.
                     old_total = position.total_volume
@@ -537,7 +616,7 @@ class CashSecurityCorporateActionService:
                         # an asset conversion rather than dividend income.
                         item.cash_in_lieu = cash_in_lieu
                         account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + cash_in_lieu)
-                        self._ledger(db, entitlement=item, component=component, entry_type=f"{entry_type}_CASH_IN_LIEU", action_version=action.action_version, receivable=cash_in_lieu)
+                        self._ledger(db, entitlement=item, component=component, entry_type=f"{entry_type}_CASH_IN_LIEU", action_version=action.action_version, effective_trading_day=trading_day, receivable=cash_in_lieu)
                     position.average_open_price = quantize_money(position.position_cost / Decimal(position.total_volume)) if position.total_volume else ZERO
             elif kind == CorporateActionComponentType.BOND_MATURITY_REDEMPTION.value:
                 # Principal redemption is handled after every component has
@@ -569,11 +648,17 @@ class CashSecurityCorporateActionService:
                 continue
             account = db.scalar(select(Account).where(Account.account_id == item.account_id).with_for_update())
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
-            if self._ledger(
+            self._ensure_replay_opening_balance(
+                db, action=action, entitlement=item, component=component,
+                position=position, effective_trading_day=trading_day,
+            )
+            ledger_created = self._ledger(
                 db, entitlement=item, component=component,
                 entry_type="SHARES_LISTED", action_version=action.action_version,
+                effective_trading_day=trading_day,
                 volume=volume, pending=-volume,
-            ) and self._position_adjustment(
+            )
+            adjustment_created = self._position_adjustment(
                 db, action=action, entitlement=item, component=component,
                 adjustment_type="SHARES_LISTED",
                 effective_trading_day=trading_day,
@@ -582,7 +667,8 @@ class CashSecurityCorporateActionService:
                 pending_volume=-volume,
                 available_volume=volume,
                 position_cost=item.subscription_cash,
-            ):
+            )
+            if ledger_created and adjustment_created:
                 position.pending_share_volume -= volume
                 # Listing takes place before the next open; stock shares become
                 # carried shares, convertible bonds remain T+0 available.
@@ -639,15 +725,21 @@ class CashSecurityCorporateActionService:
                 continue
             account = db.scalar(select(Account).where(Account.account_id == item.account_id).with_for_update())
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
+            self._ensure_replay_opening_balance(
+                db, action=action, entitlement=item, component=component,
+                position=position, effective_trading_day=trading_day,
+            )
             if position.frozen_volume or position.settlement_locked_volume:
                 raise BusinessRuleError("到期兑付前仍有冻结持仓", error_code="BOND_MATURITY_POSITION_RESERVED")
             retired_volume = position.total_volume
-            if self._ledger(
+            ledger_created = self._ledger(
                 db, entitlement=item, component=component,
                 entry_type="BOND_PRINCIPAL_RECEIVABLE",
                 action_version=action.action_version,
+                effective_trading_day=trading_day,
                 receivable=item.entitled_cash_net, volume=-retired_volume,
-            ) and self._position_adjustment(
+            )
+            adjustment_created = self._position_adjustment(
                 db, action=action, entitlement=item, component=component,
                 adjustment_type="BOND_MATURITY_RETIRED",
                 effective_trading_day=trading_day,
@@ -659,7 +751,8 @@ class CashSecurityCorporateActionService:
                 daily_pnl_base_cost=-Decimal(position.daily_pnl_base_cost),
                 average_open_price_after=ZERO,
                 replay_payload={"volume_before": retired_volume, "volume_after": 0},
-            ):
+            )
+            if ledger_created and adjustment_created:
                 account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + item.entitled_cash_net)
                 position.total_volume = position.today_volume = position.yesterday_volume = position.available_volume = 0
                 position.position_cost = position.average_open_price = ZERO
@@ -781,7 +874,7 @@ class CashSecurityCorporateActionService:
                 if component.component_type in {CorporateActionComponentType.STOCK_SPLIT.value, CorporateActionComponentType.REVERSE_SPLIT.value}
                 else item.entitled_cash_net
             )
-            if self._ledger(db, entitlement=item, component=component, entry_type="CASH_PAID", action_version=action.action_version, cash=amount, receivable=-amount):
+            if self._ledger(db, entitlement=item, component=component, entry_type="CASH_PAID", action_version=action.action_version, effective_trading_day=trading_day, cash=amount, receivable=-amount):
                 account.corporate_action_receivable = quantize_money(account.corporate_action_receivable - amount)
                 account.cash_balance = quantize_money(account.cash_balance + amount)
                 account.available_cash = quantize_money(account.available_cash + amount)
@@ -831,19 +924,26 @@ class CashSecurityCorporateActionService:
         if account.available_cash < cash or account.cash_balance < cash:
             raise BusinessRuleError("配股认购资金不足", error_code="RIGHTS_SUBSCRIPTION_CASH_INSUFFICIENT")
         position = db.scalar(select(Position).where(Position.position_id == entitlement.position_id).with_for_update())
+        self._ensure_replay_opening_balance(
+            db, action=action, entitlement=entitlement, component=component,
+            position=position, effective_trading_day=trading_day,
+        )
         request_token = sha256(client_request_id.encode()).hexdigest()[:32]
-        if self._ledger(
+        ledger_created = self._ledger(
             db, entitlement=entitlement, component=component,
             entry_type="RIGHTS_SUBSCRIBED", action_version=action.action_version,
+            effective_trading_day=trading_day,
             cash=-cash, pending=volume, cost=cash, idempotency_token=request_token,
-        ) and self._position_adjustment(
+        )
+        adjustment_created = self._position_adjustment(
             db, action=action, entitlement=entitlement, component=component,
             adjustment_type="RIGHTS_SUBSCRIBED",
             effective_trading_day=trading_day,
             pending_volume=volume,
             position_cost=cash,
             idempotency_token=request_token,
-        ):
+        )
+        if ledger_created and adjustment_created:
             account.cash_balance = quantize_money(account.cash_balance - cash)
             account.available_cash = quantize_money(account.available_cash - cash)
             position.pending_share_volume += volume

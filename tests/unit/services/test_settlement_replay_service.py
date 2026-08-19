@@ -308,3 +308,30 @@ def test_close_trade_without_allocation_is_rejected():
         )
 
     assert error.value.error_code == "REPLAY_CLOSE_ALLOCATION_INCONSISTENT"
+
+
+def test_prior_expired_option_is_not_replayed_or_loaded_again():
+    yesterday = date(2026, 8, 5)
+    detail = _detail(
+        "D1", open_trade_id="T1", open_day=yesterday, price="100", volume=1
+    )
+    trade = _trade(
+        "T1", trading_day=yesterday, offset="OPEN", price="100", volume=1
+    )
+
+    result = SettlementReplayService().replay(
+        trading_day=DAY,
+        details=[detail],
+        trades=[trade],
+        allocations=[],
+        prior_position_settlements={},
+        prior_expired_position_ids={"P1"},
+        # 已退市合约可以不再保留在参考数据表；此前到期结算事实是唯一终态。
+        instruments={},
+        instruments_by_id={},
+        prices={},
+        has_prior_batch=True,
+    )
+
+    assert result.positions == ()
+    assert dict(result.trades_by_account) == {}
