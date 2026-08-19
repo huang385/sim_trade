@@ -30,6 +30,7 @@ class PositionResponse(BaseModel):
     yesterday_volume: int
     frozen_volume: int
     settlement_locked_volume: int = 0
+    pending_share_volume: int = 0
     available_volume: int
     # 加权平均开仓价、累计成本和实际占用保证金
     average_open_price: Decimal

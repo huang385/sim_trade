@@ -118,6 +118,8 @@ class RealtimeFactEventService:
                         "unrealized_pnl": _decimal_string(_field(account, "unrealized_pnl", Decimal("0"))),
                         "daily_position_pnl": _decimal_string(_field(account, "daily_position_pnl", Decimal("0"))),
                         "stock_market_value": _decimal_string(_field(account, "stock_market_value", Decimal("0"))),
+                        "corporate_action_receivable": _decimal_string(_field(account, "corporate_action_receivable", Decimal("0"))),
+                        "pending_security_value": _decimal_string(_field(account, "pending_security_value", Decimal("0"))),
                     }
                     if include_valuation_fields
                     else {}
@@ -167,6 +169,7 @@ class RealtimeFactEventService:
                 "available_volume": _field(position, "available_volume", 0),
                 "frozen_volume": _field(position, "frozen_volume", 0),
                 "settlement_locked_volume": _field(position, "settlement_locked_volume", 0),
+                "pending_share_volume": _field(position, "pending_share_volume", 0),
                 "average_open_price": _decimal_string(
                     _field(position, "average_open_price", Decimal("0"))
                 ),

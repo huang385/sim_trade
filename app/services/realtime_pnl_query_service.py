@@ -79,6 +79,8 @@ class RealtimePnlQueryService:
                 ),
                 equity=_decimal(values, "equity"),
                 stock_market_value=Decimal(values.get("stock_market_value", "0")),
+                corporate_action_receivable=Decimal(values.get("corporate_action_receivable", "0")),
+                pending_security_value=Decimal(values.get("pending_security_value", "0")),
                 available_cash=_decimal(values, "available_cash"),
                 risk_ratio=_decimal(values, "risk_ratio"),
                 risk_available_cash=Decimal(
@@ -100,6 +102,8 @@ class RealtimePnlQueryService:
             ),
             equity=account.equity,
             stock_market_value=getattr(account, "stock_market_value", Decimal("0")),
+            corporate_action_receivable=getattr(account, "corporate_action_receivable", Decimal("0")),
+            pending_security_value=getattr(account, "pending_security_value", Decimal("0")),
             available_cash=account.available_cash,
             risk_ratio=account.risk_ratio,
             risk_available_cash=getattr(

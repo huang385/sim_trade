@@ -45,12 +45,14 @@ from app.models.instrument import Instrument
 from app.models.margin_rule_daily import MarginRuleDaily
 from app.models.order import Order
 from app.models.position import Position
+from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
 from app.repositories.daily_settlement_repository import DailySettlementRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
 from app.schemas.order_schema import OrderCancelRequest
 from app.schemas.pnl_schema import AccountRealtimePnl, PositionRealtimePnl
 from app.services.account_access_scope import AccountAccessScope
+from app.services.cash_security_corporate_action_service import CashSecurityCorporateActionService
 from app.services.account_risk_state_service import AccountRiskStateService
 from app.services.account_valuation_calculator import AccountValuationCalculator
 from app.services.active_order_rebuild_service import ActiveOrderRebuildService
@@ -281,6 +283,18 @@ class DailySettlementService:
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
         return value
+
+    def _apply_due_corporate_actions(self, trading_day: date) -> None:
+        """Apply PostgreSQL corporate-action facts after the order barrier.
+
+        The action service is idempotent through entitlement and ledger keys;
+        rerunning a failed daily batch therefore never recreates an asset.
+        """
+        with self.session_factory() as db:
+            CashSecurityCorporateActionService(
+                outbox_repository=self.outbox_repository
+            ).run_due_actions(db, trading_day=trading_day)
+            db.commit()
 
     def _acquire_exclusive_lock(self, connection: Connection) -> None:
         if connection.dialect.name == "postgresql":
@@ -1042,6 +1056,27 @@ class DailySettlementService:
                     all_trades_by_account.setdefault(
                         trade.account_id, []
                     ).append(trade)
+                corporate_cash_by_account: dict[str, tuple[Decimal, Decimal]] = {}
+                corporate_income_by_account: dict[str, Decimal] = {}
+                for ledger in db.scalars(
+                    select(CashSecurityCorporateActionLedger).where(
+                        CashSecurityCorporateActionLedger.account_id.in_(
+                            tuple(account_by_id)
+                        )
+                    )
+                ).all():
+                    prior_cash, today_cash = corporate_cash_by_account.get(
+                        ledger.account_id, (ZERO, ZERO)
+                    )
+                    if ledger.created_at.astimezone(SHANGHAI).date() < trading_day:
+                        prior_cash = quantize_money(prior_cash + Decimal(ledger.cash_delta))
+                    elif ledger.created_at.astimezone(SHANGHAI).date() == trading_day:
+                        today_cash = quantize_money(today_cash + Decimal(ledger.cash_delta))
+                        corporate_income_by_account[ledger.account_id] = quantize_money(
+                            corporate_income_by_account.get(ledger.account_id, ZERO)
+                            + Decimal(ledger.corporate_action_income_delta)
+                        )
+                    corporate_cash_by_account[ledger.account_id] = (prior_cash, today_cash)
 
                 now = self._now()
                 events = RealtimeFactEventService(
@@ -1113,14 +1148,16 @@ class DailySettlementService:
                             ZERO,
                         )
                     )
+                    prior_corporate_cash, today_corporate_cash = corporate_cash_by_account.get(account_id, (ZERO, ZERO))
                     opening_cash = quantize_money(
                         Decimal(account.initial_cash)
                         + opening_trade_cash
                         + prior_futures_cash.get(account_id, ZERO)
                         + prior_expiry_cash.get(account_id, ZERO)
+                        + prior_corporate_cash
                     )
                     expected_before_cash = quantize_money(
-                        opening_cash + today_trade_cash
+                        opening_cash + today_trade_cash + today_corporate_cash
                     )
                     actual_before_cash = quantize_money(
                         Decimal(account.cash_balance)
@@ -1598,6 +1635,7 @@ class DailySettlementService:
                         Decimal(account.realized_pnl)
                         + active_cumulative_economic
                         + cash_unrealized_pnl
+                        + Decimal(account.corporate_action_income)
                         - Decimal(account.used_commission)
                     )
                     account.daily_position_pnl = quantize_money(
@@ -1644,6 +1682,7 @@ class DailySettlementService:
                             ),
                             ZERO,
                         )
+                        + corporate_income_by_account.get(account_id, ZERO)
                         - day_commission
                     )
                     expected_position_pnl = quantize_money(
@@ -1676,7 +1715,12 @@ class DailySettlementService:
                     if account.account_type in {"SECURITIES_CASH", "STOCK"}:
                         # Cash securities are fully paid: shares contribute to equity
                         # through their mark value, never through futures margin.
-                        account.equity = quantize_money(ending_cash + cash_market_value)
+                        account.equity = quantize_money(
+                            ending_cash
+                            + cash_market_value
+                            + Decimal(account.corporate_action_receivable)
+                            + Decimal(account.pending_security_value)
+                        )
                         account.available_cash = ending_cash
                         account.risk_available_cash = ending_cash
                         account.risk_ratio = ZERO.quantize(RISK_QUANT)
@@ -2254,6 +2298,8 @@ class DailySettlementService:
                 stage = DailySettlementStage.BARRIER_CONFIRMED.value
                 self._confirm_barrier()
                 self._advance(trading_day, DailySettlementStage.BARRIER_CONFIRMED)
+
+                self._apply_due_corporate_actions(trading_day)
 
                 stage = DailySettlementStage.PRICES_FROZEN.value
                 with self.session_factory() as db:

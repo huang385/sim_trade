@@ -47,6 +47,8 @@ class AccountRealtimePnl(BaseModel):
     cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
     stock_market_value: Decimal = Decimal("0")
+    corporate_action_receivable: Decimal = Decimal("0")
+    pending_security_value: Decimal = Decimal("0")
     available_cash: Decimal
     futures_unrealized_pnl: Decimal = Decimal("0")
     option_realtime_required_margin: Decimal = Decimal("0")
@@ -93,6 +95,8 @@ class AccountRealtimePnlResponse(BaseModel):
     cumulative_net_pnl: Decimal = Decimal("0")
     equity: Decimal
     stock_market_value: Decimal = Decimal("0")
+    corporate_action_receivable: Decimal = Decimal("0")
+    pending_security_value: Decimal = Decimal("0")
     available_cash: Decimal
     risk_ratio: Decimal
     risk_available_cash: Decimal = Decimal("0")

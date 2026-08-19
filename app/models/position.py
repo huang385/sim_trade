@@ -63,6 +63,7 @@ class Position(Base):
             "frozen_volume + settlement_locked_volume <= total_volume",
             name="ck_position_reserved_volume_within_total",
         ),
+        CheckConstraint("pending_share_volume >= 0", name="ck_position_pending_share_nonnegative"),
         CheckConstraint(
             "initial_occupied_margin >= 0",
             name="ck_position_initial_margin_nonnegative",
@@ -152,6 +153,7 @@ class Position(Base):
         default=0,
         server_default="0",
     )
+    pending_share_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     # 可用于卖出或平仓的数量，扣除委托冻结量和未来 T+1 交收锁定量。
     available_volume: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -287,3 +287,30 @@ def test_risk_events_are_safely_acknowledged_without_order_lookup(event_type):
     )
     assert result.action == "IGNORED_TRADE_EVENT"
     repository.get_by_order_id.assert_not_called()
+
+
+def test_corporate_action_event_is_acknowledged_without_order_fields():
+    repository = Mock()
+    service = AcceptedOrderEventService(
+        order_repository=repository,
+        active_order_index=Mock(),
+        processed_ttl_seconds=60,
+    )
+
+    result = service.process(
+        Mock(),
+        {
+            "event_id": "CA-1",
+            "event_type": "CORPORATE_ACTION_CASH_PAID",
+            "payload": json.dumps(
+                {
+                    "event_id": "CA-1",
+                    "event_type": "CORPORATE_ACTION_CASH_PAID",
+                    "action_id": "ACTION-1",
+                }
+            ),
+        },
+    )
+
+    assert result.action == "IGNORED_TRADE_EVENT"
+    repository.get_by_order_id.assert_not_called()

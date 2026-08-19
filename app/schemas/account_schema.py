@@ -60,6 +60,10 @@ class AccountResponse(BaseModel):
     short_option_market_value: Decimal = Decimal("0")
     net_option_market_value: Decimal = Decimal("0")
     stock_market_value: Decimal = Decimal("0")
+    corporate_action_receivable: Decimal = Decimal("0")
+    corporate_action_income: Decimal = Decimal("0")
+    pending_security_value: Decimal = Decimal("0")
+    rights_subscription_receivable: Decimal = Decimal("0")
     risk_available_cash: Decimal = Decimal("0")
     risk_state: str = "NORMAL"
     risk_version: int = 0

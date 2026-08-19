@@ -60,6 +60,8 @@ class Account(Base):
             "stock_market_value >= 0",
             name="ck_account_stock_market_value_nonnegative",
         ),
+        CheckConstraint("corporate_action_receivable >= 0", name="ck_account_corporate_receivable_nonnegative"),
+        CheckConstraint("pending_security_value >= 0", name="ck_account_pending_security_value_nonnegative"),
     )
 
     # 数据库内部自增主键
@@ -219,6 +221,10 @@ class Account(Base):
         default=Decimal("0"),
         server_default="0",
     )
+    corporate_action_receivable: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0")
+    corporate_action_income: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0")
+    pending_security_value: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0")
+    rights_subscription_receivable: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False, default=Decimal("0"), server_default="0")
 
     # 使用实时风险保证金计算的可用资金。available_cash继续表示数据库
     # 账面冻结口径，本字段供风险限制和实时页面使用。

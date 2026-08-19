@@ -164,6 +164,8 @@ class CashSecurityValuationService:
             cumulative_net_pnl=account.cumulative_net_pnl,
             equity=account.equity,
             stock_market_value=account.stock_market_value,
+            corporate_action_receivable=account.corporate_action_receivable,
+            pending_security_value=account.pending_security_value,
             available_cash=account.available_cash,
             risk_available_cash=account.risk_available_cash,
             risk_state=account.risk_state,
@@ -209,7 +211,7 @@ class CashSecurityValuationService:
         if len(resolved) != len(positions):
             return False, (), None, False
 
-        stock_value = unrealized = daily_position = ZERO
+        stock_value = pending_security_value = unrealized = daily_position = ZERO
         now = utc_now()
         fact_versions = OutboxRepository().list_latest_fact_versions(
             db,
@@ -235,6 +237,15 @@ class CashSecurityValuationService:
             position.daily_position_pnl = quantize_money(market_value - basis)
             position.updated_at = now
             stock_value += market_value
+            # Pending corporate-action shares are economic assets but not
+            # tradable holdings.  Revalue them with the same authoritative
+            # raw market price; retaining an ex-date pre-close would distort
+            # account equity after ex-right/ex-dividend price adjustment.
+            pending_security_value += quantize_money(
+                Decimal(getattr(position, "pending_share_volume", 0))
+                * tick.last_price
+                * Decimal(position.multiplier_snapshot)
+            )
             unrealized += position.unrealized_pnl
             daily_position += position.daily_position_pnl
             position_snapshots.append(
@@ -261,11 +272,19 @@ class CashSecurityValuationService:
             )
 
         account.stock_market_value = quantize_money(stock_value)
+        account.pending_security_value = quantize_money(pending_security_value)
         account.unrealized_pnl = quantize_money(unrealized)
         account.daily_position_pnl = quantize_money(daily_position)
         account.daily_pnl = quantize_money(account.daily_position_pnl + Decimal(account.daily_close_pnl) - Decimal(account.daily_commission))
-        account.cumulative_net_pnl = quantize_money(Decimal(account.realized_pnl) + account.unrealized_pnl - Decimal(account.used_commission))
-        account.equity = quantize_money(Decimal(account.cash_balance) + account.stock_market_value)
+        account.cumulative_net_pnl = quantize_money(
+            Decimal(account.realized_pnl) + account.unrealized_pnl
+            + Decimal(account.corporate_action_income) - Decimal(account.used_commission)
+        )
+        account.equity = quantize_money(
+            Decimal(account.cash_balance) + account.stock_market_value
+            + Decimal(account.corporate_action_receivable)
+            + Decimal(account.pending_security_value)
+        )
         # 现金证券的浮动市值不直接增加可买资金；可用资金仍只由现金决定。
         account.risk_available_cash = Decimal(account.available_cash)
         account.risk_ratio = ZERO

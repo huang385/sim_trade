@@ -127,7 +127,8 @@ class AcceptedOrderEventService:
             raise OrderEventValidationError("事件缺少event_id")
         if not event_type:
             raise OrderEventValidationError("事件缺少event_type")
-        if event_type not in (
+        corporate_action_event = event_type.startswith("CORPORATE_ACTION_") or event_type.startswith("RIGHTS_SUBSCRIPTION_") or event_type.startswith("BOND_MATURITY_")
+        if not corporate_action_event and event_type not in (
             AcceptedOrderEventService.INDEX_EVENT_TYPES
             | AcceptedOrderEventService.PASSTHROUGH_EVENT_TYPES
         ):
@@ -145,7 +146,7 @@ class AcceptedOrderEventService:
         if "event_type" in payload and payload.get("event_type") != event_type:
             raise OrderEventValidationError("event_type与payload不一致")
 
-        required_fields = (
+        required_fields = () if corporate_action_event else (
             ("account_id",)
             if event_type in AcceptedOrderEventService.PASSTHROUGH_EVENT_TYPES
             else ("order_id", "account_id", "exchange_id", "symbol")
@@ -165,7 +166,7 @@ class AcceptedOrderEventService:
             event_id=event_id,
             event_type=event_type,
             order_id=str(payload.get("order_id") or "").strip(),
-            account_id=payload["account_id"].strip(),
+            account_id=str(payload.get("account_id") or "").strip(),
             exchange_id=str(payload.get("exchange_id") or "").strip(),
             symbol=str(payload.get("symbol") or "").strip(),
             payload=payload,
@@ -179,7 +180,7 @@ class AcceptedOrderEventService:
         """处理一条事件，返回动作说明；异常由 Worker 决定重试或死信。"""
 
         event = self.parse_event(fields)
-        if event.event_type in self.PASSTHROUGH_EVENT_TYPES:
+        if event.event_type in self.PASSTHROUGH_EVENT_TYPES or event.event_type.startswith("CORPORATE_ACTION_") or event.event_type.startswith("RIGHTS_SUBSCRIPTION_") or event.event_type.startswith("BOND_MATURITY_"):
             return AcceptedOrderProcessResult(
                 event_id=event.event_id,
                 event_type=event.event_type,

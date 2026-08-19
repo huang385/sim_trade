@@ -643,6 +643,8 @@ class RealtimePnlStore:
                     "cumulative_net_pnl",
                     "equity",
                     "stock_market_value",
+                    "corporate_action_receivable",
+                    "pending_security_value",
                     "available_cash",
                     "futures_unrealized_pnl",
                     "option_realtime_required_margin",

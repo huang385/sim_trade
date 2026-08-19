@@ -46,6 +46,11 @@ from app.models.stock_daily_trading_fact import StockDailyTradingFact
 from app.models.stock_trading_rule import StockTradingRule
 from app.models.cash_security_order_fee_accumulator import CashSecurityOrderFeeAccumulator
 from app.models.cash_security_trade_fee_component import CashSecurityTradeFeeComponent
+from app.models.cash_security_corporate_action import CashSecurityCorporateAction
+from app.models.cash_security_corporate_action_component import CashSecurityCorporateActionComponent
+from app.models.cash_security_corporate_action_entitlement import CashSecurityCorporateActionEntitlement
+from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
+from app.models.cash_security_price_adjustment_factor import CashSecurityPriceAdjustmentFactor
 from app.models.cash_security_valuation_writer_fence import (
     CashSecurityValuationWriterFence,
 )
@@ -86,6 +91,11 @@ __all__ = [
     "StockTradingRule",
     "CashSecurityOrderFeeAccumulator",
     "CashSecurityTradeFeeComponent",
+    "CashSecurityCorporateAction",
+    "CashSecurityCorporateActionComponent",
+    "CashSecurityCorporateActionEntitlement",
+    "CashSecurityCorporateActionLedger",
+    "CashSecurityPriceAdjustmentFactor",
     "CashSecurityValuationWriterFence",
     "CashSecurityPnlBasisMigrationAudit",
 ]
