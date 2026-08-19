@@ -44,3 +44,39 @@ class TradingDayRepository:
             },
         ).mappings()
         return [dict(row) for row in rows]
+
+    @staticmethod
+    def list_cash_security_candidate_schedules(
+        db: Session,
+        *,
+        exchange_id: str,
+        instrument_type: str,
+        start_day: date,
+        end_day: date,
+    ) -> list[dict[str, Any]]:
+        """按证券市场和合约类型读取时段，不将单只证券归入期货品种。"""
+
+        rows = db.execute(
+            text(
+                "SELECT schedule.trading_day, schedule.exchange_id, "
+                "schedule.product_code, schedule.instrument_type, "
+                "schedule.sessions, schedule.status AS schedule_status, "
+                "calendar.is_open AS calendar_is_open, "
+                "calendar.status AS calendar_status "
+                "FROM product_trading_schedule AS schedule "
+                "JOIN trading_calendar AS calendar "
+                "ON calendar.exchange_id = schedule.exchange_id "
+                "AND calendar.trading_day = schedule.trading_day "
+                "WHERE schedule.exchange_id = :exchange_id "
+                "AND schedule.instrument_type = :instrument_type "
+                "AND schedule.trading_day BETWEEN :start_day AND :end_day "
+                "ORDER BY schedule.trading_day, schedule.product_code"
+            ),
+            {
+                "exchange_id": exchange_id,
+                "instrument_type": instrument_type,
+                "start_day": start_day,
+                "end_day": end_day,
+            },
+        ).mappings()
+        return [dict(row) for row in rows]

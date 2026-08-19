@@ -2,6 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -54,6 +55,25 @@ class PriceAdjustmentFactorCreate(BaseModel):
     official_ex_reference_price: Decimal = Field(gt=0)
     source_event_id: str = Field(min_length=1, max_length=128)
     data_source: str = Field(min_length=1, max_length=32)
+
+
+class HistoricalPriceBar(BaseModel):
+    trading_day: date
+    open: Decimal | None = None
+    high: Decimal | None = None
+    low: Decimal | None = None
+    close: Decimal | None = None
+
+
+class AdjustedPriceBarsRequest(BaseModel):
+    instrument_id: int = Field(gt=0)
+    adjustment_mode: Literal["RAW", "FORWARD", "BACKWARD"] = "RAW"
+    bars: list[HistoricalPriceBar] = Field(min_length=1)
+
+
+class AdjustedPriceBar(HistoricalPriceBar):
+    adjustment_mode: Literal["RAW", "FORWARD", "BACKWARD"]
+    adjustment_multiplier: Decimal
 
 
 class CorporateActionResponse(BaseModel):

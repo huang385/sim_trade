@@ -141,6 +141,39 @@ class CashSecurityOrderService:
             for item in components
         ]
 
+    def _resolve_instrument(self, db: Session, request: StockOrderCreateRequest):
+        """统一将网页输入和行情标准代码解析为参考数据中的合约。
+
+        现金证券历史接口使用 ``exchange_id + symbol``，而行情、订阅和
+        持仓展示使用 ``order_book_id``（例如 ``110075.XSHG``）。这里优先
+        识别标准行情代码，并兼容前端仍提交 XSHG/XSHE 交易所别名的旧格式。
+        """
+
+        exchange_id = normalize_code(request.exchange_id)
+        symbol = normalize_code(request.symbol)
+
+        # 用户直接粘贴行情代码时，避免把 ``110075.XSHG`` 当成数据库 symbol。
+        if "." in symbol:
+            return self.instrument_repository.get_by_order_book_id(db, symbol)
+
+        exchange_aliases = {
+            "XSHG": "SSE",
+            "XSHE": "SZSE",
+        }
+        return self.instrument_repository.get(
+            db, exchange_aliases.get(exchange_id, exchange_id), symbol
+        )
+
+    def _raise_instrument_not_found(self) -> None:
+        """在访问合约属性前返回产品对应的可预期业务错误。"""
+
+        if self.instrument_type == "CONVERTIBLE_BOND":
+            raise BusinessRuleError(
+                "可转债合约不存在",
+                error_code="CONVERTIBLE_BOND_INSTRUMENT_NOT_FOUND",
+            )
+        raise BusinessRuleError("股票合约不存在", error_code="STOCK_INSTRUMENT_NOT_FOUND")
+
     def create_order(
         self,
         *,
@@ -189,9 +222,9 @@ class CashSecurityOrderService:
                 db.commit()
                 return existing
 
-            instrument = self.instrument_repository.get(
-                db, normalize_code(request.exchange_id), normalize_code(request.symbol)
-            )
+            instrument = self._resolve_instrument(db, request)
+            if instrument is None:
+                self._raise_instrument_not_found()
             trading_day = (
                 self.trading_day_provider()
                 if self.trading_day_provider is not None

@@ -50,6 +50,7 @@ from app.models.cash_security_corporate_action import CashSecurityCorporateActio
 from app.models.cash_security_corporate_action_component import CashSecurityCorporateActionComponent
 from app.models.cash_security_corporate_action_entitlement import CashSecurityCorporateActionEntitlement
 from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
+from app.models.cash_security_corporate_action_subscription import CashSecurityCorporateActionSubscription
 from app.models.cash_security_price_adjustment_factor import CashSecurityPriceAdjustmentFactor
 from app.models.cash_security_valuation_writer_fence import (
     CashSecurityValuationWriterFence,
@@ -95,6 +96,7 @@ __all__ = [
     "CashSecurityCorporateActionComponent",
     "CashSecurityCorporateActionEntitlement",
     "CashSecurityCorporateActionLedger",
+    "CashSecurityCorporateActionSubscription",
     "CashSecurityPriceAdjustmentFactor",
     "CashSecurityValuationWriterFence",
     "CashSecurityPnlBasisMigrationAudit",

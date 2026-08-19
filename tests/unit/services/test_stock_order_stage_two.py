@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 from pydantic import ValidationError
@@ -29,6 +29,7 @@ from app.services.product_strategy_registry import resolve_product_strategy
 from app.services.stock_order_cancellation_service import StockOrderCancellationService
 from app.services.stock_order_service import StockOrderService
 from app.services.stock_order_validation_service import StockOrderValidationService
+from app.services.convertible_bond_order_service import ConvertibleBondOrderService
 
 
 def _request(**overrides):
@@ -87,6 +88,41 @@ def test_stock_request_is_strictly_separate_from_derivative_offset_flag():
         _request(offset_flag="OPEN")
     with pytest.raises(ValidationError):
         _request(order_type="MARKET")
+
+
+def test_cash_security_order_resolves_market_order_book_id_first():
+    repository = Mock()
+    instrument = SimpleNamespace(order_book_id="110075.XSHG")
+    repository.get_by_order_book_id.return_value = instrument
+    service = StockOrderService(instrument_repository=repository)
+
+    resolved = service._resolve_instrument(
+        Mock(), _request(exchange_id="XSHG", symbol="110075.XSHG")
+    )
+
+    assert resolved is instrument
+    repository.get_by_order_book_id.assert_called_once_with(ANY, "110075.XSHG")
+    repository.get.assert_not_called()
+
+
+def test_cash_security_order_accepts_market_exchange_alias_for_legacy_request():
+    repository = Mock()
+    service = StockOrderService(instrument_repository=repository)
+    db = Mock()
+
+    service._resolve_instrument(db, _request(exchange_id="XSHG", symbol="110075"))
+
+    repository.get.assert_called_once_with(db, "SSE", "110075")
+
+
+def test_cash_security_order_returns_product_specific_not_found_error():
+    with pytest.raises(BusinessRuleError) as stock_error:
+        StockOrderService()._raise_instrument_not_found()
+    assert stock_error.value.error_code == "STOCK_INSTRUMENT_NOT_FOUND"
+
+    with pytest.raises(BusinessRuleError) as bond_error:
+        ConvertibleBondOrderService()._raise_instrument_not_found()
+    assert bond_error.value.error_code == "CONVERTIBLE_BOND_INSTRUMENT_NOT_FOUND"
 
 
 def test_stock_product_strategy_is_registered_without_matching_fallback():

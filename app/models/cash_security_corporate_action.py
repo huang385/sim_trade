@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, JSON, String, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.common.time_utils import utc_now
@@ -17,6 +17,7 @@ class CashSecurityCorporateAction(Base):
     __table_args__ = (
         UniqueConstraint("action_id", name="uq_cash_corporate_action_id"),
         UniqueConstraint("source_action_id", "action_version", name="uq_cash_corporate_action_source_version"),
+        Index("ix_cash_security_corporate_action_source_version", "source_action_id", "action_version"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -46,3 +47,9 @@ class CashSecurityCorporateAction(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Links an unexecuted source revision to its replacement.  It is nullable
+    # because completed facts are never rewritten by a later announcement.
+    superseded_by_action_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cash_security_corporate_action.action_id", ondelete="RESTRICT"),
+        nullable=True,
+    )

@@ -258,6 +258,39 @@ class InstrumentService:
             for item in instruments
         ]
 
+    def search_tradeable_stocks(
+        self,
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[InstrumentCatalogItem]:
+        """搜索桌面端可交易股票和可转债，不混入期货和期权。"""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise BusinessValidationError(
+                "搜索关键词不能为空",
+                error_code="INSTRUMENT_SEARCH_QUERY_EMPTY",
+            )
+        return [
+            InstrumentCatalogItem(
+                order_book_id=item.order_book_id,
+                symbol=item.symbol,
+                exchange_id=item.exchange_id,
+                instrument_name=item.instrument_name,
+                product_id=item.product_id,
+                instrument_type=item.instrument_type,
+                contract_multiplier=item.contract_multiplier,
+                price_tick=item.price_tick,
+            )
+            for item in self.repository.search_tradeable_stocks(
+                db,
+                query=normalized_query,
+                limit=limit,
+            )
+        ]
+
 
 def get_instrument_service() -> InstrumentService:
     return InstrumentService(

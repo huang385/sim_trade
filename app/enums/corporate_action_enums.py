@@ -7,6 +7,9 @@ class CorporateActionStatus(StrEnum):
     ENTITLEMENT_CAPTURED = "ENTITLEMENT_CAPTURED"
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
+    # A newer source revision replaced this event before it created any
+    # entitlement.  Keep it for audit, but it must never be executable.
+    SUPERSEDED = "SUPERSEDED"
     CANCELLED = "CANCELLED"
     FAILED = "FAILED"
     MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"

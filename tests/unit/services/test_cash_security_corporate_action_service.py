@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
+from app.common.exceptions import BusinessRuleError
 from app.models.account import Account
 from app.models.app_user import AppUser
 from app.models.cash_security_corporate_action_entitlement import (
@@ -16,6 +17,9 @@ from app.models.cash_security_corporate_action_entitlement import (
 from app.models.cash_security_corporate_action_ledger import (
     CashSecurityCorporateActionLedger,
 )
+from app.models.cash_security_corporate_action_subscription import (
+    CashSecurityCorporateActionSubscription,
+)
 from app.models.instrument import Instrument
 from app.models.position import Position
 from app.services.account_access_scope import AccountAccessScope
@@ -23,6 +27,9 @@ from app.services.cash_security_corporate_action_service import (
     CashSecurityCorporateActionService,
 )
 from app.services.cash_security_valuation_service import CashSecurityValuationService
+from app.services.cash_security_price_adjustment_service import (
+    CashSecurityPriceAdjustmentService,
+)
 from app.services.daily_settlement_service import DailySettlementService
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
@@ -118,6 +125,7 @@ def test_rights_subscription_is_authorized_idempotent_and_creates_pending_shares
         service.confirm(db, action_id=action.action_id)
         service.capture_entitlements(db, action_id=action.action_id, trading_day=DAY)
         first = service.subscribe_rights(db, action_id=action.action_id, account_id="A-CA", volume=100, client_request_id="REQ-1", access_scope=AccountAccessScope.for_user("U-CA"), trading_day=DAY)
+        second = service.subscribe_rights(db, action_id=action.action_id, account_id="A-CA", volume=100, client_request_id="REQ-2", access_scope=AccountAccessScope.for_user("U-CA"), trading_day=DAY)
         again = service.subscribe_rights(db, action_id=action.action_id, account_id="A-CA", volume=100, client_request_id="REQ-1", access_scope=AccountAccessScope.for_user("U-CA"), trading_day=DAY)
         db.commit()
 
@@ -125,10 +133,13 @@ def test_rights_subscription_is_authorized_idempotent_and_creates_pending_shares
         position = db.scalar(select(Position).where(Position.position_id == "P-CA"))
         assert again.entitlement_id == first.entitlement_id
         assert first.entitled_share_volume == 300
-        assert first.subscribed_volume == first.pending_share_volume == 100
-        assert account.cash_balance == account.available_cash == Decimal("99200.000000")
-        assert account.pending_security_value == Decimal("800.000000")
-        assert position.pending_share_volume == 100
+        assert second.entitlement_id == first.entitlement_id
+        assert first.subscribed_volume == first.pending_share_volume == 200
+        assert first.status == "PARTIALLY_SUBSCRIBED"
+        assert account.cash_balance == account.available_cash == Decimal("98400.000000")
+        assert account.pending_security_value == Decimal("1600.000000")
+        assert position.pending_share_volume == 200
+        assert len(db.scalars(select(CashSecurityCorporateActionSubscription)).all()) == 2
 
 
 def test_stock_split_changes_quantities_but_not_total_cost_or_daily_basis(session_factory):
@@ -146,6 +157,77 @@ def test_stock_split_changes_quantities_but_not_total_cost_or_daily_basis(sessio
         assert position.position_cost == Decimal("10000.000000")
         assert position.average_open_price == Decimal("5.000000")
         assert position.daily_pnl_base_cost == position.yesterday_pnl_base_cost == Decimal("10000.000000")
+
+
+def test_new_source_revision_supersedes_unexecuted_revision(session_factory):
+    with session_factory() as db:
+        instrument = _seed_cash_position(db)
+        service = CashSecurityCorporateActionService()
+        v1 = service.import_action(
+            db,
+            payload={"instrument_id": instrument.id, "source_action_id": "REV-1", "action_version": 1, "data_source": "TEST", "record_date": DAY, "ex_date": DAY, "payment_date": DAY},
+            components=[{"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "1"}],
+        )
+        v2 = service.import_action(
+            db,
+            payload={"instrument_id": instrument.id, "source_action_id": "REV-1", "action_version": 2, "data_source": "TEST", "record_date": DAY, "ex_date": DAY, "payment_date": DAY},
+            components=[{"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "2"}],
+        )
+        assert v1.status == "SUPERSEDED"
+        assert v1.superseded_by_action_id == v2.action_id
+        with pytest.raises(BusinessRuleError, match="superseded"):
+            service.confirm(db, action_id=v1.action_id)
+        assert v1.status == "SUPERSEDED"
+        service.confirm(db, action_id=v2.action_id)
+        assert v2.status == "CONFIRMED"
+
+
+def test_completed_action_is_not_scanned_or_emitted_again(session_factory):
+    with session_factory() as db:
+        instrument = _seed_cash_position(db)
+        service = CashSecurityCorporateActionService()
+        action = service.import_action(
+            db,
+            payload={"instrument_id": instrument.id, "source_action_id": "COMPLETE-1", "data_source": "TEST", "record_date": DAY, "ex_date": DAY, "payment_date": DAY},
+            components=[{"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "2"}],
+        )
+        service.confirm(db, action_id=action.action_id)
+        assert service.run_due_actions(db, trading_day=DAY) == 3
+        assert action.status == "COMPLETED"
+        event_count = len(db.scalars(select(CashSecurityCorporateActionLedger)).all())
+        assert service.run_due_actions(db, trading_day=DAY) == 0
+        assert len(db.scalars(select(CashSecurityCorporateActionLedger)).all()) == event_count
+
+
+def test_price_adjustment_service_applies_saved_factor_to_historical_ohlc(session_factory):
+    with session_factory() as db:
+        instrument = _seed_cash_position(db)
+        service = CashSecurityCorporateActionService()
+        action = service.import_action(
+            db,
+            payload={"instrument_id": instrument.id, "source_action_id": "FACTOR-1", "data_source": "TEST", "ex_date": DAY},
+            components=[{"component_type": "CASH_DIVIDEND", "base_quantity": "10", "cash_amount": "1"}],
+        )
+        service.record_price_adjustment_factor(
+            db,
+            action_id=action.action_id,
+            trading_day=DAY,
+            raw_previous_close=Decimal("10"),
+            official_ex_reference_price=Decimal("8.909090909"),
+            source_event_id="OFFICIAL-EX-1",
+            data_source="TEST",
+        )
+        adjusted = CashSecurityPriceAdjustmentService().adjust_bars(
+            db,
+            instrument_id=instrument.id,
+            mode="FORWARD",
+            bars=[
+                {"trading_day": date(2026, 8, 19), "open": Decimal("10"), "high": Decimal("10"), "low": Decimal("10"), "close": Decimal("10")},
+                {"trading_day": DAY, "open": Decimal("8.909090909"), "high": Decimal("8.909090909"), "low": Decimal("8.909090909"), "close": Decimal("8.909090909")},
+            ],
+        )
+        assert adjusted[0]["close"] == Decimal("8.909090909")
+        assert adjusted[1]["close"] == Decimal("8.909090909")
 
 
 def test_convertible_bond_maturity_creates_principal_receivable_then_cash(session_factory):

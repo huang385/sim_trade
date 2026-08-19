@@ -15,6 +15,8 @@ from app.models.cash_security_corporate_action_entitlement import CashSecurityCo
 from app.models.account import Account
 from app.schemas.corporate_action_schema import (
     CorporateActionEntitlementResponse,
+    AdjustedPriceBar,
+    AdjustedPriceBarsRequest,
     CorporateActionImportRequest,
     CorporateActionResponse,
     PriceAdjustmentFactorCreate,
@@ -22,6 +24,9 @@ from app.schemas.corporate_action_schema import (
 )
 from app.services.account_access_scope import AccountAccessScope
 from app.services.cash_security_corporate_action_service import CashSecurityCorporateActionService
+from app.services.cash_security_price_adjustment_service import (
+    CashSecurityPriceAdjustmentService,
+)
 
 
 admin_router = APIRouter(
@@ -109,6 +114,25 @@ def subscribe_rights(action_id: str, request: RightsSubscriptionRequest, current
     db.commit()
     db.refresh(entitlement)
     return entitlement
+
+
+@router.post("/adjusted-bars", response_model=list[AdjustedPriceBar])
+def adjust_historical_bars(
+    request: AdjustedPriceBarsRequest,
+    _: AppUser = Depends(require_active_user),
+    db: Session = Depends(get_db),
+):
+    """Apply official corporate-action factors to caller-provided raw OHLC bars.
+
+    This is a display/analysis endpoint only; matching and settlement never
+    receive adjusted values.
+    """
+    return CashSecurityPriceAdjustmentService().adjust_bars(
+        db,
+        instrument_id=request.instrument_id,
+        mode=request.adjustment_mode,
+        bars=[row.model_dump() for row in request.bars],
+    )
 
 
 @router.get("/{action_id}/entitlements", response_model=list[CorporateActionEntitlementResponse])

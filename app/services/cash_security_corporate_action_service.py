@@ -23,6 +23,9 @@ from app.models.cash_security_corporate_action import CashSecurityCorporateActio
 from app.models.cash_security_corporate_action_component import CashSecurityCorporateActionComponent
 from app.models.cash_security_corporate_action_entitlement import CashSecurityCorporateActionEntitlement
 from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
+from app.models.cash_security_corporate_action_subscription import (
+    CashSecurityCorporateActionSubscription,
+)
 from app.models.instrument import Instrument
 from app.models.position import Position
 from app.models.cash_security_price_adjustment_factor import CashSecurityPriceAdjustmentFactor
@@ -33,6 +36,10 @@ from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 ZERO = Decimal("0")
 CASH_TYPES = {InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value}
+UNEXECUTED_ACTION_STATUSES = {
+    CorporateActionStatus.DRAFT.value,
+    CorporateActionStatus.CONFIRMED.value,
+}
 STOCK_COMPONENTS = {
     CorporateActionComponentType.CASH_DIVIDEND.value,
     CorporateActionComponentType.STOCK_DIVIDEND.value,
@@ -122,6 +129,15 @@ class CashSecurityCorporateActionService:
             if existing.source_payload_hash != source_hash:
                 raise ResourceConflictError("同一来源版本内容不一致", error_code="CORPORATE_ACTION_SOURCE_CONFLICT")
             return existing
+        newer_revision = db.scalar(
+            select(CashSecurityCorporateAction)
+            .where(
+                CashSecurityCorporateAction.source_action_id == source_id,
+                CashSecurityCorporateAction.action_version > version,
+            )
+            .order_by(CashSecurityCorporateAction.action_version.desc())
+            .with_for_update()
+        )
         instrument = db.scalar(select(Instrument).where(Instrument.id == payload["instrument_id"]))
         if instrument is None or instrument.instrument_type not in CASH_TYPES:
             raise BusinessRuleError("公司行为仅支持股票和可转债", error_code="CORPORATE_ACTION_INSTRUMENT_INVALID")
@@ -156,14 +172,84 @@ class CashSecurityCorporateActionService:
                 subscription_price=Decimal(item.get("subscription_price", ZERO)), withholding_tax_rate=Decimal(item.get("withholding_tax_rate", ZERO)),
                 cash_in_lieu_price=Decimal(item.get("cash_in_lieu_price", ZERO)), rounding_rule=item.get("rounding_rule", "FLOOR"), currency=item.get("currency", "CNY"), created_at=utc_now(),
             ))
+        # Revisions may replace only an event that has not yet frozen a holder
+        # snapshot.  Once an entitlement exists, the original fact remains
+        # auditable and a correction needs an explicit manual decision.
+        prior_revisions = db.scalars(
+            select(CashSecurityCorporateAction)
+            .where(
+                CashSecurityCorporateAction.source_action_id == source_id,
+                CashSecurityCorporateAction.action_version < version,
+                CashSecurityCorporateAction.status.not_in((
+                    CorporateActionStatus.CANCELLED.value,
+                    CorporateActionStatus.SUPERSEDED.value,
+                )),
+            )
+            .with_for_update()
+        ).all()
+        has_executed_predecessor = any(
+            row.status not in UNEXECUTED_ACTION_STATUSES
+            for row in prior_revisions
+        )
+        if newer_revision is not None:
+            action.status = CorporateActionStatus.SUPERSEDED.value
+            action.superseded_by_action_id = newer_revision.action_id
+        elif has_executed_predecessor:
+            action.status = CorporateActionStatus.MANUAL_REVIEW_REQUIRED.value
+        else:
+            for prior in prior_revisions:
+                prior.status = CorporateActionStatus.SUPERSEDED.value
+                prior.superseded_by_action_id = action.action_id
+                prior.updated_at = utc_now()
+                self._event(
+                    db,
+                    event_type="CORPORATE_ACTION_SUPERSEDED",
+                    action_id=prior.action_id,
+                    payload={
+                        "superseded_by_action_id": action.action_id,
+                        "business_version": str(prior.action_version),
+                    },
+                )
         self._event(db, event_type="CORPORATE_ACTION_IMPORTED", action_id=action.action_id, payload={"business_version": str(version)})
+        if action.status == CorporateActionStatus.MANUAL_REVIEW_REQUIRED.value:
+            self._event(
+                db,
+                event_type="CORPORATE_ACTION_MANUAL_REVIEW_REQUIRED",
+                action_id=action.action_id,
+                payload={"reason": "EXECUTED_SOURCE_REVISION_EXISTS", "business_version": str(version)},
+            )
         return action
 
     def confirm(self, db: Session, *, action_id: str) -> CorporateActionResult:
         action = db.scalar(select(CashSecurityCorporateAction).where(CashSecurityCorporateAction.action_id == action_id).with_for_update())
+        if action is not None and action.status == CorporateActionStatus.SUPERSEDED.value:
+            raise BusinessRuleError(
+                "Corporate-action revision has been superseded",
+                error_code="CORPORATE_ACTION_REVISION_SUPERSEDED",
+            )
+        if action is not None and action.status == CorporateActionStatus.MANUAL_REVIEW_REQUIRED.value:
+            raise BusinessRuleError(
+                "Corporate-action revision requires manual review",
+                error_code="CORPORATE_ACTION_MANUAL_REVIEW_REQUIRED",
+            )
         if action is None:
             raise ResourceNotFoundError("公司行为不存在")
         if action.status == CorporateActionStatus.DRAFT.value:
+            newer_revision = db.scalar(
+                select(CashSecurityCorporateAction.action_id).where(
+                    CashSecurityCorporateAction.source_action_id == action.source_action_id,
+                    CashSecurityCorporateAction.action_version > action.action_version,
+                    CashSecurityCorporateAction.status.not_in((
+                        CorporateActionStatus.CANCELLED.value,
+                        CorporateActionStatus.SUPERSEDED.value,
+                    )),
+                )
+            )
+            if newer_revision is not None:
+                raise ResourceConflictError(
+                    "A newer corporate-action revision exists",
+                    error_code="CORPORATE_ACTION_REVISION_SUPERSEDED",
+                )
             action.status, action.confirmed_at, action.updated_at = CorporateActionStatus.CONFIRMED.value, utc_now(), utc_now()
             self._event(db, event_type="CORPORATE_ACTION_CONFIRMED", action_id=action_id, payload={"business_version": str(action.action_version)})
         return CorporateActionResult(action_id, action.status)
@@ -197,8 +283,8 @@ class CashSecurityCorporateActionService:
         self._event(db, event_type="CORPORATE_ACTION_ENTITLEMENT_CREATED", action_id=action_id, payload={"count": created, "business_version": str(action.action_version)})
         return CorporateActionResult(action_id, action.status, created)
 
-    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO) -> bool:
-        key = f"{entitlement.entitlement_id}:{entry_type}"
+    def _ledger(self, db: Session, *, entitlement, component, entry_type: str, cash: Decimal = ZERO, receivable: Decimal = ZERO, pending: int = 0, volume: int = 0, cost: Decimal = ZERO, income: Decimal = ZERO, idempotency_token: str | None = None) -> bool:
+        key = f"{entitlement.entitlement_id}:{entry_type}:{idempotency_token}" if idempotency_token else f"{entitlement.entitlement_id}:{entry_type}"
         if db.scalar(select(CashSecurityCorporateActionLedger.id).where(CashSecurityCorporateActionLedger.idempotency_key == key)) is not None:
             return False
         db.add(CashSecurityCorporateActionLedger(
@@ -208,6 +294,74 @@ class CashSecurityCorporateActionService:
             pending_volume_delta=pending, position_cost_delta=cost, corporate_action_income_delta=income,
             business_version="1", idempotency_key=key, created_at=utc_now(),
         ))
+        return True
+
+    def _maybe_mark_completed(
+        self, db: Session, *, action: CashSecurityCorporateAction, trading_day: date
+    ) -> bool:
+        """Finish only when every entitled component has reached its terminal fact."""
+        if action.status not in {
+            CorporateActionStatus.ENTITLEMENT_CAPTURED.value,
+            CorporateActionStatus.PROCESSING.value,
+        }:
+            return False
+        components = db.scalars(select(CashSecurityCorporateActionComponent).where(
+            CashSecurityCorporateActionComponent.action_id == action.action_id
+        )).all()
+        entitlements = db.scalars(select(CashSecurityCorporateActionEntitlement).where(
+            CashSecurityCorporateActionEntitlement.action_id == action.action_id
+        )).all()
+        ledgers = {
+            (row.entitlement_id, row.entry_type)
+            for row in db.scalars(select(CashSecurityCorporateActionLedger).where(
+                CashSecurityCorporateActionLedger.action_id == action.action_id
+            )).all()
+        }
+        by_component: dict[str, list[CashSecurityCorporateActionEntitlement]] = {}
+        for item in entitlements:
+            by_component.setdefault(item.component_id, []).append(item)
+        for component in components:
+            rows = by_component.get(component.component_id, [])
+            kind = component.component_type
+            if kind in {
+                CorporateActionComponentType.CASH_DIVIDEND.value,
+                CorporateActionComponentType.BOND_COUPON.value,
+                CorporateActionComponentType.BOND_MATURITY_REDEMPTION.value,
+            }:
+                if action.payment_date is None or trading_day < action.payment_date:
+                    return False
+                if any((row.entitlement_id, "CASH_PAID") not in ledgers for row in rows):
+                    return False
+            elif kind in {
+                CorporateActionComponentType.STOCK_DIVIDEND.value,
+                CorporateActionComponentType.CAPITALIZATION_ISSUE.value,
+            }:
+                if action.listing_date is None or trading_day < action.listing_date:
+                    return False
+                if any(row.pending_share_volume or row.credited_share_volume < row.entitled_share_volume for row in rows):
+                    return False
+            elif kind == CorporateActionComponentType.RIGHTS_ISSUE.value:
+                if action.subscription_end_date is None or trading_day <= action.subscription_end_date:
+                    return False
+                if any(row.subscribed_volume and (row.pending_share_volume or row.credited_share_volume < row.subscribed_volume) for row in rows):
+                    return False
+            elif kind in {
+                CorporateActionComponentType.STOCK_SPLIT.value,
+                CorporateActionComponentType.REVERSE_SPLIT.value,
+            }:
+                if action.ex_date is None or trading_day < action.ex_date:
+                    return False
+                if any(row.cash_in_lieu and (row.entitlement_id, "CASH_PAID") not in ledgers for row in rows):
+                    return False
+        action.status = CorporateActionStatus.COMPLETED.value
+        action.completed_at = utc_now()
+        action.updated_at = action.completed_at
+        self._event(
+            db,
+            event_type="CORPORATE_ACTION_COMPLETED",
+            action_id=action.action_id,
+            payload={"business_version": str(action.action_version)},
+        )
         return True
 
     def apply_ex_date(self, db: Session, *, action_id: str, trading_day: date) -> CorporateActionResult:
@@ -283,6 +437,7 @@ class CashSecurityCorporateActionService:
         action.status, action.updated_at = CorporateActionStatus.PROCESSING.value, utc_now()
         self._publish_changed_facts(db, action_id=action_id)
         self._event(db, event_type="CORPORATE_ACTION_RECEIVABLE_UPDATED", action_id=action_id, payload={"business_version": str(action.action_version)})
+        self._maybe_mark_completed(db, action=action, trading_day=trading_day)
         return CorporateActionResult(action_id, action.status)
 
     def list_pending_shares(self, db: Session, *, action_id: str, trading_day: date) -> CorporateActionResult:
@@ -326,6 +481,7 @@ class CashSecurityCorporateActionService:
                 item.status, item.processed_at = CorporateActionEntitlementStatus.CREDITED.value, utc_now()
         self._publish_changed_facts(db, action_id=action_id)
         self._event(db, event_type="CORPORATE_ACTION_SHARES_LISTED", action_id=action_id, payload={"business_version": str(action.action_version)})
+        self._maybe_mark_completed(db, action=action, trading_day=trading_day)
         return CorporateActionResult(action_id, action.status)
 
     def expire_rights(self, db: Session, *, action_id: str, trading_day: date) -> CorporateActionResult:
@@ -333,10 +489,17 @@ class CashSecurityCorporateActionService:
         if action is None or action.subscription_end_date is None or trading_day <= action.subscription_end_date:
             raise BusinessRuleError("配股认购期尚未结束", error_code="RIGHTS_SUBSCRIPTION_NOT_EXPIRED")
         entitlements = db.scalars(select(CashSecurityCorporateActionEntitlement).join(CashSecurityCorporateActionComponent, CashSecurityCorporateActionComponent.component_id == CashSecurityCorporateActionEntitlement.component_id).where(CashSecurityCorporateActionEntitlement.action_id == action_id, CashSecurityCorporateActionComponent.component_type == CorporateActionComponentType.RIGHTS_ISSUE.value).with_for_update()).all()
+        changed = False
         for item in entitlements:
-            if item.subscribed_volume < item.entitled_share_volume:
+            if (
+                item.subscribed_volume < item.entitled_share_volume
+                and item.status != CorporateActionEntitlementStatus.EXPIRED.value
+            ):
                 item.status, item.updated_at = CorporateActionEntitlementStatus.EXPIRED.value, utc_now()
-        self._event(db, event_type="RIGHTS_SUBSCRIPTION_EXPIRED", action_id=action_id, payload={"business_version": str(action.action_version)})
+                changed = True
+        if changed:
+            self._event(db, event_type="RIGHTS_SUBSCRIPTION_EXPIRED", action_id=action_id, payload={"business_version": str(action.action_version)})
+        self._maybe_mark_completed(db, action=action, trading_day=trading_day)
         return CorporateActionResult(action_id, action.status)
 
     def apply_bond_maturity(self, db: Session, *, action_id: str, trading_day: date) -> CorporateActionResult:
@@ -362,6 +525,7 @@ class CashSecurityCorporateActionService:
                 item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
         self._publish_changed_facts(db, action_id=action_id)
         self._event(db, event_type="BOND_MATURITY_REDEMPTION_CREATED", action_id=action_id, payload={"business_version": str(action.action_version)})
+        self._maybe_mark_completed(db, action=action, trading_day=trading_day)
         return CorporateActionResult(action_id, action.status)
 
     def record_price_adjustment_factor(self, db: Session, *, action_id: str, trading_day: date, raw_previous_close: Decimal, official_ex_reference_price: Decimal, source_event_id: str, data_source: str) -> CashSecurityPriceAdjustmentFactor:
@@ -385,6 +549,7 @@ class CashSecurityCorporateActionService:
             select(CashSecurityCorporateAction)
             .where(CashSecurityCorporateAction.status.not_in((
                 CorporateActionStatus.CANCELLED.value,
+                CorporateActionStatus.SUPERSEDED.value,
                 CorporateActionStatus.COMPLETED.value,
                 CorporateActionStatus.MANUAL_REVIEW_REQUIRED.value,
             )))
@@ -405,25 +570,30 @@ class CashSecurityCorporateActionService:
             current = db.scalar(select(CashSecurityCorporateAction).where(CashSecurityCorporateAction.action_id == row.action_id))
             if current is None:
                 continue
-            if current.ex_date == trading_day and current.status in {CorporateActionStatus.ENTITLEMENT_CAPTURED.value, CorporateActionStatus.PROCESSING.value}:
+            processable = current.status in {
+                CorporateActionStatus.ENTITLEMENT_CAPTURED.value,
+                CorporateActionStatus.PROCESSING.value,
+            }
+            if current.ex_date == trading_day and processable:
                 self.apply_ex_date(db, action_id=current.action_id, trading_day=trading_day)
                 processed += 1
             # Principal must become a receivable before a same-day payment can
             # convert it to cash.
-            if current.ex_date == trading_day:
+            if current.ex_date == trading_day and processable:
                 components = db.scalars(select(CashSecurityCorporateActionComponent.component_type).where(CashSecurityCorporateActionComponent.action_id == current.action_id)).all()
                 if CorporateActionComponentType.BOND_MATURITY_REDEMPTION.value in components:
                     self.apply_bond_maturity(db, action_id=current.action_id, trading_day=trading_day)
                     processed += 1
-            if current.payment_date == trading_day:
+            if current.payment_date == trading_day and processable:
                 self.pay_cash(db, action_id=current.action_id, trading_day=trading_day)
                 processed += 1
-            if current.listing_date == trading_day:
+            if current.listing_date == trading_day and processable:
                 self.list_pending_shares(db, action_id=current.action_id, trading_day=trading_day)
                 processed += 1
-            if current.subscription_end_date and trading_day > current.subscription_end_date:
+            if processable and current.subscription_end_date and trading_day > current.subscription_end_date:
                 self.expire_rights(db, action_id=current.action_id, trading_day=trading_day)
                 processed += 1
+            self._maybe_mark_completed(db, action=current, trading_day=trading_day)
         return processed
 
     def pay_cash(self, db: Session, *, action_id: str, trading_day: date) -> CorporateActionResult:
@@ -455,6 +625,7 @@ class CashSecurityCorporateActionService:
                 item.status, item.processed_at = CorporateActionEntitlementStatus.PAID.value, utc_now()
         self._publish_changed_facts(db, action_id=action_id)
         self._event(db, event_type="CORPORATE_ACTION_CASH_PAID", action_id=action_id, payload={"business_version": str(action.action_version)})
+        self._maybe_mark_completed(db, action=action, trading_day=trading_day)
         return CorporateActionResult(action_id, action.status)
 
     def subscribe_rights(self, db: Session, *, action_id: str, account_id: str, volume: int, client_request_id: str, access_scope: AccountAccessScope, trading_day: date) -> CashSecurityCorporateActionEntitlement:
@@ -473,9 +644,23 @@ class CashSecurityCorporateActionService:
             raise ResourceNotFoundError("配股权益不存在")
         component = db.scalar(select(CashSecurityCorporateActionComponent).where(CashSecurityCorporateActionComponent.component_id == entitlement.component_id).with_for_update())
         account = db.scalar(select(Account).where(Account.account_id == account_id).with_for_update())
+        existing_request = db.scalar(select(CashSecurityCorporateActionSubscription).where(
+            CashSecurityCorporateActionSubscription.entitlement_id == entitlement.entitlement_id,
+            CashSecurityCorporateActionSubscription.client_request_id == client_request_id,
+        ))
+        if existing_request is not None:
+            if existing_request.volume != volume:
+                raise ResourceConflictError(
+                    "Same rights request id has a different volume",
+                    error_code="RIGHTS_SUBSCRIPTION_IDEMPOTENCY_CONFLICT",
+                )
+            return entitlement
         if entitlement.client_request_id == client_request_id:
             return entitlement
-        if entitlement.client_request_id is not None:
+        # client_request_id is a legacy one-request field.  It must not block
+        # another valid partial subscription; the journal above is now the
+        # idempotency authority.
+        if entitlement.client_request_id is not None and entitlement.subscribed_volume >= entitlement.entitled_share_volume:
             raise ResourceConflictError("配股权益已被其他请求处理", error_code="RIGHTS_SUBSCRIPTION_IDEMPOTENCY_CONFLICT")
         if volume > entitlement.entitled_share_volume - entitlement.subscribed_volume:
             raise BusinessRuleError("认购数量超过可认购权益", error_code="RIGHTS_SUBSCRIPTION_EXCEEDED")
@@ -483,7 +668,8 @@ class CashSecurityCorporateActionService:
         if account.available_cash < cash or account.cash_balance < cash:
             raise BusinessRuleError("配股认购资金不足", error_code="RIGHTS_SUBSCRIPTION_CASH_INSUFFICIENT")
         position = db.scalar(select(Position).where(Position.position_id == entitlement.position_id).with_for_update())
-        if self._ledger(db, entitlement=entitlement, component=component, entry_type="RIGHTS_SUBSCRIBED", cash=-cash, pending=volume, cost=cash):
+        request_token = sha256(client_request_id.encode()).hexdigest()[:32]
+        if self._ledger(db, entitlement=entitlement, component=component, entry_type="RIGHTS_SUBSCRIBED", cash=-cash, pending=volume, cost=cash, idempotency_token=request_token):
             account.cash_balance = quantize_money(account.cash_balance - cash)
             account.available_cash = quantize_money(account.available_cash - cash)
             position.pending_share_volume += volume
@@ -493,7 +679,19 @@ class CashSecurityCorporateActionService:
             entitlement.subscribed_volume += volume
             entitlement.pending_share_volume += volume
             entitlement.subscription_cash = quantize_money(entitlement.subscription_cash + cash)
-            entitlement.client_request_id, entitlement.status, entitlement.updated_at = client_request_id, CorporateActionEntitlementStatus.SUBSCRIBED.value, utc_now()
+            entitlement.client_request_id = entitlement.client_request_id or client_request_id
+            entitlement.status = (
+                CorporateActionEntitlementStatus.SUBSCRIBED.value
+                if entitlement.subscribed_volume == entitlement.entitled_share_volume
+                else CorporateActionEntitlementStatus.PARTIALLY_SUBSCRIBED.value
+            )
+            entitlement.updated_at = utc_now()
+            db.add(CashSecurityCorporateActionSubscription(
+                subscription_id=self._id("CAS"), entitlement_id=entitlement.entitlement_id,
+                action_id=action_id, account_id=account_id,
+                client_request_id=client_request_id, volume=volume,
+                cash_amount=cash, created_at=utc_now(),
+            ))
             self._publish_changed_facts(db, action_id=action_id)
             self._event(db, event_type="RIGHTS_SUBSCRIPTION_CONFIRMED", action_id=action_id, payload={"account_id": account_id, "component_id": component.component_id, "business_version": "1"})
         return entitlement

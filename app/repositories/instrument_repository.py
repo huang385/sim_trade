@@ -185,6 +185,51 @@ class InstrumentRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def search_tradeable_stocks(
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[Instrument]:
+        """按代码或名称搜索普通用户可下单的股票和可转债。"""
+
+        escaped = (
+            query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        upper_query = escaped.upper()
+        contains = f"%{upper_query}%"
+        prefix = f"{upper_query}%"
+        order_book_id = func.upper(Instrument.order_book_id)
+        symbol = func.upper(Instrument.symbol)
+        instrument_name = func.upper(func.coalesce(Instrument.instrument_name, ""))
+        relevance = case(
+            (order_book_id == upper_query, 0),
+            (symbol == upper_query, 0),
+            (order_book_id.like(prefix, escape="\\"), 1),
+            (symbol.like(prefix, escape="\\"), 1),
+            (instrument_name.like(prefix, escape="\\"), 2),
+            else_=3,
+        )
+        statement = (
+            select(Instrument)
+            .where(
+                Instrument.instrument_type.in_(("STOCK", "CONVERTIBLE_BOND")),
+                Instrument.is_active.is_(True),
+                Instrument.is_tradeable.is_(True),
+                or_(
+                    order_book_id.like(contains, escape="\\"),
+                    symbol.like(contains, escape="\\"),
+                    instrument_name.like(contains, escape="\\"),
+                ),
+            )
+            .order_by(relevance, Instrument.exchange_id, Instrument.symbol)
+            .limit(limit)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def upsert(
         db: Session,
         *,

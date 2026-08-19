@@ -20,6 +20,10 @@ class FakeRepository:
         self.calls += 1
         return self.rows
 
+    def list_cash_security_candidate_schedules(self, _db, **_kwargs):
+        self.calls += 1
+        return self.rows
+
 
 def instrument():
     return SimpleNamespace(
@@ -104,3 +108,21 @@ def test_closed_calendar_is_not_accepted():
         )
 
     assert exc_info.value.error_code == "TRADING_SCHEDULE_MISSING"
+
+
+def test_cash_security_trading_day_does_not_require_product_id():
+    repository = FakeRepository([row(trading_day=date(2026, 8, 10))])
+    service = TradingDayService(repository=repository)
+    cash_instrument = SimpleNamespace(
+        exchange_id="SSE",
+        product_id=None,
+        instrument_type="CONVERTIBLE_BOND",
+    )
+    now = datetime(2026, 8, 10, 21, 30, tzinfo=SHANGHAI)
+
+    result = service.resolve_for_cash_security_order(
+        object(), instrument=cash_instrument, now=now
+    )
+
+    assert result == date(2026, 8, 10)
+    assert repository.calls == 1

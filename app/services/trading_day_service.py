@@ -17,7 +17,8 @@ from app.repositories.trading_day_repository import TradingDayRepository
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-ScheduleKey = tuple[str, str, str]
+# ``product_code=None`` 表示现金证券市场级时段；其他值仍表示衍生品品种时段。
+ScheduleKey = tuple[str, str | None, str]
 
 
 @dataclass(frozen=True)
@@ -69,14 +70,20 @@ class TradingDayService:
         key: ScheduleKey,
         now: datetime,
     ) -> CachedSchedule:
-        rows = self.repository.list_candidate_schedules(
-            db,
-            exchange_id=key[0],
-            product_code=key[1],
-            instrument_type=key[2],
-            start_day=now.date() - timedelta(days=1),
-            end_day=now.date() + timedelta(days=14),
-        )
+        query_args = {
+            "exchange_id": key[0],
+            "instrument_type": key[2],
+            "start_day": now.date() - timedelta(days=1),
+            "end_day": now.date() + timedelta(days=14),
+        }
+        if key[1] is None:
+            rows = self.repository.list_cash_security_candidate_schedules(
+                db, **query_args
+            )
+        else:
+            rows = self.repository.list_candidate_schedules(
+                db, product_code=key[1], **query_args
+            )
         sessions: list[TradingSession] = []
         for row in rows:
             if not row.get("calendar_is_open"):
@@ -200,13 +207,7 @@ class TradingDayService:
         """解析现金证券的可下单交易日，不引入开平仓标志。"""
 
         exchange_id = normalize_code(instrument.exchange_id)
-        product_code = normalize_code(str(instrument.product_id or ""))
         instrument_type = normalize_code(instrument.instrument_type)
-        if not product_code:
-            raise BusinessRuleError(
-                "合约缺少品种代码，无法确定交易日",
-                error_code="TRADING_DAY_CONTEXT_MISSING",
-            )
         local_now = now or self.now_provider()
         if local_now.tzinfo is None:
             local_now = local_now.replace(tzinfo=SHANGHAI)
@@ -214,7 +215,8 @@ class TradingDayService:
             local_now = local_now.astimezone(SHANGHAI)
         schedule = self._get_schedule(
             db,
-            key=(exchange_id, product_code, instrument_type),
+            # 股票、可转债共用交易所级时段；不能要求每一只证券都配置期货式品种代码。
+            key=(exchange_id, None, instrument_type),
             now=local_now,
         )
         matches = {

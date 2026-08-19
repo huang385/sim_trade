@@ -47,6 +47,18 @@ def search_tradeable_derivatives(
     )
 
 
+@catalog_router.get("/stocks/search", response_model=list[InstrumentCatalogItem])
+def search_tradeable_stocks(
+    q: str = Query(min_length=2, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+    service: InstrumentService = Depends(get_instrument_service),
+):
+    """搜索可交易股票和可转债，供桌面端证券代码输入提示使用。"""
+
+    return service.search_tradeable_stocks(db, query=q, limit=limit)
+
+
 @catalog_router.get("", response_model=list[InstrumentCatalogItem])
 def list_tradeable_futures(
     db: Session = Depends(get_db),
