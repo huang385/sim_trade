@@ -15,6 +15,9 @@ from app.models.daily_settlement import (
 )
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.models.cash_security_corporate_action_position_adjustment import (
+    CashSecurityCorporateActionPositionAdjustment,
+)
 from app.models.trade import Trade
 from app.models.trade_position_allocation import TradePositionAllocation
 
@@ -181,6 +184,27 @@ class DailySettlementRepository:
             select(TradePositionAllocation)
             .where(TradePositionAllocation.close_trading_day <= trading_day)
             .order_by(TradePositionAllocation.id)
+        ).all()
+
+    @staticmethod
+    def list_cash_security_position_adjustments_through_day(
+        db: Session, trading_day: date
+    ) -> Sequence[CashSecurityCorporateActionPositionAdjustment]:
+        """Read the immutable corporate-action position facts in replay order."""
+
+        return db.scalars(
+            select(CashSecurityCorporateActionPositionAdjustment)
+            .where(
+                CashSecurityCorporateActionPositionAdjustment.effective_trading_day
+                <= trading_day
+            )
+            .order_by(
+                CashSecurityCorporateActionPositionAdjustment.effective_trading_day,
+                CashSecurityCorporateActionPositionAdjustment.action_id,
+                CashSecurityCorporateActionPositionAdjustment.action_version,
+                CashSecurityCorporateActionPositionAdjustment.component_id,
+                CashSecurityCorporateActionPositionAdjustment.id,
+            )
         ).all()
 
     @staticmethod

@@ -17,6 +17,9 @@ from app.models.cash_security_corporate_action_entitlement import (
 from app.models.cash_security_corporate_action_ledger import (
     CashSecurityCorporateActionLedger,
 )
+from app.models.cash_security_corporate_action_position_adjustment import (
+    CashSecurityCorporateActionPositionAdjustment,
+)
 from app.models.cash_security_corporate_action_subscription import (
     CashSecurityCorporateActionSubscription,
 )
@@ -120,6 +123,15 @@ def test_cash_dividend_and_stock_dividend_run_from_record_to_payment_and_listing
         ledgers = db.scalars(select(CashSecurityCorporateActionLedger)).all()
         assert ledgers
         assert {row.business_version for row in ledgers} == {"7"}
+        adjustments = db.scalars(
+            select(CashSecurityCorporateActionPositionAdjustment)
+        ).all()
+        assert [(row.adjustment_type, row.pending_volume_delta) for row in adjustments] == [
+            ("SHARES_PENDING", 100),
+            ("SHARES_LISTED", -100),
+        ]
+        assert adjustments[-1].total_volume_delta == 100
+        assert {row.business_version for row in adjustments} == {"7"}
 
 
 def test_rights_subscription_is_authorized_idempotent_and_creates_pending_shares(session_factory):
@@ -162,6 +174,11 @@ def test_stock_split_changes_quantities_but_not_total_cost_or_daily_basis(sessio
         assert position.position_cost == Decimal("10000.000000")
         assert position.average_open_price == Decimal("5.000000")
         assert position.daily_pnl_base_cost == position.yesterday_pnl_base_cost == Decimal("10000.000000")
+        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment))
+        assert adjustment.adjustment_type == "STOCK_SPLIT"
+        assert adjustment.total_volume_delta == 1000
+        assert adjustment.position_cost_delta == Decimal("0.000000")
+        assert Decimal(adjustment.replay_payload["multiplier"]) == Decimal("2")
 
 
 def test_new_source_revision_supersedes_unexecuted_revision(session_factory):
@@ -283,6 +300,9 @@ def test_convertible_bond_maturity_creates_principal_receivable_then_cash(sessio
         assert account.cash_balance == account.available_cash == Decimal("110300.000000")
         assert account.corporate_action_receivable == Decimal("0.000000")
         assert account.corporate_action_income == Decimal("0.000000")
+        adjustment = db.scalar(select(CashSecurityCorporateActionPositionAdjustment))
+        assert adjustment.adjustment_type == "BOND_MATURITY_RETIRED"
+        assert adjustment.total_volume_delta == -100
 
 
 def test_reverse_split_records_fractional_cash_in_lieu_instead_of_losing_tail(session_factory):

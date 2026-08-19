@@ -26,6 +26,9 @@ from app.models.cash_security_corporate_action_ledger import CashSecurityCorpora
 from app.models.cash_security_corporate_action_subscription import (
     CashSecurityCorporateActionSubscription,
 )
+from app.models.cash_security_corporate_action_position_adjustment import (
+    CashSecurityCorporateActionPositionAdjustment,
+)
 from app.models.instrument import Instrument
 from app.models.position import Position
 from app.models.cash_security_price_adjustment_factor import CashSecurityPriceAdjustmentFactor
@@ -296,6 +299,71 @@ class CashSecurityCorporateActionService:
         ))
         return True
 
+    def _position_adjustment(
+        self,
+        db: Session,
+        *,
+        action: CashSecurityCorporateAction,
+        entitlement: CashSecurityCorporateActionEntitlement,
+        component: CashSecurityCorporateActionComponent,
+        adjustment_type: str,
+        effective_trading_day: date,
+        total_volume: int = 0,
+        today_volume: int = 0,
+        yesterday_volume: int = 0,
+        pending_volume: int = 0,
+        available_volume: int = 0,
+        frozen_volume: int = 0,
+        settlement_locked_volume: int = 0,
+        position_cost: Decimal = ZERO,
+        daily_pnl_base_cost: Decimal = ZERO,
+        average_open_price_after: Decimal | None = None,
+        position_detail_id: str | None = None,
+        replay_payload: dict | None = None,
+        idempotency_token: str | None = None,
+    ) -> bool:
+        """Append a replayable business fact before changing Position."""
+        key = (
+            f"{entitlement.entitlement_id}:{adjustment_type}:{idempotency_token}"
+            if idempotency_token
+            else f"{entitlement.entitlement_id}:{adjustment_type}"
+        )
+        if db.scalar(
+            select(CashSecurityCorporateActionPositionAdjustment.id).where(
+                CashSecurityCorporateActionPositionAdjustment.idempotency_key == key
+            )
+        ) is not None:
+            return False
+        db.add(
+            CashSecurityCorporateActionPositionAdjustment(
+                adjustment_id=self._id("CAPA"),
+                action_id=action.action_id,
+                action_version=action.action_version,
+                component_id=component.component_id,
+                entitlement_id=entitlement.entitlement_id,
+                account_id=entitlement.account_id,
+                position_id=entitlement.position_id,
+                position_detail_id=position_detail_id,
+                adjustment_type=adjustment_type,
+                effective_trading_day=effective_trading_day,
+                business_version=str(action.action_version),
+                idempotency_key=key,
+                total_volume_delta=total_volume,
+                today_volume_delta=today_volume,
+                yesterday_volume_delta=yesterday_volume,
+                pending_volume_delta=pending_volume,
+                available_volume_delta=available_volume,
+                frozen_volume_delta=frozen_volume,
+                settlement_locked_volume_delta=settlement_locked_volume,
+                position_cost_delta=quantize_money(position_cost),
+                daily_pnl_base_cost_delta=quantize_money(daily_pnl_base_cost),
+                average_open_price_after=average_open_price_after,
+                replay_payload=replay_payload or {},
+                created_at=utc_now(),
+            )
+        )
+        return True
+
     def _maybe_mark_completed(
         self, db: Session, *, action: CashSecurityCorporateAction, trading_day: date
     ) -> bool:
@@ -383,7 +451,16 @@ class CashSecurityCorporateActionService:
                     account.corporate_action_income = quantize_money(account.corporate_action_income + item.entitled_cash_net)
                     item.status, item.processed_at = CorporateActionEntitlementStatus.PENDING.value, utc_now()
             elif kind in {CorporateActionComponentType.STOCK_DIVIDEND.value, CorporateActionComponentType.CAPITALIZATION_ISSUE.value, CorporateActionComponentType.RIGHTS_ISSUE.value}:
-                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value and self._ledger(db, entitlement=item, component=component, entry_type="SHARES_PENDING", action_version=action.action_version, pending=item.entitled_share_volume):
+                if kind != CorporateActionComponentType.RIGHTS_ISSUE.value and self._ledger(
+                    db, entitlement=item, component=component,
+                    entry_type="SHARES_PENDING", action_version=action.action_version,
+                    pending=item.entitled_share_volume,
+                ) and self._position_adjustment(
+                    db, action=action, entitlement=item, component=component,
+                    adjustment_type="SHARES_PENDING",
+                    effective_trading_day=trading_day,
+                    pending_volume=item.entitled_share_volume,
+                ):
                     position.pending_share_volume += item.entitled_share_volume
                     item.pending_share_volume += item.entitled_share_volume
                     pending_value = quantize_money(
@@ -411,14 +488,48 @@ class CashSecurityCorporateActionService:
                     new_yesterday = int(Decimal(position.yesterday_volume) * multiplier)
                     new_total = new_today + new_yesterday
                     fraction = Decimal(old_total) * multiplier - Decimal(new_total)
+                    new_frozen = int(Decimal(position.frozen_volume) * multiplier)
+                    new_locked = int(
+                        Decimal(position.settlement_locked_volume) * multiplier
+                    )
+                    new_pending = int(
+                        Decimal(position.pending_share_volume) * multiplier
+                    )
+                    new_available = new_total - new_frozen - new_locked
                     if fraction and Decimal(component.cash_in_lieu_price) <= ZERO:
                         raise BusinessRuleError("并股尾股缺少现金补偿规则", error_code="CORPORATE_ACTION_FRACTIONAL_SHARE_UNRESOLVED")
+                    if not self._position_adjustment(
+                        db, action=action, entitlement=item, component=component,
+                        adjustment_type=entry_type,
+                        effective_trading_day=trading_day,
+                        total_volume=new_total - old_total,
+                        today_volume=new_today - position.today_volume,
+                        yesterday_volume=new_yesterday - position.yesterday_volume,
+                        pending_volume=new_pending - position.pending_share_volume,
+                        available_volume=new_available - position.available_volume,
+                        frozen_volume=new_frozen - position.frozen_volume,
+                        settlement_locked_volume=(
+                            new_locked - position.settlement_locked_volume
+                        ),
+                        average_open_price_after=(
+                            quantize_money(old_cost / Decimal(new_total))
+                            if new_total else ZERO
+                        ),
+                        replay_payload={
+                            "multiplier": format(multiplier, "f"),
+                            "volume_before": old_total,
+                            "volume_after": new_total,
+                            "fractional_volume": format(fraction, "f"),
+                        },
+                    ):
+                        continue
                     position.today_volume = new_today
                     position.yesterday_volume = new_yesterday
                     position.total_volume = new_total
-                    for field in ("frozen_volume", "settlement_locked_volume", "pending_share_volume"):
-                        setattr(position, field, int(Decimal(getattr(position, field)) * multiplier))
-                    position.available_volume = position.total_volume - position.frozen_volume - position.settlement_locked_volume
+                    position.frozen_volume = new_frozen
+                    position.settlement_locked_volume = new_locked
+                    position.pending_share_volume = new_pending
+                    position.available_volume = new_available
                     position.average_open_price = quantize_money(old_cost / Decimal(new_total)) if new_total else ZERO
                     if fraction:
                         cash_in_lieu = quantize_money(fraction * Decimal(component.cash_in_lieu_price))
@@ -458,7 +569,20 @@ class CashSecurityCorporateActionService:
                 continue
             account = db.scalar(select(Account).where(Account.account_id == item.account_id).with_for_update())
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
-            if self._ledger(db, entitlement=item, component=component, entry_type="SHARES_LISTED", action_version=action.action_version, volume=volume, pending=-volume):
+            if self._ledger(
+                db, entitlement=item, component=component,
+                entry_type="SHARES_LISTED", action_version=action.action_version,
+                volume=volume, pending=-volume,
+            ) and self._position_adjustment(
+                db, action=action, entitlement=item, component=component,
+                adjustment_type="SHARES_LISTED",
+                effective_trading_day=trading_day,
+                total_volume=volume,
+                yesterday_volume=volume,
+                pending_volume=-volume,
+                available_volume=volume,
+                position_cost=item.subscription_cash,
+            ):
                 position.pending_share_volume -= volume
                 # Listing takes place before the next open; stock shares become
                 # carried shares, convertible bonds remain T+0 available.
@@ -517,7 +641,25 @@ class CashSecurityCorporateActionService:
             position = db.scalar(select(Position).where(Position.position_id == item.position_id).with_for_update())
             if position.frozen_volume or position.settlement_locked_volume:
                 raise BusinessRuleError("到期兑付前仍有冻结持仓", error_code="BOND_MATURITY_POSITION_RESERVED")
-            if self._ledger(db, entitlement=item, component=component, entry_type="BOND_PRINCIPAL_RECEIVABLE", action_version=action.action_version, receivable=item.entitled_cash_net, volume=-position.total_volume):
+            retired_volume = position.total_volume
+            if self._ledger(
+                db, entitlement=item, component=component,
+                entry_type="BOND_PRINCIPAL_RECEIVABLE",
+                action_version=action.action_version,
+                receivable=item.entitled_cash_net, volume=-retired_volume,
+            ) and self._position_adjustment(
+                db, action=action, entitlement=item, component=component,
+                adjustment_type="BOND_MATURITY_RETIRED",
+                effective_trading_day=trading_day,
+                total_volume=-retired_volume,
+                today_volume=-position.today_volume,
+                yesterday_volume=-position.yesterday_volume,
+                available_volume=-position.available_volume,
+                position_cost=-Decimal(position.position_cost),
+                daily_pnl_base_cost=-Decimal(position.daily_pnl_base_cost),
+                average_open_price_after=ZERO,
+                replay_payload={"volume_before": retired_volume, "volume_after": 0},
+            ):
                 account.corporate_action_receivable = quantize_money(account.corporate_action_receivable + item.entitled_cash_net)
                 position.total_volume = position.today_volume = position.yesterday_volume = position.available_volume = 0
                 position.position_cost = position.average_open_price = ZERO
@@ -537,6 +679,27 @@ class CashSecurityCorporateActionService:
         existing = db.scalar(select(CashSecurityPriceAdjustmentFactor).where(CashSecurityPriceAdjustmentFactor.instrument_id == action.instrument_id, CashSecurityPriceAdjustmentFactor.trading_day == trading_day, CashSecurityPriceAdjustmentFactor.action_id == action_id))
         if existing is not None:
             return existing
+        # A same-day official ex-reference price already incorporates all
+        # notices effective on that day.  Persist one factor only; multiplying
+        # one factor per announcement would adjust the same price twice.
+        same_day = db.scalar(
+            select(CashSecurityPriceAdjustmentFactor)
+            .where(
+                CashSecurityPriceAdjustmentFactor.instrument_id
+                == action.instrument_id,
+                CashSecurityPriceAdjustmentFactor.trading_day == trading_day,
+            )
+            .order_by(CashSecurityPriceAdjustmentFactor.id)
+        )
+        if same_day is not None:
+            if Decimal(same_day.official_ex_reference_price) != Decimal(
+                official_ex_reference_price
+            ):
+                raise ResourceConflictError(
+                    "Same-day corporate actions require one authoritative ex-reference price",
+                    error_code="CORPORATE_ACTION_REFERENCE_PRICE_CONFLICT",
+                )
+            return same_day
         factor = Decimal(official_ex_reference_price) / Decimal(raw_previous_close)
         row = CashSecurityPriceAdjustmentFactor(instrument_id=action.instrument_id, trading_day=trading_day, action_id=action_id, raw_previous_close=raw_previous_close, official_ex_reference_price=official_ex_reference_price, forward_adjustment_factor=factor, backward_adjustment_factor=Decimal("1") / factor, source_event_id=source_event_id, data_source=data_source, created_at=utc_now())
         db.add(row)
@@ -669,7 +832,18 @@ class CashSecurityCorporateActionService:
             raise BusinessRuleError("配股认购资金不足", error_code="RIGHTS_SUBSCRIPTION_CASH_INSUFFICIENT")
         position = db.scalar(select(Position).where(Position.position_id == entitlement.position_id).with_for_update())
         request_token = sha256(client_request_id.encode()).hexdigest()[:32]
-        if self._ledger(db, entitlement=entitlement, component=component, entry_type="RIGHTS_SUBSCRIBED", action_version=action.action_version, cash=-cash, pending=volume, cost=cash, idempotency_token=request_token):
+        if self._ledger(
+            db, entitlement=entitlement, component=component,
+            entry_type="RIGHTS_SUBSCRIBED", action_version=action.action_version,
+            cash=-cash, pending=volume, cost=cash, idempotency_token=request_token,
+        ) and self._position_adjustment(
+            db, action=action, entitlement=entitlement, component=component,
+            adjustment_type="RIGHTS_SUBSCRIBED",
+            effective_trading_day=trading_day,
+            pending_volume=volume,
+            position_cost=cash,
+            idempotency_token=request_token,
+        ):
             account.cash_balance = quantize_money(account.cash_balance - cash)
             account.available_cash = quantize_money(account.available_cash - cash)
             position.pending_share_volume += volume
@@ -693,5 +867,5 @@ class CashSecurityCorporateActionService:
                 cash_amount=cash, created_at=utc_now(),
             ))
             self._publish_changed_facts(db, action_id=action_id)
-            self._event(db, event_type="RIGHTS_SUBSCRIPTION_CONFIRMED", action_id=action_id, payload={"account_id": account_id, "component_id": component.component_id, "business_version": "1"})
+            self._event(db, event_type="RIGHTS_SUBSCRIPTION_CONFIRMED", action_id=action_id, payload={"account_id": account_id, "component_id": component.component_id, "business_version": str(action.action_version)})
         return entitlement

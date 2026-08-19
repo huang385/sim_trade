@@ -33,11 +33,17 @@ from app.models.order import Order
 from app.models.outbox_event import OutboxEvent
 from app.models.position import Position
 from app.models.position_detail import PositionDetail
+from app.models.cash_security_corporate_action_position_adjustment import (
+    CashSecurityCorporateActionPositionAdjustment,
+)
 from app.models.trade import Trade
 from app.schemas.market_tick_schema import MarketTick, MarketTickIngestType
 from app.services.daily_settlement_service import (
     DailySettlementError,
     DailySettlementService,
+)
+from app.services.cash_security_corporate_action_service import (
+    CashSecurityCorporateActionService,
 )
 
 
@@ -240,15 +246,14 @@ def _publish_tick(store, *, code, trading_day, now, price, sequence):
 
 
 @pytest.mark.integration
-def test_daily_settlement_keeps_post_corporate_action_cash_security_volume(
+def test_daily_settlement_replays_listed_stock_dividend_cash_security_volume(
     isolated_settlement_database,
 ):
     """Cash securities are not reconstructed from derivative PositionDetail rows.
 
-    The position below represents a stock holding after a 10-for-1 stock
-    dividend has already been listed.  The full settlement path must only
-    carry its quantity from today to yesterday; it must not restore the old
-    100-share quantity from the derivative replay chain.
+    A 100-share holding receives a 10-for-1 stock dividend inside the real
+    daily corporate-action barrier.  The full settlement path must retain the
+    listed 110 shares instead of restoring the pre-action quantity.
     """
     isolated_engine, factory = isolated_settlement_database
     now = datetime.now(timezone.utc)
@@ -281,6 +286,7 @@ def test_daily_settlement_keeps_post_corporate_action_cash_security_volume(
         account.available_cash = Decimal("10000")
         account.risk_available_cash = Decimal("10000")
         account.used_margin = account.frozen_margin = Decimal("0")
+        account.frozen_cash = account.frozen_commission = Decimal("0")
         cash_stock = Instrument(
             order_book_id=code,
             symbol=code,
@@ -304,22 +310,44 @@ def test_daily_settlement_keeps_post_corporate_action_cash_security_volume(
             account_id=account_id,
             code=code,
             instrument_type="STOCK",
-            volume=110,
+            volume=100,
             price=Decimal("10"),
         )
+        position.trading_day = trading_day
         position.multiplier_snapshot = Decimal("1")
         position.position_cost = Decimal("1000")
         position.average_open_price = Decimal("9.090909")
         position.mark_price = Decimal("10")
         position.mark_time = now
         position.mark_source_event_id = f"POST-ACTION-MARK-{suffix}"
-        position.market_value = Decimal("1100")
-        position.unrealized_pnl = Decimal("100")
+        position.market_value = Decimal("1000")
+        position.unrealized_pnl = Decimal("0")
         position.daily_pnl_base_cost = Decimal("1000")
         position.yesterday_pnl_base_cost = Decimal("1000")
         position.today_pnl_base_cost = Decimal("0")
         position.daily_pnl_base_established = True
         db.add_all([account, cash_stock, position])
+        db.flush()
+        action_service = CashSecurityCorporateActionService()
+        action = action_service.import_action(
+            db,
+            payload={
+                "instrument_id": cash_stock.id,
+                "source_action_id": f"IT-STOCK-DIVIDEND-{suffix}",
+                "data_source": "INTEGRATION_TEST",
+                "record_date": trading_day,
+                "ex_date": trading_day,
+                "listing_date": trading_day,
+            },
+            components=[
+                {
+                    "component_type": "STOCK_DIVIDEND",
+                    "base_quantity": "10",
+                    "share_ratio": "1",
+                }
+            ],
+        )
+        action_service.confirm(db, action_id=action.action_id)
         session_end = (now - timedelta(minutes=1)).astimezone(SHANGHAI)
         db.execute(
             text(
@@ -382,6 +410,15 @@ def test_daily_settlement_keeps_post_corporate_action_cash_security_volume(
             assert settled.yesterday_volume == 110
             assert settled.available_volume == 110
             assert settled.position_cost == Decimal("1000.000000")
+            adjustments = db.scalars(
+                select(CashSecurityCorporateActionPositionAdjustment)
+                .order_by(CashSecurityCorporateActionPositionAdjustment.id)
+            ).all()
+            assert [item.adjustment_type for item in adjustments] == [
+                "SHARES_PENDING",
+                "SHARES_LISTED",
+            ]
+            assert adjustments[-1].total_volume_delta == 10
     finally:
         pipeline = redis_client.pipeline(transaction=False)
         pipeline.delete(market_latest_key("ITDS", code))

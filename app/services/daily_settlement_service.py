@@ -46,6 +46,9 @@ from app.models.margin_rule_daily import MarginRuleDaily
 from app.models.order import Order
 from app.models.position import Position
 from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
+from app.models.cash_security_corporate_action_position_adjustment import (
+    CashSecurityCorporateActionPositionAdjustment,
+)
 from app.repositories.daily_settlement_repository import DailySettlementRepository
 from app.repositories.order_repository import OrderRepository
 from app.repositories.outbox_repository import OutboxRepository
@@ -321,10 +324,7 @@ class DailySettlementService:
     ) -> list[Instrument]:
         codes = set(
             db.scalars(
-                select(Position.order_book_id).where(
-                    Position.total_volume > 0,
-                    Position.instrument_type.not_in(CASH_SECURITY_TYPES),
-                )
+                select(Position.order_book_id).where(Position.total_volume > 0)
             ).all()
         )
         if include_active_orders:
@@ -333,7 +333,6 @@ class DailySettlementService:
                     select(Order.order_book_id).where(
                         Order.status.in_(("ACCEPTED", "PARTIALLY_FILLED")),
                         Order.remaining_volume > 0,
-                        Order.instrument_type.not_in(CASH_SECURITY_TYPES),
                     )
                 ).all()
             )
@@ -881,6 +880,45 @@ class DailySettlementService:
             error_code="REPLAY_TRADE_TYPE_UNSUPPORTED",
         )
 
+    @staticmethod
+    def _consume_cash_security_adjustments(
+        position: Position,
+        adjustments: Sequence[CashSecurityCorporateActionPositionAdjustment],
+    ) -> None:
+        """Consume the durable, ordered corporate-action position stream."""
+        previous_key: tuple[Any, ...] | None = None
+        retired = False
+        for row in adjustments:
+            key = (
+                row.effective_trading_day,
+                row.action_id,
+                row.action_version,
+                row.component_id,
+                row.id,
+            )
+            if previous_key is not None and key < previous_key:
+                raise DataAccessError(
+                    "公司行为持仓调整事实顺序不稳定",
+                    error_code="CORPORATE_ACTION_ADJUSTMENT_ORDER_INVALID",
+                )
+            previous_key = key
+            if row.business_version != str(row.action_version):
+                raise DataAccessError(
+                    "公司行为持仓调整事实版本不一致",
+                    error_code="CORPORATE_ACTION_ADJUSTMENT_VERSION_INVALID",
+                )
+            retired = retired or row.adjustment_type == "BOND_MATURITY_RETIRED"
+        if retired and position.total_volume != 0:
+            raise DataAccessError(
+                "可转债到期持仓被错误恢复",
+                error_code="CORPORATE_ACTION_MATURITY_REPLAY_MISMATCH",
+            )
+        if position.frozen_volume + position.settlement_locked_volume > position.total_volume:
+            raise DataAccessError(
+                "公司行为后持仓冻结数量超过总数量",
+                error_code="CORPORATE_ACTION_POSITION_RESERVATION_INVALID",
+            )
+
     def _settle_batch_from_facts(
         self,
         *,
@@ -910,6 +948,11 @@ class DailySettlementService:
                         db, trading_day
                     )
                 )
+                cash_adjustments = list(
+                    self.repository.list_cash_security_position_adjustments_through_day(
+                        db, trading_day
+                    )
+                )
                 cash_positions = [
                     item
                     for item in positions
@@ -918,6 +961,18 @@ class DailySettlementService:
                 cash_positions_by_account: dict[str, list[Position]] = {}
                 for item in cash_positions:
                     cash_positions_by_account.setdefault(item.account_id, []).append(item)
+                cash_adjustments_by_position: dict[str, list[
+                    CashSecurityCorporateActionPositionAdjustment
+                ]] = {}
+                for adjustment in cash_adjustments:
+                    if adjustment.business_version != str(adjustment.action_version):
+                        raise DataAccessError(
+                            "公司行为持仓调整事实版本不一致",
+                            error_code="CORPORATE_ACTION_ADJUSTMENT_VERSION_INVALID",
+                        )
+                    cash_adjustments_by_position.setdefault(
+                        adjustment.position_id, []
+                    ).append(adjustment)
                 derivative_position_ids = {
                     item.position_id
                     for item in positions
@@ -1079,6 +1134,37 @@ class DailySettlementService:
                     corporate_cash_by_account[ledger.account_id] = (prior_cash, today_cash)
 
                 now = self._now()
+                # The company-action barrier precedes price freezing.  Revalue
+                # with that exact frozen raw tick before aggregating accounts.
+                for position in cash_positions:
+                    frozen = prices.get((position.exchange_id, position.symbol))
+                    if frozen is None:
+                        raise DataAccessError(
+                            "现金证券持仓缺少冻结价格",
+                            error_code="CASH_SECURITY_SETTLEMENT_PRICE_MISSING",
+                        )
+                    self._consume_cash_security_adjustments(
+                        position,
+                        cash_adjustments_by_position.get(position.position_id, ()),
+                    )
+                    position.mark_price = frozen.price
+                    position.mark_time = frozen.tick_time
+                    position.mark_source_event_id = frozen.source_event_id
+                    position.market_value = quantize_money(
+                        frozen.price
+                        * Decimal(position.total_volume)
+                        * Decimal(position.multiplier_snapshot)
+                    )
+                    position.unrealized_pnl = quantize_money(
+                        Decimal(position.market_value)
+                        - Decimal(position.position_cost)
+                    )
+                    basis = Decimal(position.daily_pnl_base_cost)
+                    if not position.daily_pnl_base_established and basis == ZERO:
+                        basis = Decimal(position.position_cost)
+                    position.daily_position_pnl = quantize_money(
+                        Decimal(position.market_value) - basis
+                    )
                 events = RealtimeFactEventService(
                     repository=self.outbox_repository
                 )
@@ -2026,7 +2112,6 @@ class DailySettlementService:
                     select(Position)
                     .where(
                         Position.total_volume > 0,
-                        Position.instrument_type.not_in(CASH_SECURITY_TYPES),
                     )
                     .order_by(Position.id)
                 ).all()
@@ -2065,6 +2150,7 @@ class DailySettlementService:
                     for item in active_position_models
                     if item.account_id in affected_account_id_set
                     and item.position_id not in affected_position_ids
+                    and item.instrument_type not in CASH_SECURITY_TYPES
                 ]
                 if unexpected_new_positions:
                     raise RuntimeError(

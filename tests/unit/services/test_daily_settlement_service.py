@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.core.database import Base
+from app.common.exceptions import DataAccessError
 from app.models.daily_settlement import (
     DailySettlementBatch,
     InstrumentSettlementPrice,
@@ -49,6 +50,29 @@ def test_cash_security_trade_cash_effect_uses_turnover_and_fee_once(
     )
 
     assert DailySettlementService._trade_cash_effect(trade) == expected
+
+
+def test_cash_security_corporate_action_replay_rejects_maturity_restoration():
+    position = SimpleNamespace(
+        total_volume=100,
+        frozen_volume=0,
+        settlement_locked_volume=0,
+    )
+    adjustment = SimpleNamespace(
+        effective_trading_day=TRADING_DAY,
+        action_id="CA-MATURITY",
+        action_version=3,
+        component_id="COMPONENT",
+        id=1,
+        business_version="3",
+        adjustment_type="BOND_MATURITY_RETIRED",
+    )
+
+    with pytest.raises(DataAccessError) as raised:
+        DailySettlementService._consume_cash_security_adjustments(
+            position, (adjustment,)
+        )
+    assert raised.value.error_code == "CORPORATE_ACTION_MATURITY_REPLAY_MISMATCH"
 
 
 @pytest.fixture
