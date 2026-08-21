@@ -32,11 +32,9 @@ class OrderPriceResolver:
         self,
         *,
         live_market_snapshot_service: LiveMarketSnapshotService,
-        max_age_seconds: int,
         market_max_slippage_rate: Decimal,
     ):
         self.live_market_snapshot_service = live_market_snapshot_service
-        self.max_age_seconds = max_age_seconds
         self.market_max_slippage_rate = market_max_slippage_rate
         if not Decimal("0") <= market_max_slippage_rate < Decimal("1"):
             raise ValueError("市价单最大滑点比例必须处于 [0, 1) 区间")
@@ -75,11 +73,14 @@ class OrderPriceResolver:
                 "委托定价行情时间缺少时区",
                 error_code="ORDER_PRICE_MARKET_DATA_INVALID",
             )
+        # 行情必须来自当前活跃订阅（由 LiveMarketSnapshotService 的订阅代次
+        # 校验保证），但低活跃合约的盘口可能几分钟才更新一次，因此不再按
+        # 行情年龄拒绝委托定价；只保留机器时钟偏差的防御性校验。
         age_seconds = (utc_now() - tick.event_time).total_seconds()
-        if age_seconds < -1 or age_seconds > self.max_age_seconds:
+        if age_seconds < -1:
             raise BusinessValidationError(
-                "委托定价行情已过期",
-                error_code="ORDER_PRICE_MARKET_DATA_STALE",
+                "委托定价行情时间来自未来",
+                error_code="ORDER_PRICE_MARKET_DATA_INVALID",
             )
         if tick.trading_day != trading_day:
             raise BusinessValidationError(

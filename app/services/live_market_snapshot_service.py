@@ -22,10 +22,11 @@ class LiveMatchingEvent:
 
 class LiveMarketSnapshotService:
     """
-    判断Redis最新行情是否属于当前可用的上游订阅代次。
+    判断Redis最新行情是否属于当前可用的上游订阅。
 
     本服务不使用REST、不按行情年龄拒绝低活跃合约，也不推算交易日。它只
-    检查行情源运行状态、合约订阅结果和当前订阅代次是否已有可用Tick。
+    检查行情源运行状态、合约订阅结果，且不再比较订阅代次：只要合约仍在
+    当前订阅列表且行情源RUNNING，其最新盘口就视为该合约当前有效行情。
     """
 
     def __init__(self, redis_client: Redis):
@@ -63,17 +64,10 @@ class LiveMarketSnapshotService:
             return None
         if normalized_symbol not in self._subscribed_codes(status):
             return None
-
-        current_generation = status.get(
-            "subscription_generation",
-            "",
-        )
-        if (
-            not current_generation
-            or latest.get("subscription_generation")
-            != current_generation
-        ):
-            return None
+        # 不再比较行情 Hash 上的订阅代次：合约仍在当前订阅列表、行情源
+        # RUNNING 即说明它处于活跃订阅中；低活跃合约没有新 Tick 时，其
+        # 最新盘口仍是上游最后推送的那条有效行情，可以直接用于委托定价
+        # 和到达撮合。退订再重订的缝隙期由补取快照自然覆盖。
         if (
             latest.get("source"),
             latest.get("ingest_type"),

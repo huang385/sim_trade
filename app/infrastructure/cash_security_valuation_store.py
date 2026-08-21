@@ -20,6 +20,8 @@ from app.infrastructure.redis_keys import (
     cash_valuation_instrument_positions_key,
 )
 
+_INSTRUMENT_INDEX_PREFIX = cash_valuation_instrument_positions_key("", "")[:-1]
+
 
 _COMPLETE_DIRTY_SCRIPT = """
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
@@ -145,6 +147,43 @@ class CashSecurityValuationStore:
             return set()
         values = self.redis_client.hmget(CASH_VALUATION_POSITION_ACCOUNTS_KEY, list(position_ids))
         return {value for value in values if value}
+
+    def list_active_contract_codes(self) -> set[str]:
+        """返回当前至少包含一条有效现金证券持仓的行情代码集合。
+
+        供行情订阅服务把股票/可转债持仓与期货持仓一样纳入订阅目标。
+        索引键保存时已对 order_book_id 归一化，这里解析出的代码可以直接
+        交给 normalize_code 与合约代码映射使用。
+        """
+
+        raw_keys = list(self.redis_client.smembers(CASH_VALUATION_INDEX_KEYS_KEY))
+        index_keys = [
+            value.decode("utf-8") if isinstance(value, bytes) else str(value)
+            for value in raw_keys
+        ]
+        instrument_keys = [
+            key for key in index_keys if key.startswith(_INSTRUMENT_INDEX_PREFIX)
+        ]
+        if not instrument_keys:
+            return set()
+        pipeline = self.redis_client.pipeline(transaction=False)
+        for key in instrument_keys:
+            pipeline.scard(key)
+        counts = pipeline.execute()
+        codes: set[str] = set()
+        for key, count in zip(instrument_keys, counts, strict=True):
+            if int(count or 0) <= 0:
+                continue
+            suffix = key[len(_INSTRUMENT_INDEX_PREFIX):]
+            if ":" in suffix:
+                codes.add(suffix.split(":", 1)[1])
+        return codes
+
+    @staticmethod
+    def list_margin_dependency_codes() -> set[str]:
+        """现金证券没有保证金依赖标的，协议方法固定返回空集合。"""
+
+        return set()
 
     def mark_accounts_dirty(self, account_ids: Iterable[str], *, reason: str) -> dict[str, str]:
         """Assign fresh monotonic versions; duplicate messages only schedule work."""

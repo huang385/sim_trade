@@ -212,6 +212,43 @@ class CashSecuritySettlementService:
             now = utc_now()
             trade_id = self._id("CST")
             turnover = quantize_money(match.fill_price * Decimal(volume) * Decimal(instrument.contract_multiplier))
+            # Trade 行必须先于费用明细进入 Session 并落库：_settle_fees 会把
+            # 外键指向 trade.trade_id 的 CashSecurityTradeFeeComponent 行加入
+            # Session，而 _position_for_update 在新建持仓时会显式 flush、提交
+            # 时也会 flush。两个模型之间没有 ORM relationship，SQLAlchemy 无法
+            # 感知插入顺序，若费用子行先于 trade 行插入，PostgreSQL 会以
+            # cash_security_trade_fee_component_trade_id_fkey 拒绝整个事务。
+            # 佣金与已实现盈亏在下方方向分支里才确定，先以占位值插入，
+            # 提交前在同一事务内更新为最终值。
+            trade = Trade(
+                trade_id=trade_id,
+                order_id=order.order_id,
+                account_id=order.account_id,
+                market_event_id=market_event_id,
+                market_stream_message_id=market_stream_message_id,
+                order_book_id=order.order_book_id,
+                exchange_id=order.exchange_id,
+                symbol=order.symbol,
+                trading_day=order.trading_day,
+                instrument_type=order.instrument_type,
+                direction=order.direction,
+                offset_flag=None,
+                trade_price=match.fill_price,
+                trade_volume=volume,
+                turnover=turnover,
+                margin=Decimal("0"),
+                premium_cash_flow=Decimal("0"),
+                margin_rule_id=None,
+                margin_rule_version=None,
+                margin_calculation_version=None,
+                commission=Decimal("0"),
+                realized_pnl=Decimal("0"),
+                daily_close_pnl=Decimal("0"),
+                trade_time=tick_event_time,
+                created_at=now,
+            )
+            self.trade_repository.add(db, trade)
+            db.flush()
             commission = self._settle_fees(db, order=order, trade_id=trade_id, price=match.fill_price, volume=volume, now=now)
             position = self._position_for_update(db, order=order, instrument=instrument, now=now)
             realized_pnl = Decimal("0")
@@ -222,8 +259,16 @@ class CashSecuritySettlementService:
                 remaining_cash = quantize_money(order.limit_price * Decimal(remaining_after) * Decimal(instrument.contract_multiplier))
                 # 接单时冻结的预计资金必须保留到剩余数量全部成交或撤单。单笔成交
                 # 最多消耗该预计冻结；若实际手续费更高，仍需在下方校验实时可用资金。
-                remaining_commission = max(
-                    Decimal("0"), quantize_money(order.frozen_commission - commission)
+                # 全部成交时剩余数量为0，预计冻结必须一次性释放：逐笔实际手续费
+                # 与预计值之间的舍入差不能留在 FILLED 订单和账户冻结字段上，
+                # 否则日终对账会把残留当成无法解释的冻结资金。
+                remaining_commission = (
+                    Decimal("0")
+                    if remaining_after == 0
+                    else max(
+                        Decimal("0"),
+                        quantize_money(order.frozen_commission - commission),
+                    )
                 )
                 available_after = quantize_money(
                     account.available_cash
@@ -298,8 +343,11 @@ class CashSecuritySettlementService:
             account.updated_at = now
             position.updated_at = now
             self._update_order(order, price=match.fill_price, volume=volume, now=now)
-            trade = Trade(trade_id=trade_id, order_id=order.order_id, account_id=order.account_id, market_event_id=market_event_id, market_stream_message_id=market_stream_message_id, order_book_id=order.order_book_id, exchange_id=order.exchange_id, symbol=order.symbol, trading_day=order.trading_day, instrument_type=order.instrument_type, direction=order.direction, offset_flag=None, trade_price=match.fill_price, trade_volume=volume, turnover=turnover, margin=Decimal("0"), premium_cash_flow=Decimal("0"), margin_rule_id=None, margin_rule_version=None, margin_calculation_version=None, commission=commission, realized_pnl=realized_pnl, daily_close_pnl=realized_pnl, trade_time=tick_event_time, created_at=now)
-            self.trade_repository.add(db, trade)
+            # 佣金与已实现盈亏依赖方向分支，在 Trade 行落库后才确定；提交前
+            # 在同一事务内更新为最终值，_create_events 的事件负载也依赖它们。
+            trade.commission = commission
+            trade.realized_pnl = realized_pnl
+            trade.daily_close_pnl = realized_pnl
             self._create_events(db, order=order, trade=trade, account=account, position=position, now=now)
             db.commit()
             return CashSecuritySettlementResult(trade.trade_id, order_id, "SETTLED")

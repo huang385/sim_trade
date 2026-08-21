@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.order import Order
@@ -207,14 +207,25 @@ class OrderRepository:
         *,
         last_id: int,
         batch_size: int,
+        include_cash_security: bool = False,
     ) -> Sequence[Order]:
         """
         使用自增主键游标分页读取等待撮合的活动订单。
 
         不使用大OFFSET，也不执行commit或rollback。返回结果只包含状态、
         剩余量、订单类型和开平标志均符合活动订单条件的数据库最新记录。
+        日终撤单需要覆盖现金证券订单（offset_flag 为 NULL），默认仍只
+        返回衍生品活动订单，避免影响活动订单索引重建等既有调用方。
         """
 
+        offset_condition = (
+            or_(
+                Order.offset_flag.in_(SUPPORTED_ACTIVE_OFFSET_FLAGS),
+                Order.offset_flag.is_(None),
+            )
+            if include_cash_security
+            else Order.offset_flag.in_(SUPPORTED_ACTIVE_OFFSET_FLAGS)
+        )
         statement = (
             select(Order)
             .where(
@@ -227,7 +238,7 @@ class OrderRepository:
                 ),
                 Order.remaining_volume > 0,
                 Order.order_type.in_(LIMIT_LIKE_ORDER_TYPES),
-                Order.offset_flag.in_(SUPPORTED_ACTIVE_OFFSET_FLAGS),
+                offset_condition,
             )
             .order_by(Order.id)
             .limit(batch_size)

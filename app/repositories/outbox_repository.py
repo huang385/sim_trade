@@ -58,16 +58,16 @@ class OutboxRepository:
         )
 
     @staticmethod
-    def list_latest_fact_versions(
-        db: Session,
+    def _latest_fact_conditions(
         *,
         account_ids: Sequence[str] = (),
         position_ids: Sequence[str] = (),
-    ) -> dict[tuple[str, str], str]:
-        """一次集合查询返回账户和持仓最后一个事务事实Outbox编号。
+        exclude_fact_reasons: Sequence[str] = (),
+    ) -> list:
+        """构造账户/持仓最新事实查询条件，可排除指定fact_reason的事实。
 
-        Outbox主键与业务事实同事务生成且永久单调，不会被PnL定时持久化
-        改写，因此比Account/Position.updated_at更适合作为实时估值来源版本。
+        排除使用IS DISTINCT FROM保持NULL安全：payload缺失fact_reason的历史
+        事件仍参与比对，只有明确标记为排除原因的事件才被忽略。
         """
 
         conditions = []
@@ -92,6 +92,39 @@ class OutboxRepository:
                 )
             )
         if not conditions:
+            return conditions
+        for reason in exclude_fact_reasons:
+            conditions = [
+                and_(
+                    condition,
+                    OutboxEvent.payload["fact_reason"]
+                    .as_string()
+                    .is_distinct_from(reason),
+                )
+                for condition in conditions
+            ]
+        return conditions
+
+    @staticmethod
+    def list_latest_fact_versions(
+        db: Session,
+        *,
+        account_ids: Sequence[str] = (),
+        position_ids: Sequence[str] = (),
+        exclude_fact_reasons: Sequence[str] = (),
+    ) -> dict[tuple[str, str], str]:
+        """一次集合查询返回账户和持仓最后一个事务事实Outbox编号。
+
+        Outbox主键与业务事实同事务生成且永久单调，不会被PnL定时持久化
+        改写，因此比Account/Position.updated_at更适合作为实时估值来源版本。
+        """
+
+        conditions = OutboxRepository._latest_fact_conditions(
+            account_ids=account_ids,
+            position_ids=position_ids,
+            exclude_fact_reasons=exclude_fact_reasons,
+        )
+        if not conditions:
             return {}
         rows = db.execute(
             select(
@@ -108,6 +141,60 @@ class OutboxRepository:
         return {
             (str(aggregate_type), str(aggregate_id)): str(version)
             for aggregate_type, aggregate_id, version in rows
+        }
+
+    @staticmethod
+    def list_latest_fact_created_times(
+        db: Session,
+        *,
+        account_ids: Sequence[str] = (),
+        position_ids: Sequence[str] = (),
+        exclude_fact_reasons: Sequence[str] = (),
+    ) -> dict[tuple[str, str], datetime]:
+        """返回每个聚合最新事实（可排除指定fact_reason）的创建时间。
+
+        与list_latest_fact_versions使用完全相同的筛选口径；先按最大id定位
+        行再取其created_at，避免max(created_at)与max(id)来自不同事实。
+        """
+
+        conditions = OutboxRepository._latest_fact_conditions(
+            account_ids=account_ids,
+            position_ids=position_ids,
+            exclude_fact_reasons=exclude_fact_reasons,
+        )
+        if not conditions:
+            return {}
+        latest = (
+            select(
+                OutboxEvent.aggregate_type,
+                OutboxEvent.aggregate_id,
+                func.max(OutboxEvent.id).label("max_id"),
+            )
+            .where(or_(*conditions))
+            .group_by(
+                OutboxEvent.aggregate_type,
+                OutboxEvent.aggregate_id,
+            )
+            .subquery()
+        )
+        rows = db.execute(
+            select(
+                OutboxEvent.aggregate_type,
+                OutboxEvent.aggregate_id,
+                OutboxEvent.created_at,
+            ).join(
+                latest,
+                and_(
+                    OutboxEvent.aggregate_type
+                    == latest.c.aggregate_type,
+                    OutboxEvent.aggregate_id == latest.c.aggregate_id,
+                    OutboxEvent.id == latest.c.max_id,
+                ),
+            )
+        ).all()
+        return {
+            (str(aggregate_type), str(aggregate_id)): created_at
+            for aggregate_type, aggregate_id, created_at in rows
         }
 
     @staticmethod

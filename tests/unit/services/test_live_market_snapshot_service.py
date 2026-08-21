@@ -60,8 +60,6 @@ def test_current_live_callback_is_returned_as_matching_event():
     [
         {"status_value": "DISCONNECTED"},
         {"subscribed_codes": "RB2610"},
-        {"status_generation": "8"},
-        {"tick_generation": ""},
         {"ingest_type": "REST_SNAPSHOT"},
     ],
 )
@@ -72,6 +70,23 @@ def test_unready_or_non_live_snapshot_is_not_used(overrides):
         exchange_id=tick.exchange_id,
         symbol=tick.symbol,
     ) is None
+
+
+def test_old_generation_tick_is_used_when_contract_is_subscribed():
+    # 只要合约仍在当前订阅列表且行情源 RUNNING，旧订阅代次的行情也视为
+    # 该合约最新有效盘口，可直接用于委托定价和到达撮合。
+    service, tick = make_service(
+        status_generation="8",
+        tick_generation="7",
+    )
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        symbol=tick.symbol,
+    )
+
+    assert event is not None
+    assert event.stream_message_id == "123-0"
 
 
 def test_current_database_bootstrap_is_available_for_order_arrival():

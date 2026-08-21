@@ -1,11 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
 from redis.exceptions import RedisError
 
+from app.common.time_utils import utc_now
 from app.realtime.snapshot_service import SnapshotService
 from app.realtime.subscription_service import RealtimeUserIdentity
 
@@ -355,3 +356,178 @@ def test_strict_snapshot_ignores_stale_redis_pnl_after_all_positions_closed():
     )
     store.get_accounts_with_positions.assert_not_called()
     store.get_accounts_with_positions_and_versions.assert_not_called()
+def _session_with_active_position_rich() -> Mock:
+    db = Mock()
+    db.get_bind.return_value = SimpleNamespace(
+        dialect=SimpleNamespace(name="sqlite"),
+    )
+    account = _account_without_positions()
+    now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    position = SimpleNamespace(
+        id=1,
+        position_id="P001",
+        account_id="A001",
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        symbol="JD2609",
+        instrument_type="FUTURES",
+        direction="LONG",
+        total_volume=2,
+        today_volume=2,
+        yesterday_volume=0,
+        frozen_volume=0,
+        settlement_locked_volume=0,
+        pending_share_volume=0,
+        available_volume=2,
+        average_open_price=Decimal("3500"),
+        position_cost=Decimal("7000"),
+        market_value=Decimal("7000"),
+        mark_price=Decimal("3500"),
+        mark_time=None,
+        mark_source_event_id=None,
+        daily_pnl_base_cost=Decimal("0"),
+        used_margin=Decimal("700"),
+        initial_occupied_margin=Decimal("700"),
+        realtime_required_margin=Decimal("700"),
+        margin_rule_id=None,
+        margin_rule_version=None,
+        margin_price_mode=None,
+        margin_underlying_price=None,
+        margin_option_price=None,
+        margin_calculated_at=None,
+        multiplier_snapshot=None,
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("10"),
+        daily_position_pnl=Decimal("10"),
+        daily_close_pnl=Decimal("0"),
+        trading_day=date(2026, 8, 4),
+        created_at=now,
+        updated_at=now,
+    )
+    db.scalars.side_effect = [
+        SimpleNamespace(all=lambda: [account]),
+        SimpleNamespace(all=lambda: [position]),
+        SimpleNamespace(all=lambda: []),
+        SimpleNamespace(all=lambda: []),
+        SimpleNamespace(all=lambda: []),
+    ]
+    return db
+
+
+def _strict_store_with_stale_fact_versions() -> Mock:
+    store = Mock()
+    store.get_accounts_with_positions_and_versions.return_value = (
+        {"A001": _complete_account_hash("9")},
+        {"P001": _complete_position_hash("9")},
+        {"A001": "9"},
+        {"P001": "9"},
+        set(),
+        set(),
+    )
+    return store
+
+
+EXCLUDED_REASONS = ("OPTION_MARGIN_ADJUSTMENT", "OPTION_ORDER_MARGIN_ADJUSTMENT")
+
+
+def test_strict_snapshot_allows_fresh_excluded_margin_adjustment_facts():
+    db = _session_with_active_position_rich()
+    store = _strict_store_with_stale_fact_versions()
+    outbox_repository = Mock()
+    outbox_repository.list_latest_fact_versions.return_value = {
+        ("ACCOUNT", "A001"): "10",
+        ("POSITION", "P001"): "11",
+    }
+    fresh = utc_now() - timedelta(seconds=10)
+    outbox_repository.list_latest_fact_created_times.return_value = {
+        ("ACCOUNT", "A001"): fresh,
+        ("POSITION", "P001"): fresh,
+    }
+    service = SnapshotService(store, outbox_repository=outbox_repository)
+
+    result = service.build(
+        db,
+        {"A001"},
+        identity=RealtimeUserIdentity("U001", "USER"),
+        require_realtime_consistency=True,
+        exclude_fact_reasons=EXCLUDED_REASONS,
+    )
+
+    assert len(result["accounts"]) == 1
+    assert result["accounts"][0]["account"]["account_id"] == "A001"
+    assert len(result["accounts"][0]["positions"]) == 1
+    outbox_repository.list_latest_fact_versions.assert_called_once_with(
+        db,
+        account_ids=("A001",),
+        position_ids=("P001",),
+        exclude_fact_reasons=EXCLUDED_REASONS,
+    )
+    outbox_repository.list_latest_fact_created_times.assert_called_once()
+
+
+def test_strict_snapshot_still_rejects_stale_uncovered_facts_with_guard():
+    db = _session_with_active_position()
+    store = _strict_store_with_stale_fact_versions()
+    outbox_repository = Mock()
+    outbox_repository.list_latest_fact_versions.return_value = {
+        ("ACCOUNT", "A001"): "10",
+        ("POSITION", "P001"): "11",
+    }
+    old = utc_now() - timedelta(seconds=600)
+    outbox_repository.list_latest_fact_created_times.return_value = {
+        ("ACCOUNT", "A001"): old,
+        ("POSITION", "P001"): old,
+    }
+    service = SnapshotService(store, outbox_repository=outbox_repository)
+
+    with pytest.raises(RedisError, match="尚未覆盖最新业务事实"):
+        service.build(
+            db,
+            {"A001"},
+            identity=RealtimeUserIdentity("U001", "USER"),
+            require_realtime_consistency=True,
+            exclude_fact_reasons=EXCLUDED_REASONS,
+        )
+
+
+def test_strict_snapshot_rejects_when_no_non_excluded_fact_exists():
+    db = _session_with_active_position()
+    store = _strict_store_with_stale_fact_versions()
+    outbox_repository = Mock()
+    outbox_repository.list_latest_fact_versions.return_value = {
+        ("ACCOUNT", "A001"): "10",
+        ("POSITION", "P001"): "11",
+    }
+    outbox_repository.list_latest_fact_created_times.return_value = {}
+    service = SnapshotService(store, outbox_repository=outbox_repository)
+
+    with pytest.raises(RedisError, match="尚未覆盖最新业务事实"):
+        service.build(
+            db,
+            {"A001"},
+            identity=RealtimeUserIdentity("U001", "USER"),
+            require_realtime_consistency=True,
+            exclude_fact_reasons=EXCLUDED_REASONS,
+        )
+
+
+def test_strict_snapshot_without_exclusion_does_not_consult_created_times():
+    db = _session_with_active_position()
+    store = _strict_store_with_stale_fact_versions()
+    outbox_repository = Mock()
+    outbox_repository.list_latest_fact_versions.return_value = {
+        ("ACCOUNT", "A001"): "10",
+        ("POSITION", "P001"): "11",
+    }
+    service = SnapshotService(store, outbox_repository=outbox_repository)
+
+    with pytest.raises(RedisError, match="尚未覆盖最新业务事实"):
+        service.build(
+            db,
+            {"A001"},
+            identity=RealtimeUserIdentity("U001", "USER"),
+            require_realtime_consistency=True,
+        )
+
+    outbox_repository.list_latest_fact_created_times.assert_not_called()
+

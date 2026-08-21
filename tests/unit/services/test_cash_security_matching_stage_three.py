@@ -350,6 +350,40 @@ def test_buy_fill_updates_postgres_pnl_before_account_fact_event():
     assert service._create_events.call_args.kwargs["account"] is account
 
 
+def test_buy_full_fill_releases_estimated_commission_residual():
+    # 回归：全部成交后，预计冻结手续费与逐笔实际手续费的舍入差不能
+    # 残留在订单和账户冻结字段上，否则日终对账会因“无法解释的冻结资金”
+    # 而失败。
+    order = _settlement_order(direction="BUY")
+    order.frozen_commission = Decimal("5.022820")
+    account = _account(
+        frozen_cash=Decimal("1000"),
+        frozen_commission=Decimal("5.022820"),
+        cash_balance=Decimal("1000"),
+    )
+    service = _settlement_service(
+        order=order,
+        account=account,
+        position=_settlement_position(),
+        fee=Decimal("5.022756"),
+    )
+
+    result = service.settle(
+        Mock(),
+        order_id=order.order_id,
+        market_event_id="T-FULL",
+        market_stream_message_id="1-0",
+        tick_event_time=SimpleNamespace(),
+        match=SimpleNamespace(matched=True, fill_price=Decimal("10"), fill_volume=100),
+    )
+
+    assert result.action == "SETTLED"
+    assert order.frozen_commission == Decimal("0")
+    assert order.frozen_cash == Decimal("0")
+    assert account.frozen_commission == Decimal("0")
+    assert account.frozen_cash == Decimal("0")
+
+
 @pytest.mark.parametrize(
     ("price", "expected_realized", "expected_daily", "expected_cumulative"),
     [
@@ -386,3 +420,58 @@ def test_stock_sell_fill_keeps_gross_realized_pnl_and_deducts_fee_once(
     assert account.daily_close_pnl == expected_realized.quantize(Decimal("0.000001"))
     assert account.daily_pnl == expected_daily.quantize(Decimal("0.000001"))
     assert account.cumulative_net_pnl == expected_cumulative.quantize(Decimal("0.000001"))
+
+
+def test_trade_row_flushes_before_fee_components_are_added():
+    # 回归：费用明细外键指向 trade.trade_id，且费用行先于 Trade 对象加入
+    # Session。若 trade 行未先落库，任何一次 flush（新建持仓或提交）都会
+    # 触发 PostgreSQL 外键 cash_security_trade_fee_component_trade_id_fkey。
+    order = _settlement_order(direction="BUY")
+    account = _account(
+        frozen_cash=Decimal("1000"),
+        frozen_commission=Decimal("2"),
+        cash_balance=Decimal("1000"),
+    )
+    snapshot = SimpleNamespace(
+        fee_type="BROKER_COMMISSION",
+        aggregation_scope="TRADE",
+        calculation_type="BY_AMOUNT",
+        commission_parameter=Decimal("0.001"),
+        minimum_fee=Decimal("0"),
+    )
+    parent = Mock()
+    db = parent.db
+    service = _settlement_service(
+        order=order,
+        account=account,
+        position=_settlement_position(),
+    )
+    # 用真实 _settle_fees 验证费用行确实进入 Session，而不是整体 Mock 掉。
+    del service._settle_fees
+    service.snapshot_repository.list_by_order_ids = Mock(
+        return_value={order.order_id: [snapshot]}
+    )
+    # trade 与 fee 仓储挂到同一父 Mock，保证 mock_calls 是全局调用顺序。
+    service.trade_repository = parent.trade_repo
+    service.trade_repository.get_by_order_market_event = Mock(return_value=None)
+    service.fee_repository = parent.fee_repo
+
+    service.settle(
+        db,
+        order_id=order.order_id,
+        market_event_id="T-FK",
+        market_stream_message_id="1-0",
+        tick_event_time=SimpleNamespace(),
+        match=SimpleNamespace(matched=True, fill_price=Decimal("10"), fill_volume=100),
+    )
+
+    names = [entry[0] for entry in parent.mock_calls]
+    assert names.index("trade_repo.add") < names.index("db.flush")
+    assert names.index("db.flush") < names.index("fee_repo.add_trade_components")
+    assert names.index("fee_repo.add_trade_components") < names.index("db.commit")
+
+    # 先以占位值落库，方向分支结算后在同一事务内更新为最终值。
+    trade = service.trade_repository.add.call_args.args[1]
+    assert trade.commission == Decimal("1.000000")
+    assert trade.realized_pnl == Decimal("0")
+    assert trade.daily_close_pnl == Decimal("0")

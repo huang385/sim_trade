@@ -245,6 +245,11 @@ class CashSecurityOrderService:
                 trading_day=trading_day,
             )
             if not fee_items:
+                if self.instrument_type == "CONVERTIBLE_BOND":
+                    raise BusinessRuleError(
+                        "当前交易日缺少可转债手续费规则",
+                        error_code="CONVERTIBLE_BOND_FEE_COMPONENT_MISSING",
+                    )
                 raise BusinessRuleError(
                     "当前交易日缺少股票手续费规则",
                     error_code="STOCK_FEE_COMPONENT_MISSING",

@@ -16,6 +16,9 @@ from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
 from app.infrastructure.active_order_index import ActiveOrderIndex
+from app.infrastructure.cash_security_valuation_store import (
+    CashSecurityValuationStore,
+)
 from app.infrastructure.market_data.market_tick_store import (
     MarketTickStore,
 )
@@ -990,6 +993,10 @@ def build_worker() -> MarketDataSubscriberWorker:
         # 活动持仓合约索引由实时盈亏Worker维护在Redis中。复用该索引可让
         # 已成交持仓继续接收行情，同时避免订阅Worker高频查询PostgreSQL。
         active_position_contract_source=RealtimePnlStore(redis_client),
+        # 股票/可转债持仓不进入期货合约索引；复用现金证券估值维护的活动
+        # 持仓索引，让现金证券持仓在无人看盘时也保持行情订阅，避免估值
+        # 链和WebSocket严格快照因行情缺失而断档。
+        cash_security_position_source=CashSecurityValuationStore(redis_client),
         # 下单前临时需求与活动订单、持仓订阅取并集。商品期权写入
         # “期权+标的期货”，股指期权写入“期权+标的指数”。
         pre_subscription_source=MarketPreSubscriptionStore(

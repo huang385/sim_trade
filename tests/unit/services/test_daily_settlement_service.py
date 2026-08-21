@@ -1,6 +1,7 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -404,3 +405,195 @@ def test_redis_recovery_failure_keeps_completed_database_batch(
         assert message == "INJECTED_REDIS_FAILURE"
         assert persisted.status == "COMPLETED"
         assert persisted.cache_status == "FAILED"
+
+
+def _cash_schedule_row(product_code: str, instrument_type: str = "STOCK"):
+    return {
+        "trading_day": TRADING_DAY,
+        "exchange_id": "SSE",
+        "product_code": product_code,
+        "instrument_type": instrument_type,
+        "sessions": [
+            {
+                "start_at": "2026-08-06T09:30:00+08:00",
+                "end_at": "2026-08-06T15:00:00+08:00",
+            }
+        ],
+        "status": "OPEN",
+        "representative_order_book_id": "600000.XSHG",
+    }
+
+
+def _preflight_service(repository, instrument, *, engine, factory):
+    service = DailySettlementService(
+        session_factory=factory,
+        database_engine=engine,
+        repository=repository,
+        time_provider=lambda: NOW,
+        product_registry=Mock(),
+        redis_recovery_enabled=False,
+    )
+    service._load_instruments = Mock(
+        return_value=({instrument.order_book_id: instrument}, {})
+    )
+    return service
+
+
+def _preflight_stock_instrument():
+    # 股票合约表 product_id 为空，from_model 回退成 symbol。
+    return SettlementInstrument(
+        id=2,
+        order_book_id="600033.XSHG",
+        exchange_id="SSE",
+        symbol="600033",
+        product_id="600033",
+        instrument_type="STOCK",
+        multiplier=Decimal("1"),
+        expire_date=None,
+        last_trading_date=None,
+        underlying_instrument_id=None,
+        option_type=None,
+        strike_price=None,
+    )
+
+
+def test_preflight_cash_security_falls_back_to_generic_schedule(
+    sqlite_session_factory,
+):
+    engine, factory = sqlite_session_factory
+    repository = Mock()
+    repository.list_open_calendars.return_value = [
+        {
+            "exchange_id": "SSE",
+            "trading_day": TRADING_DAY,
+            "previous_trading_day": date(2026, 8, 5),
+            "next_trading_day": NEXT_DAY,
+            "is_open": True,
+            "status": "OPEN",
+        }
+    ]
+    repository.get_earlier_incomplete_batch.return_value = None
+
+    def list_product_schedules(db, trading_day, product_keys):
+        if ("SSE", "CASH_SECURITY", "STOCK") in set(product_keys):
+            return [_cash_schedule_row("CASH_SECURITY")]
+        return []
+
+    repository.list_product_schedules.side_effect = list_product_schedules
+    service = _preflight_service(
+        repository, _preflight_stock_instrument(), engine=engine, factory=factory
+    )
+
+    next_day = service._preflight(TRADING_DAY)
+
+    assert next_day == NEXT_DAY
+    key_sets = [
+        set(call.args[2])
+        for call in repository.list_product_schedules.call_args_list
+    ]
+    assert any(("SSE", "600033", "STOCK") in keys for keys in key_sets)
+    assert any(("SSE", "CASH_SECURITY", "STOCK") in keys for keys in key_sets)
+
+
+def test_preflight_cash_security_still_fails_without_generic_schedule(
+    sqlite_session_factory,
+):
+    engine, factory = sqlite_session_factory
+    repository = Mock()
+    repository.list_open_calendars.return_value = [
+        {
+            "exchange_id": "SSE",
+            "trading_day": TRADING_DAY,
+            "previous_trading_day": date(2026, 8, 5),
+            "next_trading_day": NEXT_DAY,
+            "is_open": True,
+            "status": "OPEN",
+        }
+    ]
+    repository.get_earlier_incomplete_batch.return_value = None
+    repository.list_product_schedules.return_value = []
+    service = _preflight_service(
+        repository, _preflight_stock_instrument(), engine=engine, factory=factory
+    )
+
+    with pytest.raises(DailySettlementError) as exc_info:
+        service._preflight(TRADING_DAY)
+
+    assert exc_info.value.error_code == "TRADING_SCHEDULE_MISSING"
+
+
+def _cancel_service(
+    sqlite_session_factory, order_repository, *, derivative_service=None,
+    cash_services=None,
+):
+    engine, factory = sqlite_session_factory
+    return DailySettlementService(
+        session_factory=factory,
+        database_engine=engine,
+        order_repository=order_repository,
+        cancellation_service=derivative_service or Mock(),
+        cash_security_cancellation_services=cash_services or {},
+        time_provider=lambda: NOW,
+        redis_recovery_enabled=False,
+    )
+
+
+def test_cancel_active_orders_routes_stock_order_to_cash_security_service(
+    sqlite_session_factory,
+):
+    stock_order = SimpleNamespace(
+        order_id="SO-STOCK",
+        account_id="A-STOCK",
+        instrument_type="STOCK",
+    )
+    order_repository = Mock()
+    order_repository.list_active_after_id.side_effect = [[stock_order], []]
+    cash_cancel = Mock()
+    derivative_cancel = Mock()
+    service = _cancel_service(
+        sqlite_session_factory,
+        order_repository,
+        derivative_service=derivative_cancel,
+        cash_services={"STOCK": cash_cancel},
+    )
+
+    cancelled = service._cancel_active_orders()
+
+    assert cancelled == 1
+    assert cash_cancel.cancel_order.call_count == 1
+    call = cash_cancel.cancel_order.call_args
+    assert call.kwargs["order_id"] == "SO-STOCK"
+    assert call.kwargs["request"].account_id == "A-STOCK"
+    assert call.kwargs["access_scope"].is_admin is True
+    assert derivative_cancel.cancel_order.call_count == 0
+    list_call = order_repository.list_active_after_id.call_args
+    assert list_call.kwargs["include_cash_security"] is True
+
+
+def test_cancel_active_orders_routes_futures_order_to_derivative_service(
+    sqlite_session_factory,
+):
+    futures_order = SimpleNamespace(
+        order_id="FO-FUT",
+        account_id="A-FUT",
+        instrument_type="FUTURES",
+    )
+    order_repository = Mock()
+    order_repository.list_active_after_id.side_effect = [[futures_order], []]
+    cash_cancel = Mock()
+    derivative_cancel = Mock()
+    service = _cancel_service(
+        sqlite_session_factory,
+        order_repository,
+        derivative_service=derivative_cancel,
+        cash_services={"STOCK": cash_cancel},
+    )
+
+    cancelled = service._cancel_active_orders()
+
+    assert cancelled == 1
+    assert derivative_cancel.cancel_order.call_count == 1
+    call = derivative_cancel.cancel_order.call_args
+    assert call.kwargs["order_id"] == "FO-FUT"
+    assert call.kwargs["settlement_internal"] is True
+    assert cash_cancel.cancel_order.call_count == 0

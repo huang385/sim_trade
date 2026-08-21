@@ -15,6 +15,7 @@ from app.realtime.connection_context import ConnectionContext
 from app.realtime.event_enums import RealtimeEventType, WebSocketCloseCode
 from app.realtime.event_schema import RealtimeEventEnvelope, SubscribeMessage
 from app.realtime.metrics import realtime_metrics
+from app.realtime.snapshot_service import WS_EXCLUDED_FACT_REASONS
 from app.realtime.subscription_service import (
     RealtimeUserIdentity,
     SubscriptionAuthorization,
@@ -95,6 +96,7 @@ def _build_snapshot(
             account_ids,
             identity=identity,
             require_realtime_consistency=True,
+            exclude_fact_reasons=WS_EXCLUDED_FACT_REASONS,
         )
 
 

@@ -434,6 +434,10 @@ class CashSecurityCorporateActionService:
                 created_at=utc_now(),
             )
         )
+        # 生产会话 autoflush=False:立即落库本次基线,使同一 run_due_actions
+        # 批次内同一持仓后续组件/事件的幂等查重能看到它,避免重复插入
+        # uq_cash_corporate_adjustment_idempotency 唯一键。
+        db.flush()
 
     def _maybe_mark_completed(
         self, db: Session, *, action: CashSecurityCorporateAction, trading_day: date

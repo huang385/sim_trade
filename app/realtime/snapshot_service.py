@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Sequence
 
@@ -41,6 +41,19 @@ ACTIVE_ORDER_STATUSES = (
     OrderStatus.PARTIALLY_FILLED.value,
 )
 RISK_QUANT = Decimal("0.00000001")
+
+# 保证金调整是PnL Worker自产事实：Worker先写Hash、同周期内调整事务再产生
+# 新版本，下一轮对账必然覆盖。严格快照按此口径排除，避免每个调整周期内
+# 出现最长60秒的周期性断连；其它真实业务事实（成交、开平仓、出入金、日终
+# 结算）仍严格比对。
+WS_EXCLUDED_FACT_REASONS = (
+    "OPTION_MARGIN_ADJUSTMENT",
+    "OPTION_ORDER_MARGIN_ADJUSTMENT",
+)
+
+# 兜底：排除口径生效时，最新非调整事实超过该秒数仍未覆盖，说明Worker真正
+# 故障而非正常追赶窗口，仍然拒绝快照，防止静默返回过期数据。
+WS_FACT_STALE_GUARD_SECONDS = 120
 
 
 def _json_value(value: Any) -> Any:
@@ -84,6 +97,40 @@ class SnapshotService:
         if len(applied_normalized) != len(current_normalized):
             return len(applied_normalized) > len(current_normalized)
         return applied_normalized >= current_normalized
+
+    def _guard_stale_fact_errors(
+        self,
+        db: Session,
+        fact_errors: list[tuple[str, str]],
+        *,
+        exclude_fact_reasons: Sequence[str],
+        stale_guard_seconds: int,
+    ) -> list[tuple[str, str]]:
+        """排除口径下只放行Worker正常追赶窗口，真正故障仍拒绝。
+
+        最新非调整事实刚写入（未超过兜底阈值）时，允许Hash短暂落后；
+        事实本身已超过阈值仍未覆盖，或该聚合没有任何非调整事实可对账，
+        说明不是正常追赶而是Worker停摆，保留该错误继续拒绝快照。
+        """
+
+        if not exclude_fact_reasons or stale_guard_seconds <= 0:
+            return fact_errors
+        created_times = self.outbox_repository.list_latest_fact_created_times(
+            db,
+            account_ids=tuple(
+                key for kind, key in fact_errors if kind == "ACCOUNT"
+            ),
+            position_ids=tuple(
+                key for kind, key in fact_errors if kind == "POSITION"
+            ),
+            exclude_fact_reasons=exclude_fact_reasons,
+        )
+        cutoff = utc_now() - timedelta(seconds=stale_guard_seconds)
+        return [
+            error
+            for error in fact_errors
+            if error not in created_times or created_times[error] <= cutoff
+        ]
 
     @staticmethod
     def _risk_ratio(required_margin: Decimal, equity: Decimal) -> Decimal:
@@ -171,6 +218,8 @@ class SnapshotService:
         *,
         identity: RealtimeUserIdentity | None = None,
         require_realtime_consistency: bool = False,
+        exclude_fact_reasons: Sequence[str] = (),
+        stale_guard_seconds: int = WS_FACT_STALE_GUARD_SECONDS,
     ) -> dict[str, Any]:
         """固定集合SQL读取账户、订单、成交、持仓、明细和事实版本。
 
@@ -267,6 +316,7 @@ class SnapshotService:
                 db,
                 account_ids=authorized_ids,
                 position_ids=position_ids,
+                exclude_fact_reasons=exclude_fact_reasons,
             )
             if require_realtime_consistency
             else {}
@@ -368,7 +418,7 @@ class SnapshotService:
                 # 账户仍有资金或结构Dirty，就不能证明本次Hash覆盖最新事实。
                 raise RedisError("WebSocket实时快照仍有未处理业务事实")
 
-            fact_errors: list[str] = []
+            fact_errors: list[tuple[str, str]] = []
             for account_id in active_account_ids:
                 if not self._fact_version_covers(
                     account_values[account_id].get(
@@ -379,7 +429,7 @@ class SnapshotService:
                         "0",
                     ),
                 ):
-                    fact_errors.append(f"account:{account_id}")
+                    fact_errors.append(("ACCOUNT", account_id))
             for position_id in position_ids:
                 if not self._fact_version_covers(
                     position_values[position_id].get(
@@ -390,7 +440,14 @@ class SnapshotService:
                         "0",
                     ),
                 ):
-                    fact_errors.append(f"position:{position_id}")
+                    fact_errors.append(("POSITION", position_id))
+            if fact_errors:
+                fact_errors = self._guard_stale_fact_errors(
+                    db,
+                    fact_errors,
+                    exclude_fact_reasons=exclude_fact_reasons,
+                    stale_guard_seconds=stale_guard_seconds,
+                )
             if fact_errors:
                 raise RedisError("WebSocket实时PnL尚未覆盖最新业务事实")
 

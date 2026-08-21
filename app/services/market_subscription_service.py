@@ -58,11 +58,13 @@ class MarketSubscriptionService:
         debounce_seconds: float,
         pre_subscription_source: PreSubscriptionContractSource | None = None,
         client_subscription_source: PreSubscriptionContractSource | None = None,
+        cash_security_position_source: ActivePositionContractSource | None = None,
     ):
         self.active_order_index = active_order_index
         self.active_position_contract_source = (
             active_position_contract_source
         )
+        self.cash_security_position_source = cash_security_position_source
         self.debounce_seconds = debounce_seconds
         self.pre_subscription_source = pre_subscription_source
         self.client_subscription_source = client_subscription_source
@@ -89,14 +91,17 @@ class MarketSubscriptionService:
         """从Redis持仓合约索引读取仍需盯市的有效持仓合约。"""
 
         desired: set[str] = set()
-        for raw_code in (
-            self.active_position_contract_source
-            .list_active_contract_codes()
+        for source in (
+            self.active_position_contract_source,
+            self.cash_security_position_source,
         ):
-            try:
-                desired.add(normalize_code(raw_code))
-            except ValueError:
+            if source is None:
                 continue
+            for raw_code in source.list_active_contract_codes():
+                try:
+                    desired.add(normalize_code(raw_code))
+                except ValueError:
+                    continue
         return desired
 
     def _get_margin_dependency_codes(self) -> set[str]:
@@ -106,6 +111,7 @@ class MarketSubscriptionService:
         for source in (
             self.active_order_index,
             self.active_position_contract_source,
+            self.cash_security_position_source,
         ):
             loader = getattr(source, "list_margin_dependency_codes", None)
             if loader is None:

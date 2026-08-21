@@ -66,6 +66,12 @@ from app.services.option_margin_adjustment_service import OptionMarginAdjustment
 from app.services.option_margin_calculator import OptionMarginInput
 from app.services.option_margin_calculator_resolver import OptionMarginCalculatorResolver
 from app.services.order_cancellation_service import OrderCancellationService
+from app.services.stock_order_cancellation_service import (
+    CashSecurityOrderCancellationService,
+)
+from app.services.convertible_bond_order_service import (
+    ConvertibleBondOrderCancellationService,
+)
 from app.services.realtime_fact_event_service import RealtimeFactEventService
 from app.services.settlement_gate_service import DAILY_SETTLEMENT_ADVISORY_LOCK_KEY
 from app.services.settlement_replay_service import (
@@ -260,6 +266,9 @@ class DailySettlementService:
         tick_max_age_seconds: int | None = None,
         redis_recovery_enabled: bool = True,
         product_registry: ProductStrategyRegistry | None = None,
+        cash_security_cancellation_services: (
+            dict[str, CashSecurityOrderCancellationService] | None
+        ) = None,
     ) -> None:
         self.session_factory = session_factory
         self.database_engine = database_engine
@@ -280,6 +289,13 @@ class DailySettlementService:
         )
         self.redis_recovery_enabled = redis_recovery_enabled
         self.product_registry = product_registry or product_strategy_registry
+        self.cash_security_cancellation_services = (
+            cash_security_cancellation_services
+            or {
+                InstrumentType.STOCK.value: CashSecurityOrderCancellationService(),
+                InstrumentType.CONVERTIBLE_BOND.value: ConvertibleBondOrderCancellationService(),
+            }
+        )
         self.replay_service = SettlementReplayService(
             product_registry=self.product_registry
         )
@@ -453,6 +469,37 @@ class DailySettlementService:
             }
             missing = product_keys - found
             if missing:
+                # 现金证券（STOCK/CONVERTIBLE_BOND）的交易时段按“市场+合约类型”
+                # 共用一行 product_code='CASH_SECURITY'，与下单侧时段读取约定一致。
+                # 合约表 product_id 为空时预检会回退成逐只 symbol 键而查不到，
+                # 这里再用通用键回查一次；命中的通用行一并进入下方时段校验。
+                cash_generic_keys = {
+                    (exchange_id, "CASH_SECURITY", instrument_type)
+                    for exchange_id, _product_code, instrument_type in missing
+                    if instrument_type in CASH_SECURITY_TYPES
+                }
+                if cash_generic_keys:
+                    generic_rows = self.repository.list_product_schedules(
+                        db, trading_day, cash_generic_keys
+                    )
+                    satisfied = {
+                        (
+                            row["exchange_id"],
+                            row["product_code"],
+                            row["instrument_type"],
+                        )
+                        for row in generic_rows
+                    }
+                    missing = {
+                        key
+                        for key in missing
+                        if not (
+                            key[2] in CASH_SECURITY_TYPES
+                            and (key[0], "CASH_SECURITY", key[2]) in satisfied
+                        )
+                    }
+                    schedules.extend(generic_rows)
+            if missing:
                 raise DailySettlementError(
                     f"相关产品缺少交易时段: {sorted(missing)!r}",
                     stage=DailySettlementStage.PREFLIGHT.value,
@@ -552,22 +599,38 @@ class DailySettlementService:
         while True:
             with self.session_factory() as db:
                 rows = self.order_repository.list_active_after_id(
-                    db, last_id=0, batch_size=1
+                    db, last_id=0, batch_size=1, include_cash_security=True
                 )
                 target = (
-                    (rows[0].order_id, rows[0].account_id) if rows else None
+                    (rows[0].order_id, rows[0].account_id, rows[0].instrument_type)
+                    if rows
+                    else None
                 )
             if target is None:
                 return cancelled
-            order_id, account_id = target
+            order_id, account_id, instrument_type = target
+            request = OrderCancelRequest(account_id=account_id)
+            scope = AccountAccessScope.admin()
             with self.session_factory() as db:
-                self.cancellation_service.cancel_order(
-                    db=db,
-                    order_id=order_id,
-                    request=OrderCancelRequest(account_id=account_id),
-                    access_scope=AccountAccessScope.admin(),
-                    settlement_internal=True,
-                )
+                if instrument_type in CASH_SECURITY_TYPES:
+                    # 股票/可转债订单没有开平标志，冻结资金与持仓由现金证券
+                    # 撤单服务释放，不能进入衍生品撤单路径。
+                    self.cash_security_cancellation_services[
+                        instrument_type
+                    ].cancel_order(
+                        db=db,
+                        order_id=order_id,
+                        request=request,
+                        access_scope=scope,
+                    )
+                else:
+                    self.cancellation_service.cancel_order(
+                        db=db,
+                        order_id=order_id,
+                        request=request,
+                        access_scope=scope,
+                        settlement_internal=True,
+                    )
             cancelled += 1
 
     def _confirm_barrier(self) -> None:

@@ -101,12 +101,12 @@ async def _enqueue(runtime, context, event_type: str, payload: dict) -> bool:
 
 async def _publish_snapshots(runtime, context, instruments: dict) -> None:
     keys = {
-        (item["exchange_id"], item["symbol"])
+        (item["exchange_id"], item["order_book_id"])
         for item in instruments.values()
     }
     snapshots = await asyncio.to_thread(runtime.market_tick_store.get_latest_many, keys)
     for item in instruments.values():
-        values = snapshots.get((item["exchange_id"], item["symbol"]), {})
+        values = snapshots.get((item["exchange_id"], item["order_book_id"]), {})
         if not values:
             await _enqueue(
                 runtime,

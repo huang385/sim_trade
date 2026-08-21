@@ -69,7 +69,6 @@ def make_resolver(event):
     return (
         OrderPriceResolver(
             live_market_snapshot_service=snapshots,
-            max_age_seconds=30,
             market_max_slippage_rate=Decimal("0.02"),
         ),
         snapshots,
@@ -139,9 +138,23 @@ def test_required_snapshot_price_must_exist(order_type, field, code):
     assert exc_info.value.error_code == code
 
 
-def test_stale_snapshot_is_rejected():
+def test_old_snapshot_from_current_subscription_is_accepted():
+    # 低活跃合约盘口可能几分钟才更新一次；只要行情来自当前活跃订阅
+    # （订阅代次校验由 LiveMarketSnapshotService 负责），不再按年龄拒绝。
     resolver, _ = make_resolver(
-        make_event(event_time=utc_now() - timedelta(seconds=31))
+        make_event(event_time=utc_now() - timedelta(minutes=5))
+    )
+    result = resolver.resolve(
+        request=make_request(OrderType.COUNTERPARTY),
+        price_tick=Decimal("1"),
+        trading_day=TRADING_DAY,
+    )
+    assert result.resolved_price == Decimal("4355")
+
+
+def test_future_timestamp_snapshot_is_rejected():
+    resolver, _ = make_resolver(
+        make_event(event_time=utc_now() + timedelta(seconds=5))
     )
     with pytest.raises(BusinessValidationError) as exc_info:
         resolver.resolve(
@@ -149,7 +162,7 @@ def test_stale_snapshot_is_rejected():
             price_tick=Decimal("1"),
             trading_day=TRADING_DAY,
         )
-    assert exc_info.value.error_code == "ORDER_PRICE_MARKET_DATA_STALE"
+    assert exc_info.value.error_code == "ORDER_PRICE_MARKET_DATA_INVALID"
 
 
 def test_limit_does_not_read_market():

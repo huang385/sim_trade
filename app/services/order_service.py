@@ -1252,7 +1252,6 @@ def get_order_service() -> OrderService:
         trading_day_service=get_trading_day_service(),
         order_price_resolver=OrderPriceResolver(
             live_market_snapshot_service=LiveMarketSnapshotService(redis_client),
-            max_age_seconds=settings.order_price_tick_max_age_seconds,
             market_max_slippage_rate=settings.market_order_max_slippage_rate,
         ),
         option_market_price_service=OptionMarketPriceService(

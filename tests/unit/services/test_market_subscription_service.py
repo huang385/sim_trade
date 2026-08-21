@@ -280,3 +280,44 @@ def test_old_generation_receipt_does_not_change_new_request():
 
     assert state.requested_codes == frozenset({"NEW"})
     assert state.subscribed_codes == frozenset()
+
+
+def test_cash_security_positions_are_subscribed_without_derivative_sources():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
+        debounce_seconds=3,
+        cash_security_position_source=make_position_source(
+            {"600033.XSHG", "110075.XSHG"}
+        ),
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"600033.XSHG", "110075.XSHG"}
+    )
+
+
+def test_cash_security_positions_merge_with_derivative_positions():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source({"JD2609"}),
+        debounce_seconds=3,
+        cash_security_position_source=make_position_source({"600033.XSHG"}),
+    )
+
+    assert service.get_desired_codes() == frozenset({"JD2609", "600033.XSHG"})
+
+
+def test_cash_security_positions_are_normalized_and_deduplicated():
+    service = MarketSubscriptionService(
+        active_order_index=make_index({}),
+        active_position_contract_source=make_position_source(),
+        debounce_seconds=3,
+        cash_security_position_source=make_position_source(
+            {" 600033.xshg ", "600033.XSHG", "110075.XSHG"}
+        ),
+    )
+
+    assert service.get_desired_codes() == frozenset(
+        {"600033.XSHG", "110075.XSHG"}
+    )
