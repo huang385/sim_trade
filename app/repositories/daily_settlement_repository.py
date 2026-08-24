@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import case, exists, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.models.account import Account
@@ -19,6 +19,9 @@ from app.models.cash_security_corporate_action_position_adjustment import (
     CashSecurityCorporateActionPositionAdjustment,
 )
 from app.models.cash_security_corporate_action import CashSecurityCorporateAction
+from app.models.cash_security_corporate_action_ledger import (
+    CashSecurityCorporateActionLedger,
+)
 from app.models.trade import Trade
 from app.models.trade_position_allocation import TradePositionAllocation
 
@@ -219,6 +222,73 @@ class DailySettlementRepository:
                 CashSecurityCorporateActionPositionAdjustment.action_version,
                 CashSecurityCorporateActionPositionAdjustment.component_id,
                 CashSecurityCorporateActionPositionAdjustment.id,
+            )
+        ).all()
+
+    @staticmethod
+    def list_cash_security_replay_blockers(db: Session) -> Sequence[Any]:
+        """Find executed quantity actions which cannot safely be replayed.
+
+        This deliberately has no effective-day predicate.  An untrusted legacy
+        effective day must not be able to hide an already executed split or
+        maturity from a later settlement run.
+        """
+
+        quantity_entries = (
+            "SHARES_PENDING",
+            "SHARES_LISTED",
+            "RIGHTS_SUBSCRIBED",
+            "STOCK_SPLIT",
+            "REVERSE_SPLIT",
+            "BOND_PRINCIPAL_RECEIVABLE",
+        )
+        expected_adjustment = case(
+            (
+                CashSecurityCorporateActionLedger.entry_type
+                == "BOND_PRINCIPAL_RECEIVABLE",
+                "BOND_MATURITY_RETIRED",
+            ),
+            else_=CashSecurityCorporateActionLedger.entry_type,
+        )
+        complete_adjustment = exists(
+            select(CashSecurityCorporateActionPositionAdjustment.id).where(
+                CashSecurityCorporateActionPositionAdjustment.action_id
+                == CashSecurityCorporateActionLedger.action_id,
+                CashSecurityCorporateActionPositionAdjustment.component_id
+                == CashSecurityCorporateActionLedger.component_id,
+                CashSecurityCorporateActionPositionAdjustment.entitlement_id
+                == CashSecurityCorporateActionLedger.entitlement_id,
+                CashSecurityCorporateActionPositionAdjustment.position_id
+                == CashSecurityCorporateActionLedger.position_id,
+                CashSecurityCorporateActionPositionAdjustment.adjustment_type
+                == expected_adjustment,
+            )
+        )
+        return db.execute(
+            select(
+                CashSecurityCorporateActionLedger.position_id.label("position_id"),
+                CashSecurityCorporateActionLedger.action_id.label("action_id"),
+                CashSecurityCorporateActionLedger.entry_type.label("entry_type"),
+                CashSecurityCorporateAction.status.label("action_status"),
+            )
+            .join(
+                CashSecurityCorporateAction,
+                CashSecurityCorporateAction.action_id
+                == CashSecurityCorporateActionLedger.action_id,
+            )
+            .where(
+                CashSecurityCorporateActionLedger.position_id.is_not(None),
+                CashSecurityCorporateActionLedger.entry_type.in_(quantity_entries),
+                or_(
+                    CashSecurityCorporateAction.status == "MANUAL_REVIEW_REQUIRED",
+                    ~complete_adjustment,
+                ),
+            )
+            .distinct()
+            .order_by(
+                CashSecurityCorporateActionLedger.position_id,
+                CashSecurityCorporateActionLedger.action_id,
+                CashSecurityCorporateActionLedger.entry_type,
             )
         ).all()
 

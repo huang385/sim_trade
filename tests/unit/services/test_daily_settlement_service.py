@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.common.exceptions import DataAccessError
 from app.core.database import Base
 from app.models.daily_settlement import (
     DailySettlementBatch,
@@ -72,6 +73,30 @@ def test_cash_security_corporate_action_adjustment_stream_is_only_validated_befo
     # consumed later by the cash-security projection, which will set it to
     # zero; validation here must not reject the stale aggregate first.
     DailySettlementService._consume_cash_security_adjustments(position, (adjustment,))
+
+
+def test_cash_security_manual_review_fact_fails_closed_before_trade_replay():
+    blocker = SimpleNamespace(
+        position_id="P-SPLIT", action_id="CA-SPLIT", entry_type="STOCK_SPLIT",
+        action_status="MANUAL_REVIEW_REQUIRED",
+    )
+
+    with pytest.raises(DataAccessError) as raised:
+        DailySettlementService._assert_cash_security_replay_safe((blocker,))
+
+    assert raised.value.error_code == "CASH_SECURITY_REPLAY_MANUAL_REVIEW_REQUIRED"
+
+
+def test_cash_security_missing_quantity_fact_fails_closed_before_trade_replay():
+    blocker = SimpleNamespace(
+        position_id="P-MATURITY", action_id="CA-MATURITY",
+        entry_type="BOND_PRINCIPAL_RECEIVABLE", action_status="COMPLETED",
+    )
+
+    with pytest.raises(DataAccessError) as raised:
+        DailySettlementService._assert_cash_security_replay_safe((blocker,))
+
+    assert raised.value.error_code == "CASH_SECURITY_REPLAY_FACT_INCOMPLETE"
 
 
 @pytest.fixture

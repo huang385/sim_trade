@@ -46,6 +46,7 @@ from app.models.margin_rule_daily import MarginRuleDaily
 from app.models.order import Order
 from app.models.position import Position
 from app.models.cash_security_corporate_action_ledger import CashSecurityCorporateActionLedger
+from app.models.cash_security_corporate_action import CashSecurityCorporateAction
 from app.models.cash_security_corporate_action_position_adjustment import (
     CashSecurityCorporateActionPositionAdjustment,
 )
@@ -973,6 +974,31 @@ class DailySettlementService:
                     error_code="CORPORATE_ACTION_ADJUSTMENT_VERSION_INVALID",
                 )
 
+    @staticmethod
+    def _assert_cash_security_replay_safe(blockers: Sequence[Any]) -> None:
+        """Fail closed before a Trade-only replay can change a real Position."""
+        if not blockers:
+            return
+        manual = [
+            item
+            for item in blockers
+            if getattr(item, "action_status", None) == "MANUAL_REVIEW_REQUIRED"
+        ]
+        sample = ", ".join(
+            f"position={item.position_id}, action={item.action_id}, entry={item.entry_type}"
+            for item in blockers[:5]
+        )
+        if manual:
+            raise DataAccessError(
+                "现金证券持仓关联尚未人工确认的公司行为，禁止仅按成交重放："
+                + sample,
+                error_code="CASH_SECURITY_REPLAY_MANUAL_REVIEW_REQUIRED",
+            )
+        raise DataAccessError(
+            "现金证券持仓存在缺失的公司行为数量事实，禁止仅按成交重放：" + sample,
+            error_code="CASH_SECURITY_REPLAY_FACT_INCOMPLETE",
+        )
+
     def _settle_batch_from_facts(
         self,
         *,
@@ -1006,6 +1032,9 @@ class DailySettlementService:
                     self.repository.list_cash_security_position_adjustments_through_day(
                         db, trading_day
                     )
+                )
+                self._assert_cash_security_replay_safe(
+                    self.repository.list_cash_security_replay_blockers(db)
                 )
                 cash_positions = [
                     item
@@ -1180,10 +1209,23 @@ class DailySettlementService:
                 corporate_cash_by_account: dict[str, tuple[Decimal, Decimal]] = {}
                 corporate_income_by_account: dict[str, Decimal] = {}
                 for ledger in db.scalars(
-                    select(CashSecurityCorporateActionLedger).where(
+                    select(CashSecurityCorporateActionLedger)
+                    .join(
+                        CashSecurityCorporateAction,
+                        CashSecurityCorporateAction.action_id
+                        == CashSecurityCorporateActionLedger.action_id,
+                    )
+                    .where(
                         CashSecurityCorporateActionLedger.account_id.in_(
                             tuple(account_by_id)
-                        )
+                        ),
+                        CashSecurityCorporateAction.status.not_in(
+                            (
+                                "MANUAL_REVIEW_REQUIRED",
+                                "SUPERSEDED",
+                                "CANCELLED",
+                            )
+                        ),
                     )
                 ).all():
                     prior_cash, today_cash = corporate_cash_by_account.get(
