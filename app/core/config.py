@@ -146,10 +146,6 @@ class Settings(BaseSettings):
     # 合约没有活动订单或持仓，行情Worker会按原有防抖流程自动退订。
     market_pre_subscription_ttl_seconds: int = 60
     market_pre_subscription_max_codes_per_account: int = 20
-    # 终端观察行情采用短租约，Gateway会在连接存活期间续租；异常退出后无需
-    # 依赖进程内finally，过期需求也会自动离开上游订阅并集。
-    market_client_subscription_ttl_seconds: int = 90
-    market_client_subscription_max_codes_per_connection: int = 50
     remote_market_data_reconnect_initial_seconds: float = 1.0
     remote_market_data_reconnect_max_seconds: float = 30.0
     remote_market_data_queue_size: int = 10_000

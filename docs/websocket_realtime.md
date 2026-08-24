@@ -18,9 +18,9 @@ python -m app.scripts.run_websocket_gateway
 现金证券实时估值还需要启动三个独立进程；它们复用同一标准行情流，但不复用期货/期权 PnL Dirty 队列：
 
 ```powershell
-python -m app.scripts.run_cash_security_valuation_tick_worker
-python -m app.scripts.run_cash_security_valuation_fact_worker
-python -m app.scripts.run_cash_security_valuation_persistence_worker
+python -m app.workers.run_cash_security_valuation_tick_worker
+python -m app.workers.run_cash_security_valuation_fact_worker
+python -m app.workers.run_cash_security_valuation_persistence_worker
 ```
 
 Tick Worker 只把受影响的现金证券账户标记为 Dirty；持久化 Worker 在 PostgreSQL 行锁内重算市值、浮盈和账户权益。缺失、过期或交易日不一致的行情不会把已有金额写成零，账户保持 `VALUATION_UNAVAILABLE` 并保留 Dirty 以待重试。

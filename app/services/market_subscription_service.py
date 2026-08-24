@@ -57,7 +57,6 @@ class MarketSubscriptionService:
         active_position_contract_source: ActivePositionContractSource,
         debounce_seconds: float,
         pre_subscription_source: PreSubscriptionContractSource | None = None,
-        client_subscription_source: PreSubscriptionContractSource | None = None,
         cash_security_position_source: ActivePositionContractSource | None = None,
     ):
         self.active_order_index = active_order_index
@@ -67,7 +66,6 @@ class MarketSubscriptionService:
         self.cash_security_position_source = cash_security_position_source
         self.debounce_seconds = debounce_seconds
         self.pre_subscription_source = pre_subscription_source
-        self.client_subscription_source = client_subscription_source
         self._requested_codes: frozenset[str] = frozenset()
         self._subscribed_codes: set[str] = set()
         self._failure_reasons: dict[str, str] = {}
@@ -143,19 +141,6 @@ class MarketSubscriptionService:
                 continue
         return desired
 
-    def _get_client_subscription_codes(self) -> set[str]:
-        """读取桌面端仍在租约期内的观察合约需求。"""
-
-        if self.client_subscription_source is None:
-            return set()
-        desired: set[str] = set()
-        for raw_code in self.client_subscription_source.list_active_contract_codes():
-            try:
-                desired.add(normalize_code(raw_code))
-            except ValueError:
-                continue
-        return desired
-
     def get_desired_codes(self) -> frozenset[str]:
         """
         汇总目标订阅集合。
@@ -170,7 +155,6 @@ class MarketSubscriptionService:
             | self._get_active_position_codes()
             | self._get_margin_dependency_codes()
             | self._get_pre_subscription_codes()
-            | self._get_client_subscription_codes()
         )
 
     def observe(

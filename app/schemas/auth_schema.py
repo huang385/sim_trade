@@ -16,6 +16,16 @@ class LoginRequest(BaseModel):
         return str(value).strip().lower()
 
 
+class MarketSdkGrant(BaseModel):
+    """行情SDK直连凭证；仅当登录IP在绑定表中命中时返回。"""
+
+    live_token: str
+    data_token: str
+    mode: str = "lan"
+    live_server_url: str = ""
+    data_server_url: str = ""
+
+
 class TokenResponse(BaseModel):
     """Access Token响应；Refresh Token只写入HttpOnly Cookie。"""
 
@@ -23,6 +33,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserSummary
+    market_sdk: MarketSdkGrant | None = None
 
 
 class CurrentUserResponse(BaseModel):

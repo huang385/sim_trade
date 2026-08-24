@@ -22,6 +22,7 @@ from app.services.account_authorization_service import (
 )
 from app.services.auth_service import AuthResult, AuthService
 from app.services.login_rate_limit_service import LoginRateLimitService
+from app.services.market_sdk_token_service import MarketSdkTokenService
 from app.services.password_service import PasswordService
 from app.services.token_service import TokenService
 
@@ -61,11 +62,12 @@ def _set_refresh_cookie(response: Response, refresh_token: str) -> None:
     )
 
 
-def _token_response(result: AuthResult) -> TokenResponse:
+def _token_response(result: AuthResult, market_sdk: dict | None = None) -> TokenResponse:
     return TokenResponse(
         access_token=result.tokens.access_token,
         expires_in=result.tokens.access_expires_in,
         user=UserSummary.model_validate(result.user),
+        market_sdk=market_sdk,
     )
 
 
@@ -84,8 +86,9 @@ def login(
         client_ip=_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+    binding = MarketSdkTokenService.find_binding(db, _client_ip(request))
     _set_refresh_cookie(response, result.tokens.refresh_token)
-    return _token_response(result)
+    return _token_response(result, MarketSdkTokenService.grant_payload(binding))
 
 
 @router.post("/refresh", response_model=TokenResponse)

@@ -13,10 +13,6 @@ from app.infrastructure.redis_keys import (
     websocket_delivery_failure_key,
 )
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
-from app.infrastructure.market_data.market_tick_store import MarketTickStore
-from app.infrastructure.client_market_subscription_store import (
-    ClientMarketSubscriptionStore,
-)
 from app.realtime.connection_manager import ConnectionManager
 from app.realtime.event_consumer import RealtimeEventConsumer
 from app.realtime.event_router import RealtimeEventRouter
@@ -41,14 +37,6 @@ class GatewayRuntime:
         )
         self.manager = ConnectionManager()
         self.redis_client = redis_client
-        self.market_tick_store = MarketTickStore(redis_client)
-        self.client_market_subscription_store = ClientMarketSubscriptionStore(
-            redis_client,
-            ttl_seconds=settings.market_client_subscription_ttl_seconds,
-            max_codes_per_connection=(
-                settings.market_client_subscription_max_codes_per_connection
-            ),
-        )
         self.ticket_service = WebSocketTicketService(redis_client)
         self.auth_service = WebSocketAuthService()
         self.authorization_service = AccountAuthorizationService()

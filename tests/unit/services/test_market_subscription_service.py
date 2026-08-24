@@ -150,25 +150,6 @@ def test_expired_temporary_codes_leave_union_when_source_removes_them():
     assert service.get_desired_codes() == frozenset()
 
 
-def test_client_watchlist_codes_join_existing_subscription_union():
-    client_subscriptions = make_pre_subscription_source(
-        {"rb2610", "JD2609"}
-    )
-    service = MarketSubscriptionService(
-        active_order_index=make_index(
-            {"O1": {"order_book_id": "AG2609"}}
-        ),
-        active_position_contract_source=make_position_source({"JD2609"}),
-        client_subscription_source=client_subscriptions,
-        debounce_seconds=3,
-    )
-
-    assert service.get_desired_codes() == frozenset(
-        {"AG2609", "JD2609", "RB2610"}
-    )
-    client_subscriptions.list_active_contract_codes.assert_called_once_with()
-
-
 def test_add_changes_apply_immediately_and_remove_changes_wait_for_debounce():
     service = MarketSubscriptionService(
         active_order_index=make_index({}),
