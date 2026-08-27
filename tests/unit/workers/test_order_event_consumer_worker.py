@@ -34,6 +34,7 @@ def make_worker(
             event_type="ORDER_ACCEPTED",
             order_id="O-1",
             exchange_id="DCE",
+            order_book_id="JD2609",
             symbol="JD2609",
             action="REGISTERED",
         )
@@ -90,6 +91,7 @@ def test_accepted_order_triggers_arrival_matching_before_ack():
     arrival_matching_service.match_if_ready.assert_called_once_with(
         order_id="O-1",
         exchange_id="DCE",
+        order_book_id="JD2609",
         symbol="JD2609",
         order_snapshot=None,
     )
@@ -108,6 +110,7 @@ def test_cash_security_accepted_order_triggers_its_own_arrival_matching():
         event_type="STOCK_ORDER_ACCEPTED",
         order_id="SO-1",
         exchange_id="SSE",
+        order_book_id="600519.XSHG",
         symbol="600519",
         action="REGISTERED",
     )
@@ -128,7 +131,10 @@ def test_cash_security_accepted_order_triggers_its_own_arrival_matching():
     assert result == "acknowledged"
     event_service.process.assert_not_called()
     cash_arrival.match_if_ready.assert_called_once_with(
-        order_id="SO-1", exchange_id="SSE", symbol="600519"
+        order_id="SO-1",
+        exchange_id="SSE",
+        order_book_id="600519.XSHG",
+        symbol="600519",
     )
     stream_consumer.acknowledge.assert_called_once_with("cash-1")
 

@@ -16,3 +16,6 @@ venv/
 
 # 编辑器本地配置
 .vscode/
+
+# 脚本启动的本地进程日志与 PID
+.runtime/

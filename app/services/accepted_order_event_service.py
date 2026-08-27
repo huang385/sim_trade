@@ -48,6 +48,7 @@ class AcceptedOrderProcessResult:
     event_type: str
     order_id: str
     exchange_id: str
+    order_book_id: str
     symbol: str
     action: str
     order_snapshot: MatchingOrderCandidate | None = None
@@ -186,6 +187,7 @@ class AcceptedOrderEventService:
                 event_type=event.event_type,
                 order_id=event.order_id,
                 exchange_id=event.exchange_id,
+                order_book_id=str(event.payload.get("order_book_id") or "").strip(),
                 symbol=event.symbol,
                 action="IGNORED_TRADE_EVENT",
             )
@@ -199,6 +201,7 @@ class AcceptedOrderEventService:
                 event_type=event.event_type,
                 order_id=event.order_id,
                 exchange_id=event.exchange_id,
+                order_book_id="",
                 symbol=event.symbol,
                 action="ORDER_NOT_FOUND",
             )
@@ -229,6 +232,7 @@ class AcceptedOrderEventService:
                 event_type=event.event_type,
                 order_id=event.order_id,
                 exchange_id=order.exchange_id,
+                order_book_id=getattr(order, "order_book_id", order.symbol),
                 symbol=order.symbol,
                 action="MARKET_READY",
                 order_snapshot=MatchingOrderCandidate(
@@ -272,6 +276,7 @@ class AcceptedOrderEventService:
                 event_type=event.event_type,
                 order_id=event.order_id,
                 exchange_id=order.exchange_id,
+                order_book_id=getattr(order, "order_book_id", order.symbol),
                 symbol=order.symbol,
                 action="REMOVED",
             )
@@ -286,6 +291,7 @@ class AcceptedOrderEventService:
             event_type=event.event_type,
             order_id=event.order_id,
             exchange_id=order.exchange_id,
+            order_book_id=getattr(order, "order_book_id", order.symbol),
             symbol=order.symbol,
             action=(
                 "UPDATED"

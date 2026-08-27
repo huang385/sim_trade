@@ -217,6 +217,7 @@ class OrderEventConsumerWorker:
                     self.arrival_matching_service.match_if_ready(
                         order_id=result.order_id,
                         exchange_id=result.exchange_id,
+                        order_book_id=result.order_book_id,
                         symbol=result.symbol,
                         order_snapshot=getattr(
                             result,
@@ -239,6 +240,7 @@ class OrderEventConsumerWorker:
                     self.cash_security_arrival_matching_service.match_if_ready(
                         order_id=result.order_id,
                         exchange_id=result.exchange_id,
+                        order_book_id=result.order_book_id,
                         symbol=result.symbol,
                     )
                 )

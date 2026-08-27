@@ -19,6 +19,7 @@ def test_waits_when_current_subscription_has_no_ready_tick():
     result = service.match_if_ready(
         order_id="O-1",
         exchange_id="DCE",
+        order_book_id="JD2609",
         symbol="JD2609",
     )
 
@@ -45,6 +46,7 @@ def test_ready_tick_reuses_existing_matching_service():
     result = service.match_if_ready(
         order_id="O-1",
         exchange_id="DCE",
+        order_book_id="JD2609",
         symbol="JD2609",
     )
 

@@ -747,6 +747,13 @@ class MarketDataSubscriberWorker:
         try:
             self._start_subscription(codes)
         except Exception as exc:
+            # 连接建立后回执处理等后续步骤失败时，self._subscription可能尚未
+            # 赋值，但SDK客户端已经建立并注册了Hub会话；必须显式关闭，否则
+            # 本进程下一次重试会被自己遗留的会话以TokenInUse拒绝，形成自锁。
+            try:
+                self.feed_client.close_active_subscription()
+            except Exception:
+                logger.exception("行情失败连接的SDK会话关闭异常")
             with self._state_lock:
                 # start_tick_callbacks可能已经短暂启动过SDK线程；即使适配器关闭
                 # 超时，失败连接的晚到回调也必须立即失效。
@@ -760,7 +767,7 @@ class MarketDataSubscriberWorker:
                     self._reconnect_delay * 2,
                     self.reconnect_max_seconds,
                 )
-            logger.warning(
+            logger.exception(
                 "行情订阅建立失败，等待重连 error_type=%s",
                 type(exc).__name__,
             )

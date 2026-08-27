@@ -42,11 +42,13 @@ class OrderArrivalMatchingService:
         *,
         order_id: str,
         exchange_id: str,
+        order_book_id: str,
         symbol: str,
         order_snapshot: MatchingOrderCandidate | None = None,
     ) -> OrderArrivalMatchResult:
         event = self.live_market_snapshot_service.get_matching_event(
             exchange_id=exchange_id,
+            order_book_id=order_book_id,
             symbol=symbol,
         )
         if event is None:

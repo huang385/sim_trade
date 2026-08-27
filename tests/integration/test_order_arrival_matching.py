@@ -128,6 +128,7 @@ def test_accepted_order_matches_against_current_live_cached_tick(
         ).match_if_ready(
             order_id=order_id,
             exchange_id=integration_context.exchange_id,
+            order_book_id=integration_context.symbol,
             symbol=integration_context.symbol,
         )
 

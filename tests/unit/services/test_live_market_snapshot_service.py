@@ -46,6 +46,7 @@ def test_current_live_callback_is_returned_as_matching_event():
 
     event = service.get_matching_event(
         exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
         symbol=tick.symbol,
     )
 
@@ -53,6 +54,23 @@ def test_current_live_callback_is_returned_as_matching_event():
     assert event.stream_message_id == "123-0"
     assert event.parsed_event.event_id == tick.source_event_id
     assert event.parsed_event.tick == tick
+
+
+def test_uses_order_book_id_for_snapshot_key_when_symbol_is_different():
+    service, tick = make_service(subscribed_codes="603680.XSHG")
+    latest = service.redis_client.pipeline.return_value.execute.return_value[1]
+    latest["order_book_id"] = "603680.XSHG"
+    latest["symbol"] = "603680"
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id="603680.XSHG",
+        symbol="603680",
+    )
+
+    assert event is not None
+    hgetall_calls = service.redis_client.pipeline.return_value.hgetall.call_args_list
+    assert "603680.XSHG" in hgetall_calls[1].args[0]
 
 
 @pytest.mark.parametrize(
@@ -68,6 +86,7 @@ def test_unready_or_non_live_snapshot_is_not_used(overrides):
 
     assert service.get_matching_event(
         exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
         symbol=tick.symbol,
     ) is None
 
@@ -82,6 +101,7 @@ def test_old_generation_tick_is_used_when_contract_is_subscribed():
 
     event = service.get_matching_event(
         exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
         symbol=tick.symbol,
     )
 
@@ -97,6 +117,7 @@ def test_current_database_bootstrap_is_available_for_order_arrival():
 
     event = service.get_matching_event(
         exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
         symbol=tick.symbol,
     )
 
@@ -111,5 +132,6 @@ def test_missing_stream_message_id_is_not_used():
 
     assert service.get_matching_event(
         exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
         symbol=tick.symbol,
     ) is None

@@ -1,4 +1,5 @@
 import logging
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -26,17 +27,22 @@ class FakeThread:
 
 
 class FakeSdk:
+    """按 SDK 0.8.5 接口建模：listen 为阻塞式关键字参数消费循环。"""
+
     def __init__(self):
         self.subscriptions = []
         self.feed_handler = None
         self.status_handler = None
-        self.feed_thread = FakeThread()
         self.status_thread = FakeThread()
         self.closed = False
+        self.feed_started = threading.Event()
+        self._feed_stop = threading.Event()
 
-    def listen(self, handler):
-        self.feed_handler = handler
-        return self.feed_thread
+    def listen(self, *, tick_handler=None, bar_handler=None):
+        self.feed_handler = tick_handler
+        self.feed_started.set()
+        self._feed_stop.wait()
+        return None
 
     def listen_status(self, handler):
         self.status_handler = handler
@@ -50,7 +56,7 @@ class FakeSdk:
 
     def close(self):
         self.closed = True
-        self.feed_thread.alive = False
+        self._feed_stop.set()
         self.status_thread.alive = False
 
 
@@ -113,12 +119,12 @@ def test_missing_official_sdk_reports_exact_install_requirement(monkeypatch):
     )
     with pytest.raises(
         RemoteMarketDataSdkUnavailableError,
-        match="ymm-live-data-sdk==0.7.0",
+        match="ymm-live-data-sdk==0.8.5",
     ):
         create_remote_sdk_client(make_config())
 
 
-def test_listeners_start_before_batch_subscription_and_tick_is_copied():
+def test_batch_subscription_then_blocking_feed_listener_with_tick_copy():
     sdk = FakeSdk()
     events = []
     quotes = []
@@ -132,6 +138,7 @@ def test_listeners_start_before_batch_subscription_and_tick_is_copied():
         on_error=lambda error: events.append(error),
     )
 
+    assert sdk.feed_started.wait(timeout=2)
     assert sdk.feed_handler is not None
     assert sdk.status_handler is not None
     assert sdk.subscriptions == ["tick_AG2609", "tick_AU2608"]
@@ -161,6 +168,7 @@ def test_batch_tick_callback_is_expanded_to_individual_quotes():
         on_error=errors.append,
     )
 
+    assert sdk.feed_started.wait(timeout=2)
     sdk.feed_handler(
         (
             {
@@ -285,5 +293,25 @@ def test_stop_closes_sdk_and_joins_both_threads():
 
     assert sdk.closed is True
     assert not subscription.is_alive()
-    assert sdk.feed_thread.join_calls == [2]
     assert sdk.status_thread.join_calls == [2]
+
+def test_immediate_listen_failure_is_raised_and_client_is_closed():
+    sdk = FakeSdk()
+
+    def failing_listen(*, tick_handler=None, bar_handler=None):
+        raise RuntimeError("subscribed lanes require consumers")
+
+    sdk.listen = failing_listen
+    client = RemoteFeedClient(sdk)
+
+    with pytest.raises(RuntimeError, match="subscribed lanes require consumers"):
+        client.start_tick_callbacks(
+            {"AG2609"},
+            on_quote=Mock(),
+            on_subscribe=Mock(),
+            on_message=Mock(),
+            on_error=Mock(),
+        )
+
+    assert sdk.closed is True
+

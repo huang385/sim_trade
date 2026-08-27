@@ -8,7 +8,7 @@ from app.core.config import Settings, settings
 
 YMM_LIVE_DATA_SOURCE = "YMM_LIVE_DATA"
 YMM_LIVE_DATA_SDK_DISTRIBUTION = "ymm-live-data-sdk"
-YMM_LIVE_DATA_SDK_VERSION = "0.7.0"
+YMM_LIVE_DATA_SDK_VERSION = "0.8.5"
 
 
 class RemoteMarketDataConfigurationError(ValueError):
@@ -86,7 +86,7 @@ def load_remote_sdk_client_class():
         from ymm_live_data_sdk import LiveMarketDataClient
     except ModuleNotFoundError as exc:
         raise RemoteMarketDataSdkUnavailableError(
-            "未安装ymm-live-data-sdk==0.7.0；请从内部发布源安装客户端wheel"
+            "未安装ymm-live-data-sdk==0.8.5；请从内部发布源安装客户端wheel"
         ) from exc
     return LiveMarketDataClient
 
@@ -138,13 +138,18 @@ def _status_mapping(event: Any) -> dict[str, Any]:
 
 
 class YmmLiveDataSubscription:
-    """包装一个官方客户端、一个行情消费者和一个状态消费者。"""
+    """包装一个官方客户端、一个行情消费者和一个状态消费者。
+
+    SDK 0.8.5 起 listen() 变为阻塞式消费循环，必须由本包装在自己的
+    线程中启动；因此 feed_thread 允许在订阅成功后通过 attach_feed_thread
+    挂载。
+    """
 
     def __init__(
         self,
         *,
         sdk_client,
-        feed_thread: threading.Thread,
+        feed_thread: threading.Thread | None,
         status_thread: threading.Thread,
     ) -> None:
         self.sdk_client = sdk_client
@@ -153,6 +158,12 @@ class YmmLiveDataSubscription:
         self._codes: frozenset[str] = frozenset()
         self._closed = False
         self._lock = threading.RLock()
+
+    def attach_feed_thread(self, thread: threading.Thread) -> None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("YMM Live Data客户端已经关闭")
+            self.feed_thread = thread
 
     @staticmethod
     def _channels(codes) -> list[str]:
@@ -200,21 +211,27 @@ class YmmLiveDataSubscription:
         self.sdk_client.close()
 
     def join(self, timeout: float | None = None) -> None:
-        """等待两个SDK消费者退出；总等待时间不超过调用方给定值。"""
+        """等待行情/状态消费者退出；总等待时间不超过调用方给定值。"""
 
+        feed_thread = self.feed_thread
         if timeout is None:
-            self.feed_thread.join()
+            if feed_thread is not None:
+                feed_thread.join()
             self.status_thread.join()
             return
         half = max(timeout, 0) / 2
-        self.feed_thread.join(timeout=half)
+        if feed_thread is not None:
+            feed_thread.join(timeout=half)
         self.status_thread.join(timeout=half)
 
     def is_alive(self) -> bool:
         with self._lock:
             if self._closed:
                 return False
-        return self.feed_thread.is_alive() and self.status_thread.is_alive()
+            feed_thread = self.feed_thread
+        return self.status_thread.is_alive() and (
+            feed_thread is None or feed_thread.is_alive()
+        )
 
 
 class RemoteFeedClient:
@@ -248,7 +265,7 @@ class RemoteFeedClient:
         self.sdk_client = self._sdk_factory()
 
         def handle_tick(messages: Any) -> None:
-            """兼容 SDK 0.6 的单条回调和 0.7 的批量回调。"""
+            """SDK 0.8.5 固定按批次回调，仍然兼容单条消息。"""
 
             batch = messages if isinstance(messages, tuple) else (messages,)
             for message in batch:
@@ -292,23 +309,93 @@ class RemoteFeedClient:
             except Exception as exc:
                 on_error({"raw": {"code": type(exc).__name__}})
 
-        # 文档要求先消费状态，再消费行情，最后订阅，防止早期事件无人读取。
-        status_thread = self.sdk_client.listen_status(handle_status)
-        feed_thread = self.sdk_client.listen(handle_tick)
-        subscription = YmmLiveDataSubscription(
-            sdk_client=self.sdk_client,
-            feed_thread=feed_thread,
-            status_thread=status_thread,
-        )
+        # SDK 0.8.5 的调用顺序约束：先启动状态消费者，再提交订阅，最后启动
+        # 阻塞式 listen()（要求已订阅频道先有消费者，且 listen 会阻塞到客户端
+        # 关闭，因此必须在独立线程中运行）。
+        # 构造函数已经完成WSS连接并注册Hub会话；此后任何一步（消费者线程、
+        # 订阅替换、回执处理）失败都必须关闭客户端，否则本进程下一次重试
+        # 会被自己遗留的会话以TokenInUse拒绝，形成自锁。
+        subscription: YmmLiveDataSubscription | None = None
         try:
-            report = subscription.replace_codes(codes)
+            status_thread = self.sdk_client.listen_status(handle_status)
+            subscription = YmmLiveDataSubscription(
+                sdk_client=self.sdk_client,
+                feed_thread=None,
+                status_thread=status_thread,
+            )
+            try:
+                report = subscription.replace_codes(codes)
+            except Exception:
+                subscription.stop()
+                subscription.join(timeout=5)
+                raise
+
+            listen_entered = threading.Event()
+            listen_errors: list[BaseException] = []
+
+            def run_listen() -> None:
+                listen_entered.set()
+                try:
+                    self.sdk_client.listen(tick_handler=handle_tick)
+                except BaseException as exc:  # noqa: BLE001
+                    listen_errors.append(exc)
+
+            feed_thread = threading.Thread(
+                target=run_listen,
+                name="ymm-live-data-listen",
+                daemon=True,
+            )
+            feed_thread.start()
+            if not listen_entered.wait(timeout=5):
+                subscription.stop()
+                subscription.join(timeout=5)
+                raise RuntimeError("YMM Live Data行情消费者线程未在预期时间内启动")
+            subscription.attach_feed_thread(feed_thread)
+            self._subscription = subscription
+            try:
+                on_subscribe(report)
+            except Exception:
+                subscription.stop()
+                subscription.join(timeout=5)
+                raise
+            # listen 进入后立即失败（例如频道消费者校验）必须当场暴露，
+            # 不能假装订阅成功等待下一次重连。
+            feed_thread.join(timeout=0.1)
+            if not feed_thread.is_alive() and listen_errors:
+                subscription.stop()
+                subscription.join(timeout=5)
+                raise listen_errors[0]
+            return subscription
         except Exception:
-            subscription.stop()
-            subscription.join(timeout=5)
+            if subscription is not None:
+                try:
+                    subscription.stop()
+                finally:
+                    subscription.join(timeout=5)
+            elif self.sdk_client is not None:
+                try:
+                    self.sdk_client.close()
+                except Exception:
+                    pass
             raise
-        self._subscription = subscription
-        on_subscribe(report)
-        return subscription
+
+    def close_active_subscription(self) -> None:
+        """安全关闭当前活动订阅或已创建客户端，供失败清理路径复用。"""
+
+        subscription = self._subscription
+        self._subscription = None
+        if subscription is None:
+            client = self.sdk_client
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+            return
+        try:
+            subscription.stop()
+        finally:
+            subscription.join(timeout=5)
 
     def replace_tick_subscriptions(
         self,

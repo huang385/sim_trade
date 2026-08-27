@@ -24,6 +24,7 @@ class CashSecurityOrderEventResult:
     event_type: str
     order_id: str
     exchange_id: str
+    order_book_id: str
     symbol: str
     action: str
     order_snapshot: None = None
@@ -101,7 +102,7 @@ class CashSecurityOrderEventService:
         symbol = str(payload["symbol"]).strip()
         if order is None:
             return CashSecurityOrderEventResult(
-                event_id, event_type, order_id, exchange_id, symbol, "ORDER_NOT_FOUND"
+                event_id, event_type, order_id, exchange_id, "", symbol, "ORDER_NOT_FOUND"
             )
         if (
             order.instrument_type not in {"STOCK", "CONVERTIBLE_BOND"}
@@ -125,7 +126,7 @@ class CashSecurityOrderEventService:
                 processed_ttl_seconds=self.processed_ttl_seconds,
             )
             return CashSecurityOrderEventResult(
-                event_id, event_type, order_id, exchange_id, symbol,
+                event_id, event_type, order_id, exchange_id, getattr(order, "order_book_id", order.symbol), symbol,
                 "REMOVED",
             )
         written = self.active_order_index.add_active_order(
@@ -134,6 +135,6 @@ class CashSecurityOrderEventService:
             processed_ttl_seconds=self.processed_ttl_seconds,
         )
         return CashSecurityOrderEventResult(
-            event_id, event_type, order_id, exchange_id, symbol,
+            event_id, event_type, order_id, exchange_id, getattr(order, "order_book_id", order.symbol), symbol,
             "REGISTERED" if written else "DUPLICATE",
         )

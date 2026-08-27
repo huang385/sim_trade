@@ -83,6 +83,7 @@ def test_counterparty_uses_acceptance_opposite_price(direction, expected):
     resolver, snapshots = make_resolver(make_event())
     result = resolver.resolve(
         request=make_request(OrderType.COUNTERPARTY, direction),
+        order_book_id="JD2609",
         price_tick=Decimal("1"),
         trading_day=TRADING_DAY,
     )
@@ -96,6 +97,7 @@ def test_last_price_is_fixed_from_one_snapshot():
     resolver, snapshots = make_resolver(make_event())
     result = resolver.resolve(
         request=make_request(OrderType.LAST),
+        order_book_id="JD2609",
         price_tick=Decimal("1"),
         trading_day=TRADING_DAY,
     )
@@ -112,6 +114,7 @@ def test_market_price_uses_directional_two_percent_protection(direction, expecte
     resolver, _ = make_resolver(make_event())
     result = resolver.resolve(
         request=make_request(OrderType.MARKET, direction),
+        order_book_id="JD2609",
         price_tick=Decimal("1"),
         trading_day=TRADING_DAY,
     )
@@ -132,6 +135,7 @@ def test_required_snapshot_price_must_exist(order_type, field, code):
     with pytest.raises(BusinessValidationError) as exc_info:
         resolver.resolve(
             request=make_request(order_type),
+            order_book_id="JD2609",
             price_tick=Decimal("1"),
             trading_day=TRADING_DAY,
         )
@@ -146,6 +150,7 @@ def test_old_snapshot_from_current_subscription_is_accepted():
     )
     result = resolver.resolve(
         request=make_request(OrderType.COUNTERPARTY),
+        order_book_id="JD2609",
         price_tick=Decimal("1"),
         trading_day=TRADING_DAY,
     )
@@ -159,6 +164,7 @@ def test_future_timestamp_snapshot_is_rejected():
     with pytest.raises(BusinessValidationError) as exc_info:
         resolver.resolve(
             request=make_request(OrderType.COUNTERPARTY),
+            order_book_id="JD2609",
             price_tick=Decimal("1"),
             trading_day=TRADING_DAY,
         )
@@ -169,6 +175,7 @@ def test_limit_does_not_read_market():
     resolver, snapshots = make_resolver(make_event())
     result = resolver.resolve(
         request=make_request(OrderType.LIMIT, limit_price=Decimal("4350")),
+        order_book_id="JD2609",
         price_tick=Decimal("1"),
         trading_day=TRADING_DAY,
     )

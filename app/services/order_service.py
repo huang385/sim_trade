@@ -412,6 +412,7 @@ class OrderService:
                     raise RuntimeError("非限价委托价格解析服务未配置")
                 pricing = self.order_price_resolver.resolve(
                     request=request,
+                    order_book_id=rules.instrument.order_book_id,
                     price_tick=Decimal(rules.instrument.price_tick),
                     trading_day=trading_day,
                 )

@@ -44,25 +44,27 @@ class LiveMarketSnapshotService:
         self,
         *,
         exchange_id: str,
+        order_book_id: str,
         symbol: str,
     ) -> LiveMatchingEvent | None:
         """条件全部满足时返回撮合事件，否则安全等待下一条行情。"""
 
         normalized_exchange = normalize_code(exchange_id)
+        normalized_order_book_id = normalize_code(order_book_id)
         normalized_symbol = normalize_code(symbol)
         pipeline = self.redis_client.pipeline(transaction=False)
         pipeline.hgetall(YMM_LIVE_DATA_STATUS_KEY)
         pipeline.hgetall(
             market_latest_key(
                 normalized_exchange,
-                normalized_symbol,
+                normalized_order_book_id,
             )
         )
         status, latest = pipeline.execute()
 
         if status.get("status") != "RUNNING":
             return None
-        if normalized_symbol not in self._subscribed_codes(status):
+        if normalized_order_book_id not in self._subscribed_codes(status):
             return None
         # 不再比较行情 Hash 上的订阅代次：合约仍在当前订阅列表、行情源
         # RUNNING 即说明它处于活跃订阅中；低活跃合约没有新 Tick 时，其
@@ -86,6 +88,7 @@ class LiveMarketSnapshotService:
             return None
         if (
             tick.exchange_id != normalized_exchange
+            or tick.order_book_id != normalized_order_book_id
             or tick.symbol != normalized_symbol
         ):
             return None

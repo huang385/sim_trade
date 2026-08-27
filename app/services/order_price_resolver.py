@@ -48,6 +48,7 @@ class OrderPriceResolver:
         self,
         *,
         request: OrderCreateRequest,
+        order_book_id: str,
         price_tick: Decimal,
         trading_day: date,
     ) -> ResolvedOrderPrice:
@@ -60,6 +61,7 @@ class OrderPriceResolver:
 
         event = self.live_market_snapshot_service.get_matching_event(
             exchange_id=request.exchange_id,
+            order_book_id=order_book_id,
             symbol=request.symbol,
         )
         if event is None:
