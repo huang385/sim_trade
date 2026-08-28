@@ -387,6 +387,8 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
     assert len(account_events) == 1
     account_payload = json.loads(account_events[0][6])["payload"]
     assert account_payload["source_account_fact_version"] == "70"
+    # 桌面端资金页依赖实时手续费更新，daily_commission随账户PnL事件下发。
+    assert "daily_commission" in account_payload
     assert {
         "risk_state",
         "risk_ratio",
@@ -394,7 +396,6 @@ def test_cycle_snapshot_hash_version_and_event_share_one_lua_script():
         "cash_balance",
         "used_margin",
         "daily_close_pnl",
-        "daily_commission",
     }.isdisjoint(account_payload)
     risk_events = [
         operation

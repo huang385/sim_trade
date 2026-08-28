@@ -28,7 +28,19 @@ def test_publish_passes_decimal_strings_and_returns_result():
     assert payload["ingest_type"] == "LIVE_CALLBACK"
     assert arguments[1] == 2
     assert "processed_market_tick:" not in " ".join(map(str, arguments))
-    assert "HGET" not in arguments[0]
+    # 快照与订阅 Tick 的先后到达必须在 Lua 内原子比较，防止旧快照覆盖
+    # 已落 Redis 的实时行情。
+    assert "IGNORED_STALE" in arguments[0]
+    assert "HGET" in arguments[0]
+
+
+def test_publish_returns_ignored_stale_for_late_database_snapshot():
+    redis_client = Mock()
+    redis_client.eval.return_value = "IGNORED_STALE"
+
+    result = MarketTickStore(redis_client).publish(normalize())
+
+    assert result == MarketTickStoreResult.IGNORED_STALE
 
 
 def test_option_latest_hash_uses_order_book_id_not_internal_symbol():

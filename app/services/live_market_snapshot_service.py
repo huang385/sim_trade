@@ -46,6 +46,7 @@ class LiveMarketSnapshotService:
         exchange_id: str,
         order_book_id: str,
         symbol: str,
+        allow_bootstrap_snapshot: bool = False,
     ) -> LiveMatchingEvent | None:
         """条件全部满足时返回撮合事件，否则安全等待下一条行情。"""
 
@@ -62,10 +63,10 @@ class LiveMarketSnapshotService:
         )
         status, latest = pipeline.execute()
 
-        if status.get("status") != "RUNNING":
-            return None
-        if normalized_order_book_id not in self._subscribed_codes(status):
-            return None
+        is_active_subscription = (
+            status.get("status") == "RUNNING"
+            and normalized_order_book_id in self._subscribed_codes(status)
+        )
         # 不再比较行情 Hash 上的订阅代次：合约仍在当前订阅列表、行情源
         # RUNNING 即说明它处于活跃订阅中；低活跃合约没有新 Tick 时，其
         # 最新盘口仍是上游最后推送的那条有效行情，可以直接用于委托定价
@@ -77,6 +78,17 @@ class LiveMarketSnapshotService:
             ("YMM_LIVE_DATA", MarketTickIngestType.LIVE_CALLBACK.value),
             ("YMM_DATA_SDK", MarketTickIngestType.REST_SNAPSHOT.value),
         }:
+            return None
+        is_bootstrap_snapshot = (
+            latest.get("source") == "YMM_DATA_SDK"
+            and latest.get("ingest_type")
+            == MarketTickIngestType.REST_SNAPSHOT.value
+        )
+        # 同步下单快照已经通过统一校验并写入行情链路。在订阅建立的短暂
+        # 空窗内仅允许它作为显式兜底；遗留 LIVE Tick 仍必须有活跃订阅。
+        if not is_active_subscription and not (
+            allow_bootstrap_snapshot and is_bootstrap_snapshot
+        ):
             return None
 
         stream_message_id = latest.get("stream_message_id", "").strip()

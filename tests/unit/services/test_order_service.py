@@ -13,6 +13,7 @@ from app.common.exceptions import (
     DataAccessError,
     ResourceConflictError,
     ResourceNotFoundError,
+    ServiceUnavailableError,
 )
 from app.enums.order_enums import OrderDirection
 from app.models.account import Account
@@ -245,6 +246,79 @@ def test_market_order_freezes_with_persisted_protection_price():
     )
     assert event["order_type"] == "MARKET"
     assert event["resolved_price"] == "3600.000000"
+
+
+def test_missing_market_price_bootstraps_snapshot_then_accepts_once():
+    db = Mock()
+    order_repository = Mock()
+    account_repository = Mock()
+    rule_query_service = Mock()
+    outbox_repository = Mock()
+    resolver = Mock()
+    resolver.resolve.side_effect = [
+        ServiceUnavailableError(
+            "无实时行情",
+            error_code="ORDER_PRICE_MARKET_DATA_UNAVAILABLE",
+        ),
+        ResolvedOrderPrice(
+            resolved_price=Decimal("3600"),
+            market_protection_price=Decimal("3600"),
+            snapshot_time=None,
+            snapshot_source="YMM_DATA_SDK",
+            snapshot_event_id="SNAPSHOT-1",
+            snapshot_stream_message_id="2-0",
+            bid1=Decimal("3599"),
+            bid_volume1=3,
+            ask1=Decimal("3600"),
+            ask_volume1=2,
+            last_price=Decimal("3598"),
+        ),
+    ]
+    account = make_account()
+    created_order = SimpleNamespace(order_id="O20260717000001")
+    order_repository.get_by_client_order_id.side_effect = [None, None]
+    order_repository.create.return_value = created_order
+    account_repository.get_by_account_id.return_value = account
+    account_repository.get_by_account_id_for_update.return_value = account
+    rules = make_rules()
+    rule_query_service.get_order_rules.return_value = rules
+    service = make_service(
+        order_repository=order_repository,
+        account_repository=account_repository,
+        rule_query_service=rule_query_service,
+        outbox_repository=outbox_repository,
+        order_price_resolver=resolver,
+    )
+    mapping = Mock()
+    mapping.to_source.side_effect = lambda code: f"SRC-{code}"
+    mapping.to_internal.side_effect = lambda code: code.removeprefix("SRC-")
+    mapping_service = Mock()
+    mapping_service.build_snapshot.return_value = mapping
+    snapshot_client = Mock()
+    snapshot_client.fetch_latest_many.return_value = {
+        "SRC-RB2610": {"order_book_id": "SRC-RB2610"}
+    }
+    market_data_service = Mock()
+    service.market_pre_subscription_store = Mock()
+    service.database_snapshot_client = snapshot_client
+    service.market_data_service = market_data_service
+    service.market_data_code_mapping_service = mapping_service
+
+    result = service.create_order(
+        db=db,
+        request=make_request(order_type="MARKET", limit_price=None),
+    )
+
+    assert result is created_order
+    service.market_pre_subscription_store.request_codes.assert_called_once_with(
+        account_id="A001",
+        codes={"RB2610"},
+    )
+    market_data_service.process.assert_called_once()
+    assert market_data_service.process.call_args.kwargs["data"]["order_book_id"] == "RB2610"
+    assert resolver.resolve.call_count == 2
+    assert resolver.resolve.call_args_list[1].kwargs["allow_bootstrap_snapshot"] is True
+    assert order_repository.create.call_args.kwargs["status"] == "ACCEPTED"
 
 
 @pytest.mark.parametrize(

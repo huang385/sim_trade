@@ -16,3 +16,5 @@ PyJWT==2.10.1
 websockets==15.0.1
 zstandard==0.25.0
 ymm-live-data-sdk==0.8.5
+# 数据库行情 SDK 通过 docs/reference 中的本地 wheel 安装，版本需与部署环境一致。
+ymm-data-sdk==0.9.4

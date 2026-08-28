@@ -125,6 +125,25 @@ def test_current_database_bootstrap_is_available_for_order_arrival():
     assert event.parsed_event.tick.source == "YMM_DATA_SDK"
 
 
+def test_explicit_bootstrap_snapshot_can_price_before_subscription_is_ready():
+    service, tick = make_service(
+        status_value="DISCONNECTED",
+        subscribed_codes="",
+        ingest_type="REST_SNAPSHOT",
+        source="YMM_DATA_SDK",
+    )
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
+        symbol=tick.symbol,
+        allow_bootstrap_snapshot=True,
+    )
+
+    assert event is not None
+    assert event.parsed_event.tick.source == "YMM_DATA_SDK"
+
+
 def test_missing_stream_message_id_is_not_used():
     service, tick = make_service()
     pipeline = service.redis_client.pipeline.return_value

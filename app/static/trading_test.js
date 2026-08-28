@@ -212,7 +212,11 @@ async function apiFetch(path, options = {}, allowRefresh = true) {
             || validationMessage
             || data?.detail
             || `请求失败（HTTP ${response.status}）`;
-        throw new Error(message);
+        const error = new Error(message);
+        // 业务错误码用于下单页识别“行情已登记预订阅、可等待后重试”的
+        // 正常异步准备状态；其他失败仍按原样展示给用户。
+        error.errorCode = data?.error_code || null;
+        throw error;
     }
     return data;
 }
@@ -1053,7 +1057,14 @@ async function submitOrder(event) {
     }
 
     try {
-        if (!isCashSecurity) await ensureOptionMarketReady(payload);
+        // 限价期货单可以先落库，再由活动订单索引维持行情订阅；非限价单
+        // 必须在受理前从实时盘口定价。期权即使是限价卖开也依赖期权和标的
+        // 行情计算保证金，因此始终先准备行情。
+        const needsMarketPreparation = !isCashSecurity && (
+            OPTION_CODE_PATTERN.test(payload.symbol)
+            || payload.order_type !== "LIMIT"
+        );
+        if (needsMarketPreparation) await ensureDerivativeMarketReady(payload);
         elements.submitOrder.textContent = "正在提交…";
         // Derivative orders continue to use apiFetch("/api/orders", ...); cash
         // products use their explicitly separated endpoints below.
@@ -1062,10 +1073,27 @@ async function submitOrder(event) {
             : product === "CONVERTIBLE_BOND"
                 ? "/api/convertible-bond/orders"
                 : "/api/orders";
-        const order = await apiFetch(endpoint, {
+        const postOrder = () => apiFetch(endpoint, {
             method: "POST",
             body: JSON.stringify(payload),
         });
+        let order;
+        try {
+            order = await postOrder();
+        } catch (error) {
+            if (
+                !needsMarketPreparation
+                || error.errorCode !== "ORDER_MARKET_DATA_PREPARING"
+            ) {
+                throw error;
+            }
+            // 状态查询到提交之间若行情连接刚好重连，服务端会安全地拒绝本次
+            // 定价并续租预订阅。页面重新等待就绪后以相同 client_order_id
+            // 自动补发一次，用户无需第二次点击。
+            await ensureDerivativeMarketReady(payload);
+            elements.submitOrder.textContent = "正在提交订单…";
+            order = await postOrder();
+        }
         showToast(
             `订单已接收：${order.order_id}；类型 ${order.order_type}；` +
             `解析价 ${formatPrice(order.resolved_price)}；均价 ${formatPrice(order.average_price)}；` +
@@ -1114,12 +1142,11 @@ function delay(milliseconds) {
     return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
-async function ensureOptionMarketReady(payload) {
-    // 普通期货不需要下单前准备。项目内部商品期权和股指期权都采用
-    // “合约月份-C/P-行权价”格式，因此可以统一走同一个准备接口。
-    if (!OPTION_CODE_PATTERN.test(payload.symbol)) return;
-
-    elements.submitOrder.textContent = "正在准备期权行情…";
+async function ensureDerivativeMarketReady(payload) {
+    // API 会根据合约类型决定订阅集合：普通期货只订阅自身；期权订阅期权和
+    // 标的。这里持续轮询到行情 Worker 已确认订阅且快照/首个 Tick 可用，
+    // 用户只需点击一次，随后沿用原 client_order_id 提交订单。
+    elements.submitOrder.textContent = "正在准备行情…";
     const preparation = {
         account_id: payload.account_id,
         exchange_id: payload.exchange_id,
@@ -1145,7 +1172,7 @@ async function ensureOptionMarketReady(payload) {
     }
     if (status.status !== "READY") {
         throw new Error(
-            `等待期权行情超时，尚未就绪：${status.requested_codes
+            `等待行情超时，尚未就绪：${status.requested_codes
                 .filter((code) => !status.ready_codes.includes(code))
                 .join("、")}`,
         );

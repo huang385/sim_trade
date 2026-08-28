@@ -630,9 +630,11 @@ class RealtimePnlStore:
                 f"{item.updated_at.isoformat()}"
             )
             account_payload = _mapping(item)
-            # 账户PnL事件只拥有实时派生金额；风险状态、风险率和风险可用
+            # 账户PnL事件主要携带实时派生金额；风险状态、风险率和风险可用
             # 资金由同周期的RISK_STATE_CHANGED独占，数据库基础事实则由
-            # ACCOUNT_FACT_UPDATED负责。Hash仍保存完整估值供严格快照读取。
+            # ACCOUNT_FACT_UPDATED负责。daily_commission虽然属于基础事实，
+            # 但同周期写入Hash且桌面端资金页依赖实时更新，随事件一并下发。
+            # Hash仍保存完整估值供严格快照读取。
             pnl_event_payload = {
                 field: account_payload[field]
                 for field in (
@@ -640,6 +642,7 @@ class RealtimePnlStore:
                     "cumulative_unrealized_pnl",
                     "daily_position_pnl",
                     "daily_pnl",
+                    "daily_commission",
                     "cumulative_net_pnl",
                     "equity",
                     "stock_market_value",

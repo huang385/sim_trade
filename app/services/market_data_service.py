@@ -141,6 +141,13 @@ class MarketDataService:
             tick,
             subscription_generation=subscription_generation,
         )
+        if store_result == MarketTickStoreResult.IGNORED_STALE:
+            # 晚到快照发现 Redis 已有更可靠行情时不写新事件；这是正常的
+            # 竞争结果，调用方随后会从 Redis 读取最终胜出的行情。
+            return MarketDataProcessResult(
+                action=MarketDataProcessAction.PUBLISHED,
+                tick=tick,
+            )
         if store_result != MarketTickStoreResult.PUBLISHED:
             raise RuntimeError(f"未知行情存储结果: {store_result}")
         return MarketDataProcessResult(action=MarketDataProcessAction.PUBLISHED, tick=tick)

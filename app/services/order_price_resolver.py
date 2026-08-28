@@ -51,6 +51,7 @@ class OrderPriceResolver:
         order_book_id: str,
         price_tick: Decimal,
         trading_day: date,
+        allow_bootstrap_snapshot: bool = False,
     ) -> ResolvedOrderPrice:
         if request.order_type == OrderType.LIMIT:
             assert request.limit_price is not None
@@ -59,11 +60,14 @@ class OrderPriceResolver:
                 submitted_limit_price=request.limit_price,
             )
 
-        event = self.live_market_snapshot_service.get_matching_event(
-            exchange_id=request.exchange_id,
-            order_book_id=order_book_id,
-            symbol=request.symbol,
-        )
+        event_kwargs = {
+            "exchange_id": request.exchange_id,
+            "order_book_id": order_book_id,
+            "symbol": request.symbol,
+        }
+        if allow_bootstrap_snapshot:
+            event_kwargs["allow_bootstrap_snapshot"] = True
+        event = self.live_market_snapshot_service.get_matching_event(**event_kwargs)
         if event is None:
             raise ServiceUnavailableError(
                 "当前没有可用于委托定价的有效实时行情",

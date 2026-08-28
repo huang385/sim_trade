@@ -107,7 +107,7 @@ class YmmSettlementLastTickProvider:
                     import ymm_data_sdk as sdk_module
                 except ModuleNotFoundError as exc:
                     raise SettlementLastTickSdkUnavailableError(
-                        "未安装 ymm-data-sdk==0.9.1"
+                        "未安装 ymm-data-sdk==0.9.4"
                     ) from exc
                 self.sdk = sdk_module
             self.mode = "TS" if self.mode.lower() == "ts" else self.mode.lower()

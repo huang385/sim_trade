@@ -16,11 +16,29 @@ from app.schemas.market_tick_schema import MarketTick
 
 class MarketTickStoreResult(str, Enum):
     PUBLISHED = "PUBLISHED"
+    IGNORED_STALE = "IGNORED_STALE"
 
 
 # Redis 5 兼容 Lua：单行情 Worker 已保证 WebSocket Tick 严格有序且不重复，
 # 因此不再读取旧行情做二次判断，只保留最新 Hash 与 Stream 的原子双写。
 PUBLISH_MARKET_TICK_SCRIPT = """
+-- REST 快照与订阅回调可能并发到达。快照不能覆盖已经更晚的实时
+-- Tick；同一事件时间也优先保留订阅回调。
+local incoming_ingest_type = ''
+local incoming_time = ''
+for index = 8, #ARGV, 2 do
+    if ARGV[index] == 'ingest_type' then
+        incoming_ingest_type = ARGV[index + 1]
+    elseif ARGV[index] == 'event_time' then
+        incoming_time = ARGV[index + 1]
+    end
+end
+if incoming_ingest_type == 'REST_SNAPSHOT' then
+    local current_time = redis.call('HGET', KEYS[1], 'event_time')
+    if current_time and current_time ~= '' and current_time >= incoming_time then
+        return 'IGNORED_STALE'
+    end
+end
 local stream_message_id = redis.call(
     'XADD', KEYS[2], '*',
     'event_id', ARGV[1],

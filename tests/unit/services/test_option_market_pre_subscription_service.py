@@ -41,7 +41,14 @@ def make_instrument(
     )
 
 
-def make_service(option, underlying, *, snapshots=None, requests=None):
+def make_service(
+    option,
+    underlying,
+    *,
+    snapshots=None,
+    requests=None,
+    live_snapshot_service=None,
+):
     repository = Mock()
     repository.get.return_value = option
     repository.get_by_id.return_value = underlying
@@ -56,6 +63,7 @@ def make_service(option, underlying, *, snapshots=None, requests=None):
         pre_subscription_store=store,
         market_tick_store=tick_store,
         permission_service=permission,
+        live_market_snapshot_service=live_snapshot_service,
     )
     return service, repository, store, tick_store, permission
 
@@ -245,25 +253,78 @@ def test_status_is_not_requested_when_account_has_no_active_pair():
     assert result.expires_at is None
 
 
-def test_non_option_instrument_is_rejected():
+def test_prepare_subscribes_plain_future_itself():
     future = make_instrument(
         instrument_id=1,
         order_book_id="JD2609",
         exchange_id="DCE",
         instrument_type=InstrumentType.FUTURES.value,
     )
-    service, _, store, _, _ = make_service(future, None)
+    service, _, store, tick_store, permission = make_service(
+        future,
+        None,
+        snapshots={("DCE", "JD2609"): {"last_price": "4000"}},
+    )
 
-    with pytest.raises(BusinessRuleError) as caught:
-        service.get_status(
-            Mock(),
+    result = service.prepare(
+        Mock(),
+        account=make_account(),
+        request=OptionMarketPrepareRequest(
             account_id="A001",
             exchange_id="DCE",
             symbol="JD2609",
-        )
+            direction="BUY",
+            offset_flag="OPEN",
+        ),
+    )
 
-    assert caught.value.error_code == "OPTION_PRE_SUBSCRIPTION_ONLY"
-    store.get_account_requests.assert_not_called()
+    assert result.status == MarketPreparationStatus.READY
+    assert result.requested_codes == ["JD2609"]
+    assert result.ready_codes == ["JD2609"]
+    store.request_codes.assert_called_once_with(
+        account_id="A001",
+        codes=frozenset({"JD2609"}),
+    )
+    tick_store.get_latest_many.assert_called_once_with({("DCE", "JD2609")})
+    permission.validate.assert_not_called()
+
+
+def test_ready_status_uses_current_subscription_snapshot_when_available():
+    future = make_instrument(
+        instrument_id=1,
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        instrument_type=InstrumentType.FUTURES.value,
+    )
+    live_snapshot_service = Mock()
+    live_snapshot_service.get_matching_event.return_value = None
+    service, _, _, tick_store, _ = make_service(
+        future,
+        None,
+        snapshots={("DCE", "JD2609"): {"last_price": "4000"}},
+        live_snapshot_service=live_snapshot_service,
+    )
+
+    result = service.prepare(
+        Mock(),
+        account=make_account(),
+        request=OptionMarketPrepareRequest(
+            account_id="A001",
+            exchange_id="DCE",
+            symbol="JD2609",
+            direction="BUY",
+            offset_flag="OPEN",
+        ),
+    )
+
+    assert result.status == MarketPreparationStatus.WAITING_MARKET_DATA
+    assert result.ready_codes == []
+    live_snapshot_service.get_matching_event.assert_called_once_with(
+        exchange_id="DCE",
+        order_book_id="JD2609",
+        symbol="JD2609",
+    )
+    tick_store.get_latest_many.assert_not_called()
 
 
 def test_option_and_underlying_type_mismatch_is_rejected():

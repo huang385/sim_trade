@@ -72,6 +72,15 @@ from app.services.option_market_price_service import (
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,
 )
+from app.infrastructure.market_data.database_snapshot_client import (
+    YMM_DATABASE_SOURCE,
+    YmmDatabaseSnapshotClient,
+)
+from app.schemas.market_tick_schema import MarketTickIngestType
+from app.services.market_data_code_mapping_service import (
+    MarketDataCodeMappingService,
+)
+from app.services.market_data_service import MarketDataService
 from app.services.option_premium_calculator import OptionPremiumCalculator
 from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
@@ -174,6 +183,9 @@ class OrderService:
         settlement_gate_service: SettlementGateService | None = None,
         order_price_resolver: OrderPriceResolver | None = None,
         product_registry: ProductStrategyRegistry | None = None,
+        database_snapshot_client: YmmDatabaseSnapshotClient | None = None,
+        market_data_service: MarketDataService | None = None,
+        market_data_code_mapping_service: MarketDataCodeMappingService | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
         # 也便于未来迁移到更完整的依赖注入容器。
@@ -217,6 +229,9 @@ class OrderService:
         )
         self.order_price_resolver = order_price_resolver
         self.product_registry = product_registry or product_strategy_registry
+        self.database_snapshot_client = database_snapshot_client
+        self.market_data_service = market_data_service
+        self.market_data_code_mapping_service = market_data_code_mapping_service
 
     def _get_option_margin_prices(
         self,
@@ -278,6 +293,128 @@ class OrderService:
                 "期权和标的行情正在准备，请稍后重试下单",
                 error_code="OPTION_MARKET_DATA_PREPARING",
             ) from exc
+
+    def _prepare_missing_order_price_market_data(
+        self,
+        *,
+        request: OrderCreateRequest,
+        rules: OrderReferenceRules,
+        authorized_account: Account,
+    ) -> None:
+        """登记非限价单的临时行情需求，并中止本次尚未落库的下单。
+
+        普通期货的首笔非限价单在被受理前还不是活动订单，不能依赖活动
+        订单索引触发行情订阅。这里把合约写入短 TTL 的预订阅集合，由唯一的
+        行情订阅 Worker 增订阅并补取快照。期权卖出开仓后续还要计算标的保证金，
+        因而期权一并登记标的合约。
+        """
+
+        self._request_order_market_data(
+            request=request,
+            rules=rules,
+            authorized_account=authorized_account,
+        )
+        raise ServiceUnavailableError(
+            "行情正在准备，请稍后重试下单",
+            error_code="ORDER_MARKET_DATA_PREPARING",
+        )
+
+    def _request_order_market_data(
+        self,
+        *,
+        request: OrderCreateRequest,
+        rules: OrderReferenceRules,
+        authorized_account: Account,
+    ) -> set[str]:
+        """登记行情需求并返回必须准备的内部 order_book_id 集合。"""
+
+        if self.market_pre_subscription_store is None:
+            raise ServiceUnavailableError(
+                "当前没有可用于委托定价的有效实时行情",
+                error_code="ORDER_PRICE_MARKET_DATA_UNAVAILABLE",
+            )
+
+        instrument = rules.instrument
+        codes = {instrument.order_book_id}
+        if instrument.instrument_type in {
+            InstrumentType.FUTURES_OPTION.value,
+            InstrumentType.INDEX_OPTION.value,
+        }:
+            # 预订阅本身不能绕过期权权限；否则无权账户可以利用该入口长期占用
+            # 行情配额。普通期货没有额外期权权限校验。
+            self.option_permission_service.validate(
+                account=authorized_account,
+                instrument=instrument,
+                direction=request.direction,
+                offset_flag=request.offset_flag,
+            )
+            if rules.underlying_instrument is not None:
+                codes.add(rules.underlying_instrument.order_book_id)
+        try:
+            self.market_pre_subscription_store.request_codes(
+                account_id=request.account_id,
+                codes=codes,
+            )
+        except RedisError as exc:
+            raise ServiceUnavailableError(
+                "行情预订阅服务暂不可用",
+                error_code="MARKET_PRE_SUBSCRIPTION_UNAVAILABLE",
+            ) from exc
+        return codes
+
+    def _bootstrap_order_market_data(
+        self,
+        db: Session,
+        *,
+        request: OrderCreateRequest,
+        rules: OrderReferenceRules,
+        authorized_account: Account,
+    ) -> bool:
+        """首次非限价下单同步补快照，并交给统一行情处理链路。"""
+
+        codes = self._request_order_market_data(
+            request=request,
+            rules=rules,
+            authorized_account=authorized_account,
+        )
+        if (
+            self.database_snapshot_client is None
+            or self.market_data_service is None
+            or self.market_data_code_mapping_service is None
+        ):
+            return False
+        try:
+            mapping = self.market_data_code_mapping_service.build_snapshot(
+                db,
+                codes,
+            )
+            snapshots = self.database_snapshot_client.fetch_latest_many(
+                mapping.to_source(code) for code in codes
+            )
+            if not snapshots:
+                return False
+            for source_code, snapshot in snapshots.items():
+                internal_code = mapping.to_internal(source_code)
+                if internal_code not in codes:
+                    continue
+                data = dict(snapshot)
+                data["order_book_id"] = internal_code
+                data["channel"] = f"tick_{internal_code}"
+                self.market_data_service.process(
+                    db,
+                    data=data,
+                    raw={
+                        "action": "feed",
+                        "channel": f"tick_{internal_code}",
+                    },
+                    ingest_type=MarketTickIngestType.REST_SNAPSHOT,
+                    source=YMM_DATABASE_SOURCE,
+                )
+        except Exception:
+            # SDK 或快照数据暂不可用时，订阅需求仍已登记；调用方保留现有
+            # “准备中”语义，前端会自动等待订阅完成后重试。
+            return False
+        return True
 
     def create_order(
         self,
@@ -410,12 +547,41 @@ class OrderService:
             else:
                 if self.order_price_resolver is None:
                     raise RuntimeError("非限价委托价格解析服务未配置")
-                pricing = self.order_price_resolver.resolve(
-                    request=request,
-                    order_book_id=rules.instrument.order_book_id,
-                    price_tick=Decimal(rules.instrument.price_tick),
-                    trading_day=trading_day,
-                )
+                try:
+                    pricing = self.order_price_resolver.resolve(
+                        request=request,
+                        order_book_id=rules.instrument.order_book_id,
+                        price_tick=Decimal(rules.instrument.price_tick),
+                        trading_day=trading_day,
+                    )
+                except ServiceUnavailableError as exc:
+                    if exc.error_code != "ORDER_PRICE_MARKET_DATA_UNAVAILABLE":
+                        raise
+                    if not self._bootstrap_order_market_data(
+                        db,
+                        request=request,
+                        rules=rules,
+                        authorized_account=authorized_account,
+                    ):
+                        raise ServiceUnavailableError(
+                            "行情正在准备，系统将在后台继续订阅",
+                            error_code="ORDER_MARKET_DATA_PREPARING",
+                        ) from exc
+                    try:
+                        pricing = self.order_price_resolver.resolve(
+                            request=request,
+                            order_book_id=rules.instrument.order_book_id,
+                            price_tick=Decimal(rules.instrument.price_tick),
+                            trading_day=trading_day,
+                            allow_bootstrap_snapshot=True,
+                        )
+                    except ServiceUnavailableError as retry_exc:
+                        if retry_exc.error_code != "ORDER_PRICE_MARKET_DATA_UNAVAILABLE":
+                            raise
+                        raise ServiceUnavailableError(
+                            "行情正在准备，系统将在后台继续订阅",
+                            error_code="ORDER_MARKET_DATA_PREPARING",
+                        ) from retry_exc
             resolved_price = pricing.resolved_price
 
             # 校验订单类型、开平标志、价格档位和数量范围。
@@ -1234,7 +1400,22 @@ def get_order_service() -> OrderService:
     from app.infrastructure.market_data.market_tick_store import (
         MarketTickStore,
     )
+    from app.infrastructure.market_data.database_snapshot_client import (
+        YmmDatabaseSnapshotClient,
+    )
+    from app.repositories.instrument_repository import InstrumentRepository
+    from app.repositories.instrument_market_data_mapping_repository import (
+        InstrumentMarketDataMappingRepository,
+    )
     from app.core.config import settings
+    from app.services.market_data_code_mapping_service import (
+        MarketDataCodeMappingService,
+    )
+    from app.services.market_data_service import MarketDataService
+    from app.services.market_tick_normalizer import MarketTickNormalizer
+    from app.services.market_tick_validation_service import (
+        MarketTickValidationService,
+    )
     from app.services.trading_day_service import get_trading_day_service
     from app.services.live_market_snapshot_service import LiveMarketSnapshotService
 
@@ -1264,5 +1445,15 @@ def get_order_service() -> OrderService:
             max_codes_per_account=(
                 settings.market_pre_subscription_max_codes_per_account
             ),
+        ),
+        database_snapshot_client=YmmDatabaseSnapshotClient(settings),
+        market_data_service=MarketDataService(
+            instrument_repository=InstrumentRepository(),
+            normalizer=MarketTickNormalizer(),
+            validation_service=MarketTickValidationService(),
+            tick_store=MarketTickStore(redis_client),
+        ),
+        market_data_code_mapping_service=MarketDataCodeMappingService(
+            InstrumentMarketDataMappingRepository()
         ),
     )

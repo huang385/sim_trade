@@ -106,3 +106,34 @@ def test_other_market_price_business_error_does_not_create_subscription():
 
     assert caught.value is original
     pre_subscriptions.request_codes.assert_not_called()
+
+
+def test_missing_futures_order_price_requests_its_own_market_data():
+    pre_subscriptions = Mock()
+    service = make_service(
+        market_prices=Mock(),
+        pre_subscriptions=pre_subscriptions,
+    )
+    request = make_request().model_copy(
+        update={"symbol": "JD2611", "order_type": "MARKET", "limit_price": None}
+    )
+    rules = SimpleNamespace(
+        instrument=SimpleNamespace(
+            order_book_id="JD2611",
+            instrument_type="FUTURES",
+        ),
+        underlying_instrument=None,
+    )
+
+    with pytest.raises(ServiceUnavailableError) as caught:
+        service._prepare_missing_order_price_market_data(
+            request=request,
+            rules=rules,
+            authorized_account=SimpleNamespace(account_id="A001"),
+        )
+
+    assert caught.value.error_code == "ORDER_MARKET_DATA_PREPARING"
+    pre_subscriptions.request_codes.assert_called_once_with(
+        account_id="A001",
+        codes={"JD2611"},
+    )

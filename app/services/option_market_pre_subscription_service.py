@@ -29,6 +29,7 @@ from app.schemas.market_subscription_schema import (
 from app.services.option_trading_permission_service import (
     OptionTradingPermissionService,
 )
+from app.services.live_market_snapshot_service import LiveMarketSnapshotService
 
 
 OPTION_UNDERLYING_TYPES = {
@@ -39,23 +40,34 @@ OPTION_UNDERLYING_TYPES = {
 
 @dataclass(frozen=True)
 class OptionSubscriptionContext:
-    """一次期权预订阅所需的期权和标的合约事实。"""
+    """一次衍生品下单前预订阅所需的合约事实。
+
+    期权必须同时订阅期权和标的；普通期货只需要订阅自身。保留原类名，
+    以兼容已有的期权准备接口和调用方。
+    """
 
     option: Instrument
-    underlying: Instrument
+    underlying: Instrument | None = None
 
     @property
     def requested_codes(self) -> frozenset[str]:
-        return frozenset(
-            {
-                self.option.order_book_id,
-                self.underlying.order_book_id,
-            }
-        )
+        codes = {self.option.order_book_id}
+        if self.underlying is not None:
+            codes.add(self.underlying.order_book_id)
+        return frozenset(codes)
+
+    @property
+    def instruments(self) -> tuple[Instrument, ...]:
+        if self.underlying is None:
+            return (self.option,)
+        return (self.option, self.underlying)
 
 
 class OptionMarketPreSubscriptionService:
-    """统一准备商品期权和股指期权下单依赖的实时行情。"""
+    """统一准备期货、商品期权和股指期权下单依赖的实时行情。
+
+    类名沿用历史名称，HTTP 路径也保持兼容；实际能力已经扩展到普通期货。
+    """
 
     def __init__(
         self,
@@ -64,11 +76,13 @@ class OptionMarketPreSubscriptionService:
         pre_subscription_store: MarketPreSubscriptionStore,
         market_tick_store: MarketTickStore,
         permission_service: OptionTradingPermissionService,
+        live_market_snapshot_service: LiveMarketSnapshotService | None = None,
     ) -> None:
         self.instrument_repository = instrument_repository
         self.pre_subscription_store = pre_subscription_store
         self.market_tick_store = market_tick_store
         self.permission_service = permission_service
+        self.live_market_snapshot_service = live_market_snapshot_service
 
     def _load_context(
         self,
@@ -89,18 +103,23 @@ class OptionMarketPreSubscriptionService:
                 "期权合约不存在",
                 error_code="OPTION_INSTRUMENT_NOT_FOUND",
             )
+        if not option.is_active or not option.is_tradeable:
+            raise BusinessRuleError(
+                "合约当前不可交易",
+                error_code="INSTRUMENT_NOT_TRADEABLE",
+            )
+
+        # 普通期货的非限价单只依赖自身盘口，写入一个临时订阅需求即可。
+        if option.instrument_type == InstrumentType.FUTURES.value:
+            return OptionSubscriptionContext(option=option)
+
         expected_underlying_type = OPTION_UNDERLYING_TYPES.get(
             option.instrument_type
         )
         if expected_underlying_type is None:
             raise BusinessRuleError(
-                "行情预订阅接口只支持期权合约",
-                error_code="OPTION_PRE_SUBSCRIPTION_ONLY",
-            )
-        if not option.is_active or not option.is_tradeable:
-            raise BusinessRuleError(
-                "期权合约当前不可交易",
-                error_code="OPTION_INSTRUMENT_NOT_TRADEABLE",
+                "行情预订阅接口只支持期货和期权合约",
+                error_code="MARKET_PRE_SUBSCRIPTION_UNSUPPORTED",
             )
         if option.underlying_instrument_id is None:
             raise BusinessRuleError(
@@ -135,7 +154,25 @@ class OptionMarketPreSubscriptionService:
         self,
         context: OptionSubscriptionContext,
     ) -> list[str]:
-        instruments = (context.option, context.underlying)
+        instruments = context.instruments
+        if self.live_market_snapshot_service is not None:
+            # 页面轮询的“已就绪”必须与委托定价采用同一判定：行情源运行中、
+            # 合约位于当前订阅集，且最新值来自 Live 回调或本次补取快照。这样
+            # Redis 中上一次进程遗留的旧 Hash 不会被误判为可下单。
+            ready_codes: list[str] = []
+            for instrument in instruments:
+                event = self.live_market_snapshot_service.get_matching_event(
+                    exchange_id=instrument.exchange_id,
+                    order_book_id=instrument.order_book_id,
+                    symbol=instrument.symbol,
+                )
+                if event is None:
+                    continue
+                if self._has_valid_price(
+                    {"last_price": str(event.parsed_event.tick.last_price)}
+                ):
+                    ready_codes.append(instrument.order_book_id)
+            return sorted(ready_codes)
         snapshots = self.market_tick_store.get_latest_many(
             {
                 # 最新行情 Hash 按 order_book_id 建键。此处不能使用内部期权 symbol：
@@ -205,12 +242,13 @@ class OptionMarketPreSubscriptionService:
                 "账户当前不可交易",
                 error_code="ACCOUNT_NOT_TRADABLE",
             )
-        self.permission_service.validate(
-            account=account,
-            instrument=context.option,
-            direction=request.direction,
-            offset_flag=request.offset_flag,
-        )
+        if context.option.instrument_type in OPTION_UNDERLYING_TYPES:
+            self.permission_service.validate(
+                account=account,
+                instrument=context.option,
+                direction=request.direction,
+                offset_flag=request.offset_flag,
+            )
         try:
             expires_at = self.pre_subscription_store.request_codes(
                 account_id=account.account_id,
@@ -289,4 +327,5 @@ def get_option_market_pre_subscription_service(
         ),
         market_tick_store=tick_store,
         permission_service=OptionTradingPermissionService(),
+        live_market_snapshot_service=LiveMarketSnapshotService(redis_client),
     )
