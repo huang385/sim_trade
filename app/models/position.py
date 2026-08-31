@@ -103,6 +103,11 @@ class Position(Base):
         ),
         Index("ix_position_account_id", "account_id"),
         Index("ix_position_exchange_symbol", "exchange_id", "symbol"),
+        Index(
+            "ix_position_exchange_order_book_id",
+            "exchange_id",
+            "order_book_id",
+        ),
     )
 
     # 数据库内部自增主键

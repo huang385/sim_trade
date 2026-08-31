@@ -119,6 +119,7 @@ class FakePnlStore:
         self.renew_calls = 0
         self.release_calls = 0
         self.rebuild_calls = 0
+        self.rebuild_kwargs = []
         self.account_fact_marks = []
 
     def acquire_worker_lease(self, _owner, _ttl_seconds):
@@ -153,6 +154,7 @@ class FakePnlStore:
 
     def rebuild_active_indexes(self, **_kwargs):
         self.rebuild_calls += 1
+        self.rebuild_kwargs.append(_kwargs)
         return True
 
     def renew_worker_lease(self, _owner, _ttl_seconds):
@@ -222,6 +224,55 @@ def make_worker(messages, *, service=None, store=None, market_store=None):
         monotonic=clock,
     )
     return worker, consumer, service, store, clock
+
+
+def test_reconcile_indexes_derives_short_option_underlying_codes():
+    worker, _consumer, _service, store, _clock = make_worker([])
+    short_option = SimpleNamespace(
+        account_id="A001",
+        exchange_id="DCE",
+        symbol="jd2609-P-3500",
+        order_book_id="JD2609P3500",
+        position_id="P-SHORT",
+        instrument_type="FUTURES_OPTION",
+        direction="SHORT",
+        underlying_order_book_id="JD2609",
+    )
+    long_option = SimpleNamespace(
+        account_id="A001",
+        exchange_id="CFFEX",
+        symbol="io2609-C-4000",
+        order_book_id="IO2609C4000",
+        position_id="P-LONG",
+        instrument_type="INDEX_OPTION",
+        direction="LONG",
+        underlying_order_book_id="000300.SH",
+    )
+    cycle = ActivePositionCycleSnapshot(
+        by_contract=MappingProxyType(
+            {
+                ("DCE", "JD2609P3500"): (short_option,),
+                ("CFFEX", "IO2609C4000"): (long_option,),
+            }
+        ),
+        by_account=MappingProxyType({}),
+        accounts=MappingProxyType({}),
+        cache_version="1",
+        refresh_count=1,
+    )
+
+    worker._reconcile_active_indexes(cycle)
+
+    assert store.rebuild_kwargs == [
+        {
+            "expected_cache_version": "1",
+            "positions": [
+                ("A001", "DCE", "JD2609P3500", "P-SHORT"),
+                ("A001", "CFFEX", "IO2609C4000", "P-LONG"),
+            ],
+            "margin_dependency_codes": {"JD2609"},
+        }
+    ]
 
 
 def test_four_ticks_in_window_use_latest_price_and_ack_all_once():

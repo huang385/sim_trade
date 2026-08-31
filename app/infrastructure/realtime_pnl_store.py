@@ -12,7 +12,7 @@ from app.infrastructure.redis_keys import (
     PNL_ACCOUNT_INDEX_KEYS_KEY,
     PNL_ACCOUNT_REALTIME_VERSIONS_KEY,
     PNL_CONTRACT_INDEX_KEYS_KEY,
-    PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
+    PNL_MARGIN_DEPENDENCY_CODES_KEY,
     PNL_DIRTY_ACCOUNT_FACTS_KEY,
     PNL_DIRTY_ACCOUNT_FACT_VERSIONS_KEY,
     PNL_DIRTY_CONTRACTS_KEY,
@@ -267,7 +267,7 @@ class RealtimePnlStore:
         self,
         *,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
         account_id: str,
     ) -> str:
         """
@@ -277,7 +277,7 @@ class RealtimePnlStore:
         平仓后补读账户基础字段。
         """
 
-        member = pnl_dirty_contract_member(exchange_id, symbol)
+        member = pnl_dirty_contract_member(exchange_id, order_book_id)
         return str(
             self.redis_client.eval(
                 MARK_CONTRACT_DIRTY_SCRIPT,
@@ -285,7 +285,7 @@ class RealtimePnlStore:
                 PNL_POSITION_CACHE_VERSION_KEY,
                 PNL_DIRTY_CONTRACTS_KEY,
                 PNL_DIRTY_CONTRACT_VERSIONS_KEY,
-                pnl_dirty_contract_accounts_key(exchange_id, symbol),
+                pnl_dirty_contract_accounts_key(exchange_id, order_book_id),
                 pnl_dirty_account_contracts_key(account_id),
                 member,
                 account_id,
@@ -297,7 +297,7 @@ class RealtimePnlStore:
         *,
         event_id: str,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
         account_id: str,
         processed_ttl_seconds: int,
     ) -> str | None:
@@ -308,14 +308,14 @@ class RealtimePnlStore:
         投递让实时Worker无意义地反复全量刷新活动持仓缓存。
         """
 
-        member = pnl_dirty_contract_member(exchange_id, symbol)
+        member = pnl_dirty_contract_member(exchange_id, order_book_id)
         version = self.redis_client.eval(
             MARK_CONTRACT_DIRTY_ONCE_SCRIPT,
             6,
             PNL_POSITION_CACHE_VERSION_KEY,
             PNL_DIRTY_CONTRACTS_KEY,
             PNL_DIRTY_CONTRACT_VERSIONS_KEY,
-            pnl_dirty_contract_accounts_key(exchange_id, symbol),
+            pnl_dirty_contract_accounts_key(exchange_id, order_book_id),
             pnl_dirty_account_contracts_key(account_id),
             processed_pnl_fact_event_key(event_id),
             member,
@@ -429,7 +429,7 @@ class RealtimePnlStore:
         self,
         *,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
         expected_version: str,
     ) -> bool:
         """
@@ -439,14 +439,14 @@ class RealtimePnlStore:
         Lua返回0并保留新Dirty及其账户信息。
         """
 
-        member = pnl_dirty_contract_member(exchange_id, symbol)
+        member = pnl_dirty_contract_member(exchange_id, order_book_id)
         completed = bool(
             self.redis_client.eval(
                 CLEAR_DIRTY_CONTRACT_IF_UNCHANGED_SCRIPT,
                 3,
                 PNL_DIRTY_CONTRACT_VERSIONS_KEY,
                 PNL_DIRTY_CONTRACTS_KEY,
-                pnl_dirty_contract_accounts_key(exchange_id, symbol),
+                pnl_dirty_contract_accounts_key(exchange_id, order_book_id),
                 member,
                 expected_version,
                 "pnl:dirty_account_contracts:",
@@ -721,25 +721,19 @@ class RealtimePnlStore:
                 ]
             )
 
-        for account_id, exchange_id, symbol, order_book_id, position_id in additions:
+        for account_id, exchange_id, order_book_id, position_id in additions:
             account_key = pnl_account_positions_key(account_id)
-            contract_key = pnl_contract_positions_key(exchange_id, symbol)
+            contract_key = pnl_contract_positions_key(exchange_id, order_book_id)
             operations.extend(
                 (
                     ["SADD", account_key, position_id],
                     ["SADD", contract_key, position_id],
                     ["SADD", PNL_ACCOUNT_INDEX_KEYS_KEY, account_key],
                     ["SADD", PNL_CONTRACT_INDEX_KEYS_KEY, contract_key],
-                    [
-                        "HSET",
-                        PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
-                        contract_key,
-                        order_book_id,
-                    ],
                 )
             )
 
-        for account_id, exchange_id, symbol, _order_book_id, position_id in removals:
+        for account_id, exchange_id, order_book_id, position_id in removals:
             operations.extend(
                 (
                     [
@@ -750,7 +744,7 @@ class RealtimePnlStore:
                     ],
                     [
                         "SREM_MEMBER_AND_PRUNE_INDEX",
-                        pnl_contract_positions_key(exchange_id, symbol),
+                        pnl_contract_positions_key(exchange_id, order_book_id),
                         position_id,
                         PNL_CONTRACT_INDEX_KEYS_KEY,
                     ],
@@ -764,8 +758,8 @@ class RealtimePnlStore:
         positions: Iterable[PositionRealtimePnl],
         accounts: Iterable[AccountRealtimePnl],
         dirty_version: str,
-        active_positions: Iterable[tuple[str, str, str, str, str]],
-        closed_positions: Iterable[tuple[str, str, str, str, str]],
+        active_positions: Iterable[tuple[str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
         emit_risk_events: bool = True,
@@ -773,7 +767,7 @@ class RealtimePnlStore:
         """
         一个500ms批次内原子写快照、Dirty标记和必要的静态索引变化。
 
-        active_positions/closed_positions元素依次为账户、交易所、内部symbol、
+        active_positions/closed_positions元素依次为账户、交易所、标准
         order_book_id、持仓编号。行情价格变化不会重复维护索引，只有调用方确认结构变化或首次
         恢复时才传入。
         """
@@ -814,8 +808,8 @@ class RealtimePnlStore:
         positions: Iterable[PositionRealtimePnl],
         accounts: Iterable[AccountRealtimePnl],
         dirty_version: str,
-        active_positions: Iterable[tuple[str, str, str, str, str]],
-        closed_positions: Iterable[tuple[str, str, str, str, str]],
+        active_positions: Iterable[tuple[str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
         emit_risk_events: bool = True,
@@ -867,8 +861,8 @@ class RealtimePnlStore:
         positions: Iterable[PositionRealtimePnl],
         accounts: Iterable[AccountRealtimePnl],
         dirty_version: str,
-        active_positions: Iterable[tuple[str, str, str, str, str]],
-        closed_positions: Iterable[tuple[str, str, str, str, str]],
+        active_positions: Iterable[tuple[str, str, str, str]],
+        closed_positions: Iterable[tuple[str, str, str, str]],
         expected_cache_version: str | None = None,
         mark_dirty: bool = True,
         emit_risk_events: bool = True,
@@ -1085,11 +1079,11 @@ class RealtimePnlStore:
     def list_contract_position_ids(
         self,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
     ) -> set[str]:
         return set(
             self.redis_client.smembers(
-                pnl_contract_positions_key(exchange_id, symbol)
+                pnl_contract_positions_key(exchange_id, order_book_id)
             )
         )
 
@@ -1103,17 +1097,17 @@ class RealtimePnlStore:
             {
                 (
                     str(exchange_id).strip().upper(),
-                    str(symbol).strip().upper(),
+                    str(order_book_id).strip().upper(),
                 )
-                for exchange_id, symbol in contract_keys
+                for exchange_id, order_book_id in contract_keys
             }
         )
         if not keys:
             return {}
         pipeline = self.redis_client.pipeline(transaction=False)
-        for exchange_id, symbol in keys:
+        for exchange_id, order_book_id in keys:
             pipeline.smembers(
-                pnl_contract_positions_key(exchange_id, symbol)
+                pnl_contract_positions_key(exchange_id, order_book_id)
             )
         values = pipeline.execute()
         return {
@@ -1147,78 +1141,53 @@ class RealtimePnlStore:
         pipeline = self.redis_client.pipeline(transaction=False)
         for index_key in index_keys:
             pipeline.scard(index_key)
-            pipeline.hget(PNL_CONTRACT_ORDER_BOOK_IDS_KEY, index_key)
-        rows = pipeline.execute()
+        member_counts = pipeline.execute()
 
         codes: set[str] = set()
-        for offset, index_key in enumerate(index_keys):
-            member_count = rows[offset * 2]
-            order_book_id = rows[offset * 2 + 1]
+        prefix = "pnl:contract_positions:"
+        for index_key, member_count in zip(
+            index_keys, member_counts, strict=True
+        ):
             if int(member_count or 0) <= 0:
                 continue
-            normalized_order_book_id = str(order_book_id or "").strip().upper()
+            _prefix, separator, encoded_key = index_key.partition(prefix)
+            if _prefix or not separator:
+                continue
+            _exchange_id, separator, order_book_id = encoded_key.partition(":")
+            if not separator:
+                continue
+            normalized_order_book_id = order_book_id.strip().upper()
             if normalized_order_book_id:
                 codes.add(normalized_order_book_id)
         return codes
 
     def list_margin_dependency_codes(self) -> set[str]:
-        """批量返回活动期权空头持仓依赖的标的订阅代码。"""
+        """返回活动期权空头持仓依赖的标的订阅代码。
 
-        index_keys = sorted(
-            str(value)
-            for value in self.redis_client.smembers(
-                PNL_CONTRACT_INDEX_KEYS_KEY
+        该集合由活动持仓索引重建流程直接从 PostgreSQL 持仓快照派生，
+        不依赖 ``pnl:position:*`` 是否已成功完成估值。这样冷启动时也
+        能先订阅标的行情，避免空头期权保证金估值与订阅发现相互等待。
+        """
+
+        return {
+            str(code).strip().upper()
+            for code in self.redis_client.smembers(
+                PNL_MARGIN_DEPENDENCY_CODES_KEY
             )
-        )
-        if not index_keys:
-            return set()
-        pipeline = self.redis_client.pipeline(transaction=False)
-        for index_key in index_keys:
-            pipeline.smembers(index_key)
-        position_ids = sorted(
-            {
-                str(position_id)
-                for members in pipeline.execute()
-                for position_id in (members or ())
-            }
-        )
-        if not position_ids:
-            return set()
-        pipeline = self.redis_client.pipeline(transaction=False)
-        for position_id in position_ids:
-            pipeline.hmget(
-                pnl_position_key(position_id),
-                (
-                    "instrument_type",
-                    "direction",
-                    "underlying_order_book_id",
-                ),
-            )
-        codes: set[str] = set()
-        for values in pipeline.execute():
-            instrument_type, direction, underlying_code = (
-                values or (None, None, None)
-            )
-            if (
-                str(instrument_type or "")
-                in {"FUTURES_OPTION", "INDEX_OPTION"}
-                and str(direction or "") == "SHORT"
-                and underlying_code
-            ):
-                codes.add(str(underlying_code))
-        return codes
+            if str(code).strip()
+        }
 
     def remove_contract_position(
         self,
         *,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
         account_id: str,
         position_id: str,
     ) -> None:
         pipeline = self.redis_client.pipeline(transaction=True)
         pipeline.srem(
-            pnl_contract_positions_key(exchange_id, symbol),
+            pnl_contract_positions_key(exchange_id, order_book_id),
             position_id,
         )
         pipeline.srem(
@@ -1457,6 +1426,7 @@ class RealtimePnlStore:
         *,
         expected_cache_version: str,
         positions: Iterable[tuple[str, str, str, str, str]],
+        margin_dependency_codes: Iterable[str] = (),
     ) -> bool:
         """
         按PostgreSQL周期快照重建PnL活动索引，不使用KEYS扫描。
@@ -1466,6 +1436,13 @@ class RealtimePnlStore:
         """
 
         items = list(positions)
+        dependencies = sorted(
+            {
+                str(code).strip().upper()
+                for code in margin_dependency_codes
+                if str(code).strip()
+            }
+        )
         for _attempt in range(3):
             pipeline = self.redis_client.pipeline()
             try:
@@ -1489,13 +1466,13 @@ class RealtimePnlStore:
                 pipeline.delete(
                     PNL_ACCOUNT_INDEX_KEYS_KEY,
                     PNL_CONTRACT_INDEX_KEYS_KEY,
-                    PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
+                    PNL_MARGIN_DEPENDENCY_CODES_KEY,
                 )
-                for account_id, exchange_id, symbol, order_book_id, position_id in items:
+                for account_id, exchange_id, order_book_id, position_id in items:
                     account_key = pnl_account_positions_key(account_id)
                     contract_key = pnl_contract_positions_key(
                         exchange_id,
-                        symbol,
+                        order_book_id,
                     )
                     pipeline.sadd(account_key, position_id)
                     pipeline.sadd(contract_key, position_id)
@@ -1507,10 +1484,10 @@ class RealtimePnlStore:
                         PNL_CONTRACT_INDEX_KEYS_KEY,
                         contract_key,
                     )
-                    pipeline.hset(
-                        PNL_CONTRACT_ORDER_BOOK_IDS_KEY,
-                        contract_key,
-                        order_book_id,
+                if dependencies:
+                    pipeline.sadd(
+                        PNL_MARGIN_DEPENDENCY_CODES_KEY,
+                        *dependencies,
                     )
                 pipeline.execute()
                 return True
@@ -1551,12 +1528,8 @@ class RealtimePnlStore:
         snapshot_keys.extend(pnl_position_key(position_id) for position_id in position_ids)
         if snapshot_keys:
             pipeline.delete(*snapshot_keys)
-        for account_id, exchange_id, symbol, position_id, expired_closed in affected:
+        for account_id, _exchange_id, _symbol, position_id, expired_closed in affected:
             if expired_closed:
-                pipeline.srem(
-                    pnl_contract_positions_key(exchange_id, symbol),
-                    position_id,
-                )
                 pipeline.srem(
                     pnl_account_positions_key(account_id),
                     position_id,

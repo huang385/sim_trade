@@ -39,10 +39,9 @@ PNL_DIRTY_CONTRACTS_KEY = "pnl:dirty_contracts"
 PNL_DIRTY_CONTRACT_VERSIONS_KEY = "pnl:dirty_contract_versions"
 PNL_ACCOUNT_INDEX_KEYS_KEY = "pnl:index_keys:accounts"
 PNL_CONTRACT_INDEX_KEYS_KEY = "pnl:index_keys:contracts"
-# PnL 合约索引仍以内部 symbol 作为业务键；该 Hash 仅保存其对应的
-# 行情订阅标准代码（order_book_id），避免从 Redis key 反解析 symbol 后
-# 误传给外部行情源。
-PNL_CONTRACT_ORDER_BOOK_IDS_KEY = "pnl:contract_order_book_ids"
+# 活动期权空头持仓所依赖的标的行情标准代码。该索引独立于实时 PnL
+# 快照：冷启动、快照过期或估值暂不可用时，行情订阅仍能先取得标的行情。
+PNL_MARGIN_DEPENDENCY_CODES_KEY = "pnl:margin_dependency_codes"
 PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 # PnL单写者在每个成功写入周期内递增一次；账户、持仓Hash、版本索引和
 # 对应实时事件由同一个Lua脚本共同使用该版本。
@@ -246,20 +245,23 @@ def pnl_account_positions_key(account_id: str) -> str:
     return f"pnl:account_positions:{account_id}"
 
 
-def pnl_contract_positions_key(exchange_id: str, symbol: str) -> str:
+def pnl_contract_positions_key(exchange_id: str, order_book_id: str) -> str:
     """返回合约当前已建立实时快照的持仓编号集合。"""
 
-    return f"pnl:contract_positions:{exchange_id}:{symbol}"
+    return (
+        "pnl:contract_positions:"
+        f"{exchange_id.strip().upper()}:{order_book_id.strip().upper()}"
+    )
 
 
-def pnl_dirty_contract_member(exchange_id: str, symbol: str) -> str:
+def pnl_dirty_contract_member(exchange_id: str, order_book_id: str) -> str:
     """返回Dirty合约集合成员，百分号编码避免分隔符歧义。"""
 
     from urllib.parse import quote
 
     return (
         f"{quote(exchange_id.strip().upper(), safe='')}"
-        f"|{quote(symbol.strip().upper(), safe='')}"
+        f"|{quote(order_book_id.strip().upper(), safe='')}"
     )
 
 
@@ -268,17 +270,17 @@ def parse_pnl_dirty_contract_member(member: str) -> tuple[str, str]:
 
     from urllib.parse import unquote
 
-    exchange_id, symbol = member.split("|", 1)
-    return unquote(exchange_id), unquote(symbol)
+    exchange_id, order_book_id = member.split("|", 1)
+    return unquote(exchange_id), unquote(order_book_id)
 
 
 def pnl_dirty_contract_accounts_key(
     exchange_id: str,
-    symbol: str,
+    order_book_id: str,
 ) -> str:
     """返回成交Dirty合约关联账户集合。"""
 
-    member = pnl_dirty_contract_member(exchange_id, symbol)
+    member = pnl_dirty_contract_member(exchange_id, order_book_id)
     return f"pnl:dirty_contract_accounts:{member}"
 
 

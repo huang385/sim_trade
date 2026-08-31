@@ -230,9 +230,9 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
     position = SimpleNamespace(
         position_id="P1",
         account_id="A001",
-        order_book_id="JD2609",
+        order_book_id="JD2609P3500",
         exchange_id="DCE",
-        symbol="JD2609",
+        symbol="jd2609-P-3500",
         instrument_type="FUTURES",
         direction="LONG",
         unrealized_pnl=Decimal("0"),
@@ -253,23 +253,23 @@ def test_contract_fact_refresh_adds_and_removes_only_target_contract():
     added = cache.get_cycle_snapshot(
         extra_account_ids={"A001"},
         refresh_account_versions={"A001": "trade:7"},
-        refresh_contract_versions={("DCE", "JD2609"): "7"},
+        refresh_contract_versions={("DCE", "JD2609P3500"): "7"},
     )
 
     positions.contract_rows = []
     removed = cache.get_cycle_snapshot(
         extra_account_ids={"A001"},
         refresh_account_versions={"A001": "trade:8"},
-        refresh_contract_versions={("DCE", "JD2609"): "8"},
+        refresh_contract_versions={("DCE", "JD2609P3500"): "8"},
     )
 
     assert positions.calls == 1
     assert positions.contract_calls == 2
-    assert added.get_by_contract("DCE", "JD2609")[0].contract_multiplier == Decimal(
+    assert added.get_by_contract("DCE", "JD2609P3500")[0].contract_multiplier == Decimal(
         "10"
     )
-    assert len(added.get_by_contract("DCE", "JD2609")) == 1
-    assert removed.get_by_contract("DCE", "JD2609") == ()
+    assert len(added.get_by_contract("DCE", "JD2609P3500")) == 1
+    assert removed.get_by_contract("DCE", "JD2609P3500") == ()
     assert removed.get_by_account("A001") == ()
 
 

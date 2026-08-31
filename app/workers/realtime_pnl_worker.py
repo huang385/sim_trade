@@ -14,6 +14,8 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
+from app.enums.instrument_enums import InstrumentType
+from app.enums.order_enums import PositionDirection
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.market_tick_stream_consumer import (
@@ -151,6 +153,7 @@ class RealtimePnlWorker:
         self._buffer: dict[ContractKey, BufferedContract] = {}
         self._last_successful_prices: dict[ContractKey, Decimal] = {}
         self._last_cache_refresh_count = 0
+        self._last_rebuilt_index_cache_version: str | None = None
         self._indexes_rebuilt = False
         self.stop_event = Event()
         self._stats = PnlWorkerStats()
@@ -230,7 +233,7 @@ class RealtimePnlWorker:
 
         key = (
             tick.exchange_id.strip().upper(),
-            tick.symbol.strip().upper(),
+            tick.order_book_id.strip().upper(),
         )
         buffered = self._buffer.get(key)
         if buffered is None:
@@ -404,14 +407,31 @@ class RealtimePnlWorker:
                 (
                     position.account_id,
                     position.exchange_id,
-                    position.symbol,
                     position.order_book_id,
                     position.position_id,
                 )
                 for positions in cycle.by_contract.values()
                 for position in positions
             ],
+            margin_dependency_codes={
+                position.underlying_order_book_id
+                for positions in cycle.by_contract.values()
+                for position in positions
+                if (
+                    position.instrument_type
+                    in {
+                        InstrumentType.FUTURES_OPTION.value,
+                        InstrumentType.INDEX_OPTION.value,
+                    }
+                    and position.direction == PositionDirection.SHORT.value
+                    and position.underlying_order_book_id
+                )
+            },
         )
+        if self._indexes_rebuilt:
+            self._last_rebuilt_index_cache_version = (
+                cycle.cache_version or "0"
+            )
 
     def flush(self, *, force_reconciliation: bool = False) -> None:
         if not self._renew_lease_if_due():
@@ -456,13 +476,23 @@ class RealtimePnlWorker:
             },
             force_refresh=force_reconciliation,
         )
+        # 成交结构变更会递增跨进程缓存版本。先用新的活动持仓快照重建
+        # 订阅索引，确保空头期权标的能在本轮估值前被行情Worker发现；
+        # 即使标的行情尚未到达、PnL计算暂时失败，也不能丢失该订阅需求。
+        if (
+            force_reconciliation
+            or not self._indexes_rebuilt
+            or (cycle.cache_version or "0")
+            != self._last_rebuilt_index_cache_version
+        ):
+            self._reconcile_active_indexes(cycle)
         # 标的期货行情变化时，把依赖该标的的商品期权合约加入同一
         # 500ms 周期。这里只扩展合约键，实际估值仍读取 market:latest，
         # 不会使用旧 Pending 消息中的价格覆盖较新的行情快照。
         dependent_option_keys = {
             (
                 position.exchange_id.strip().upper(),
-                position.symbol.strip().upper(),
+                position.order_book_id.strip().upper(),
             )
             for key in tuple(keys)
             for position in cycle.get_by_underlying(*key)
@@ -479,8 +509,6 @@ class RealtimePnlWorker:
         if force_reconciliation:
             keys.update(cycle.by_contract.keys())
         if not keys and not account_fact_versions:
-            if force_reconciliation or not self._indexes_rebuilt:
-                self._reconcile_active_indexes(cycle)
             self._schedule_next_flush(self.monotonic())
             return
 
@@ -505,7 +533,7 @@ class RealtimePnlWorker:
             requests.append(
                 ContractPnlRequest(
                     exchange_id=key[0],
-                    symbol=key[1],
+                    order_book_id=key[1],
                     tick=tick,
                     dirty_version=dirty_version,
                     dirty_account_ids=frozenset(dirty_accounts),
@@ -664,7 +692,7 @@ class RealtimePnlWorker:
             if request.dirty_version is not None:
                 self.pnl_store.complete_dirty_contract(
                     exchange_id=key[0],
-                    symbol=key[1],
+                    order_book_id=key[1],
                     expected_version=request.dirty_version,
                 )
         for account_id in result.successful_account_facts:
@@ -703,8 +731,6 @@ class RealtimePnlWorker:
             ),
             calculation_duration_ms=duration_ms,
         )
-        if force_reconciliation or not self._indexes_rebuilt:
-            self._reconcile_active_indexes(cycle)
         self._schedule_next_flush(self.monotonic())
 
     def _read_block_ms(self) -> int:

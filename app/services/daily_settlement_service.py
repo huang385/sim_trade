@@ -2314,7 +2314,6 @@ class DailySettlementService:
                     (
                         item.account_id,
                         item.exchange_id,
-                        item.symbol,
                         item.order_book_id,
                         item.position_id,
                     )

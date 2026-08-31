@@ -155,14 +155,14 @@ class FakeStore:
     ):
         self.index_additions.append(list(active_positions))
         self.index_removals.append(list(closed_positions))
-        for _account_id, exchange_id, symbol, _order_book_id, position_id in active_positions:
+        for _account_id, exchange_id, order_book_id, position_id in active_positions:
             self.contract_ids.setdefault(
-                (exchange_id, symbol),
+                (exchange_id, order_book_id),
                 set(),
             ).add(position_id)
-        for _account_id, exchange_id, symbol, _order_book_id, position_id in closed_positions:
+        for _account_id, exchange_id, order_book_id, position_id in closed_positions:
             self.contract_ids.setdefault(
-                (exchange_id, symbol),
+                (exchange_id, order_book_id),
                 set(),
             ).discard(position_id)
         return self.write_snapshots(
@@ -260,7 +260,7 @@ def test_futures_position_is_not_scheduled_for_option_margin_adjustment():
         requests=[
             ContractPnlRequest(
                 exchange_id="SHFE",
-                symbol="RB2610",
+                order_book_id="RB2610",
                 tick=RealtimePnlService.parse_tick(make_fields()),
             )
         ],
@@ -290,7 +290,7 @@ def test_duplicate_tick_overwrites_same_absolute_values():
     assert current == first
     # 首次建立索引后，相同持仓的后续行情不再重复执行SADD。
     assert store.index_additions == [
-        [("A001", "SHFE", "RB2610", "RB2610", "P001")],
+        [("A001", "SHFE", "RB2610", "P001")],
         [],
     ]
 
@@ -393,7 +393,7 @@ def test_full_close_dirty_zeros_old_position_and_account():
         requests=[
             ContractPnlRequest(
                 exchange_id="SHFE",
-                symbol="RB2610",
+                order_book_id="RB2610",
                 tick=None,
                 dirty_version="2",
                 dirty_account_ids=frozenset({"A001"}),
@@ -411,7 +411,7 @@ def test_full_close_dirty_zeros_old_position_and_account():
         "cumulative_unrealized_pnl"
     ] == "0.000000"
     assert store.index_removals[-1] == [
-        ("A001", "SHFE", "RB2610", "RB2610", "P001")
+        ("A001", "SHFE", "RB2610", "P001")
     ]
 
 
@@ -469,7 +469,7 @@ def test_partial_close_dirty_recalculates_same_price_with_less_volume():
         requests=[
             ContractPnlRequest(
                 exchange_id="SHFE",
-                symbol="RB2610",
+                order_book_id="RB2610",
                 tick=tick,
                 dirty_version="3",
                 dirty_account_ids=frozenset({"A001"}),
@@ -573,12 +573,12 @@ def test_two_contract_deltas_update_same_account_only_once():
         requests=[
             ContractPnlRequest(
                 exchange_id="DCE",
-                symbol="JD2609",
+                order_book_id="JD2609",
                 tick=tick("JD2609", "110", 1),
             ),
             ContractPnlRequest(
                 exchange_id="DCE",
-                symbol="JM2609",
+                order_book_id="JM2609",
                 tick=tick("JM2609", "220", 2),
             ),
         ],
@@ -722,6 +722,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
             strike_price=Decimal("110"),
             underlying_exchange_id="SHFE",
             underlying_symbol="AG",
+            underlying_order_book_id="AG",
             margin_rule_snapshot=tuple(
                 {
                     "rule_id": "1",
@@ -815,7 +816,7 @@ def test_option_long_short_market_value_and_margin_are_exact(
         requests=[
             ContractPnlRequest(
                 exchange_id="SHFE",
-                symbol="AGOPT",
+                order_book_id="AGOPT",
                 tick=option_tick,
             )
         ],

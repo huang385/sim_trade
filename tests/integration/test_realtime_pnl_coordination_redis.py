@@ -32,22 +32,22 @@ def test_trade_dirty_version_cas_preserves_newer_trade():
 
     suffix = uuid4().hex[:10].upper()
     exchange_id = "ITEX"
-    symbol = f"DIRTY{suffix}"
-    member = pnl_dirty_contract_member(exchange_id, symbol)
+    order_book_id = f"DIRTY{suffix}"
+    member = pnl_dirty_contract_member(exchange_id, order_book_id)
     accounts_key = pnl_dirty_contract_accounts_key(
         exchange_id,
-        symbol,
+        order_book_id,
     )
     store = RealtimePnlStore(redis_client)
     try:
         first = store.mark_contract_dirty(
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id="A001",
         )
         second = store.mark_contract_dirty(
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id="A002",
         )
 
@@ -55,7 +55,7 @@ def test_trade_dirty_version_cas_preserves_newer_trade():
         assert (
             store.complete_dirty_contract(
                 exchange_id=exchange_id,
-                symbol=symbol,
+                order_book_id=order_book_id,
                 expected_version=first,
             )
             is False
@@ -64,7 +64,7 @@ def test_trade_dirty_version_cas_preserves_newer_trade():
         assert (
             store.complete_dirty_contract(
                 exchange_id=exchange_id,
-                symbol=symbol,
+                order_book_id=order_book_id,
                 expected_version=second,
             )
             is True
@@ -88,11 +88,11 @@ def test_contract_fact_event_marks_dirty_only_once():
     suffix = uuid4().hex[:10].upper()
     event_id = f"FACT-{suffix}"
     exchange_id = "ITEX"
-    symbol = f"FACT{suffix}"
-    member = pnl_dirty_contract_member(exchange_id, symbol)
+    order_book_id = f"FACT{suffix}"
+    member = pnl_dirty_contract_member(exchange_id, order_book_id)
     accounts_key = pnl_dirty_contract_accounts_key(
         exchange_id,
-        symbol,
+        order_book_id,
     )
     processed_key = processed_pnl_fact_event_key(event_id)
     store = RealtimePnlStore(redis_client)
@@ -100,14 +100,14 @@ def test_contract_fact_event_marks_dirty_only_once():
         first = store.mark_contract_dirty_once(
             event_id=event_id,
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id="A001",
             processed_ttl_seconds=60,
         )
         duplicate = store.mark_contract_dirty_once(
             event_id=event_id,
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id="A001",
             processed_ttl_seconds=60,
         )

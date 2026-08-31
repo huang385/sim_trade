@@ -65,7 +65,7 @@ class ContractPnlRequest:
     """单个合约在一个500ms周期内的最终计算输入。"""
 
     exchange_id: str
-    symbol: str
+    order_book_id: str
     tick: MarketTick | None
     dirty_version: str | None = None
     dirty_account_ids: frozenset[str] = frozenset()
@@ -74,7 +74,7 @@ class ContractPnlRequest:
     def key(self) -> ContractKey:
         return (
             self.exchange_id.strip().upper(),
-            self.symbol.strip().upper(),
+            self.order_book_id.strip().upper(),
         )
 
 
@@ -274,7 +274,7 @@ class RealtimePnlService:
 
         key = (
             position.exchange_id.strip().upper(),
-            position.symbol.strip().upper(),
+            position.order_book_id.strip().upper(),
         )
         tick = latest_by_key.get(key)
         if (
@@ -356,8 +356,8 @@ class RealtimePnlService:
         position_models: dict[str, PositionRealtimePnl] = {}
         account_deltas: dict[str, list[Decimal]] = {}
         affected_accounts: set[str] = set()
-        active_index_additions: list[tuple[str, str, str, str, str]] = []
-        closed_index_removals: list[tuple[str, str, str, str, str]] = []
+        active_index_additions: list[tuple[str, str, str, str]] = []
+        closed_index_removals: list[tuple[str, str, str, str]] = []
         successful: set[ContractKey] = set()
         failed: set[ContractKey] = set()
         no_position: set[ContractKey] = set()
@@ -548,7 +548,6 @@ class RealtimePnlService:
                             (
                                 position.account_id,
                                 position.exchange_id,
-                                position.symbol,
                                 position.order_book_id,
                                 position.position_id,
                             )
@@ -629,7 +628,6 @@ class RealtimePnlService:
                             account_id,
                             key[0],
                             key[1],
-                            old.get("order_book_id", key[1]),
                             position_id,
                         )
                     )
@@ -719,13 +717,13 @@ class RealtimePnlService:
         missing_contract_keys = {
             (
                 position.exchange_id.strip().upper(),
-                position.symbol.strip().upper(),
+                position.order_book_id.strip().upper(),
             )
             for account_id in full_accounts
             for position in cycle_snapshot.get_by_account(account_id)
             if (
                 position.exchange_id.strip().upper(),
-                position.symbol.strip().upper(),
+                position.order_book_id.strip().upper(),
             )
             not in latest_ticks
         }
@@ -1119,7 +1117,7 @@ class RealtimePnlService:
         cycle = self.active_position_cache.get_cycle_snapshot()
         request = ContractPnlRequest(
             exchange_id=tick.exchange_id,
-            symbol=tick.symbol,
+            order_book_id=tick.order_book_id,
             tick=tick,
         )
         return self.process_batch(

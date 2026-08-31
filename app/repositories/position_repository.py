@@ -259,9 +259,9 @@ class PositionRepository:
                 {
                     (
                         exchange_id.strip().upper(),
-                        symbol.strip().upper(),
+                        order_book_id.strip().upper(),
                     )
-                    for exchange_id, symbol in contract_keys
+                    for exchange_id, order_book_id in contract_keys
                 }
             )
         )
@@ -297,7 +297,7 @@ class PositionRepository:
                 PositionDetail.remaining_volume > 0,
                 tuple_(
                     Position.exchange_id,
-                    Position.symbol,
+                    Position.order_book_id,
                 ).in_(keys),
             )
             .order_by(Position.id, PositionDetail.id)

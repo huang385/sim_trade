@@ -74,11 +74,11 @@ class ActivePositionCycleSnapshot:
     def get_by_contract(
         self,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
     ) -> tuple[PositionPnlSnapshot, ...]:
         key = (
             exchange_id.strip().upper(),
-            symbol.strip().upper(),
+            order_book_id.strip().upper(),
         )
         return self.by_contract.get(key, ())
 
@@ -94,12 +94,12 @@ class ActivePositionCycleSnapshot:
     def get_by_underlying(
         self,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
     ) -> tuple[PositionPnlSnapshot, ...]:
         return self.by_underlying.get(
             (
                 exchange_id.strip().upper(),
-                symbol.strip().upper(),
+                order_book_id.strip().upper(),
             ),
             (),
         )
@@ -241,20 +241,20 @@ class ActivePositionCache:
         *,
         account_id: str | None = None,
         exchange_id: str | None = None,
-        symbol: str | None = None,
+        order_book_id: str | None = None,
     ) -> None:
         """记录本进程下一周期需要增量刷新的账户或合约。"""
 
         if account_id:
             self._pending_account_ids.add(account_id.strip())
-        if exchange_id and symbol:
+        if exchange_id and order_book_id:
             self._pending_contract_keys.add(
                 (
                     exchange_id.strip().upper(),
-                    symbol.strip().upper(),
+                    order_book_id.strip().upper(),
                 )
             )
-        if not account_id and not (exchange_id and symbol):
+        if not account_id and not (exchange_id and order_book_id):
             self._expires_at = 0.0
 
     def _snapshots_from_rows(
@@ -411,7 +411,7 @@ class ActivePositionCache:
             )
             key = (
                 position.exchange_id.strip().upper(),
-                position.symbol.strip().upper(),
+                position.order_book_id.strip().upper(),
             )
             by_contract.setdefault(key, []).append(snapshot)
         return (
@@ -584,9 +584,9 @@ class ActivePositionCache:
         contract_versions = {
             (
                 exchange_id.strip().upper(),
-                symbol.strip().upper(),
+                order_book_id.strip().upper(),
             ): str(version)
-            for (exchange_id, symbol), version in (
+            for (exchange_id, order_book_id), version in (
                 refresh_contract_versions or {}
             ).items()
         }
@@ -612,9 +612,9 @@ class ActivePositionCache:
         requested_contracts = {
             (
                 exchange_id.strip().upper(),
-                symbol.strip().upper(),
+                order_book_id.strip().upper(),
             )
-            for exchange_id, symbol in (
+            for exchange_id, order_book_id in (
                 set(refresh_contract_keys or ())
                 | changed_contract_versions
                 | self._pending_contract_keys
@@ -684,11 +684,11 @@ class ActivePositionCache:
     def get_by_contract(
         self,
         exchange_id: str,
-        symbol: str,
+        order_book_id: str,
     ) -> tuple[PositionPnlSnapshot, ...]:
         return self.get_cycle_snapshot().get_by_contract(
             exchange_id,
-            symbol,
+            order_book_id,
         )
 
     def get_by_account(

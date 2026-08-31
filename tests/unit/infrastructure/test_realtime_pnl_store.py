@@ -17,7 +17,7 @@ def test_trade_dirty_is_written_by_one_atomic_lua_command():
 
     version = store.mark_contract_dirty(
         exchange_id="shfe",
-        symbol="rb2610",
+        order_book_id="rb2610",
         account_id="A001",
     )
 
@@ -37,7 +37,7 @@ def test_contract_dirty_completion_cas_cleans_account_structure_only_on_match():
 
     assert store.complete_dirty_contract(
         exchange_id="SHFE",
-        symbol="RB2610",
+        order_book_id="RB2610",
         expected_version="12",
     )
 
@@ -57,6 +57,7 @@ def test_tick_snapshot_write_does_not_repeat_static_indexes():
         position_id="P001",
         account_id="A001",
         exchange_id="SHFE",
+        order_book_id="RB2610",
         symbol="RB2610",
         direction="LONG",
         mark_price=Decimal("3500"),
@@ -85,7 +86,7 @@ def test_dirty_contract_cas_does_not_delete_newer_version():
 
     completed = store.complete_dirty_contract(
         exchange_id="SHFE",
-        symbol="RB2610",
+        order_book_id="RB2610",
         expected_version="11",
     )
 
@@ -214,41 +215,53 @@ def test_list_active_contract_codes_returns_order_book_ids_not_internal_symbols(
     }
     pipeline = redis_client.pipeline.return_value
     # index_keys按字符串排序：CLOSED2609、JD2609、AG2612。
-    pipeline.execute.return_value = [
-        0, "CLOSED2609",
-        2, "LC2609C146000",
-        1, "AG2612",
-    ]
+    pipeline.execute.return_value = [0, 2, 1]
     store = RealtimePnlStore(redis_client)
 
     result = store.list_active_contract_codes()
 
-    assert result == {"LC2609C146000", "AG2612"}
+    assert result == {"JD2609", "AG2612"}
     assert pipeline.scard.call_count == 3
-    assert pipeline.hget.call_count == 3
+    assert pipeline.hget.call_count == 0
     # 读取路径只过滤空集合，不删除索引，避免并发新建持仓时误删新索引。
     redis_client.srem.assert_not_called()
 
 
-def test_short_option_positions_expose_underlying_subscription_codes():
+def test_margin_dependency_codes_use_dedicated_index():
     redis_client = Mock()
     redis_client.smembers.return_value = {
-        "pnl:contract_positions:CFFEX:IO2609-C-4000"
+        "000300.SH",
+        "jd2609",
+        "",
     }
-    pipeline = redis_client.pipeline.return_value
-    pipeline.execute.side_effect = [
-        [{"P-IO", "P-LONG"}],
-        [
-            ["INDEX_OPTION", "SHORT", "000300.SH"],
-            ["INDEX_OPTION", "LONG", "000300.SH"],
-        ],
-    ]
 
     assert RealtimePnlStore(
         redis_client
-    ).list_margin_dependency_codes() == {"000300.SH"}
-    assert pipeline.smembers.call_count == 1
-    assert pipeline.hmget.call_count == 2
+    ).list_margin_dependency_codes() == {"000300.SH", "JD2609"}
+    redis_client.pipeline.assert_not_called()
+
+
+def test_rebuild_active_indexes_replaces_margin_dependencies_atomically():
+    redis_client = Mock()
+    pipeline = redis_client.pipeline.return_value
+    pipeline.get.return_value = "3"
+    pipeline.smembers.return_value = set()
+    pipeline.execute.return_value = []
+
+    rebuilt = RealtimePnlStore(redis_client).rebuild_active_indexes(
+        expected_cache_version="3",
+        positions=[("A001", "DCE", "JD2609P3500", "P001")],
+        margin_dependency_codes=["jd2609", "JD2609", "", "000300.SH"],
+    )
+
+    assert rebuilt is True
+    deleted = pipeline.delete.call_args.args
+    assert "pnl:margin_dependency_codes" in deleted
+    pipeline.sadd.assert_any_call(
+        "pnl:margin_dependency_codes",
+        "000300.SH",
+        "JD2609",
+    )
 
 
 def test_account_fact_dirty_uses_independent_version_and_cas_keys():
@@ -291,7 +304,7 @@ def test_closed_position_prunes_empty_account_and_contract_meta_indexes():
             dirty_version="cycle-1",
             active_positions=[],
             closed_positions=[
-                ("A001", "DCE", "JD2609", "JD2609", "P001")
+                ("A001", "DCE", "JD2609", "P001")
             ],
         )
     )
@@ -601,7 +614,7 @@ def test_rebuild_active_indexes_retries_watch_conflict_then_succeeds():
 
     rebuilt = store.rebuild_active_indexes(
         expected_cache_version="3",
-        positions=[("A001", "DCE", "JD2609", "JD2609", "P001")],
+        positions=[("A001", "DCE", "JD2609", "P001")],
     )
 
     assert rebuilt is True
@@ -640,7 +653,7 @@ def test_rebuild_active_indexes_does_not_overwrite_newer_version():
 
     rebuilt = store.rebuild_active_indexes(
         expected_cache_version="11",
-        positions=[("A001", "DCE", "JD2609", "JD2609", "P001")],
+        positions=[("A001", "DCE", "JD2609", "P001")],
     )
 
     assert rebuilt is False

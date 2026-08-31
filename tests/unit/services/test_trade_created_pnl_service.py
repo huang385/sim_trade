@@ -51,6 +51,7 @@ def test_trade_only_marks_cross_process_dirty_contract():
                 "account_id": "A001",
                 "exchange_id": "shfe",
                 "symbol": "rb2610",
+                "order_book_id": "RB2610",
                 "trade_time": now.isoformat(),
             }
         ),
@@ -69,7 +70,7 @@ def test_trade_only_marks_cross_process_dirty_contract():
         {
             "event_id": "E001",
             "exchange_id": "SHFE",
-            "symbol": "RB2610",
+            "order_book_id": "RB2610",
             "account_id": "A001",
             "processed_ttl_seconds": 604800,
         }
@@ -144,6 +145,7 @@ def test_order_events_mark_only_account_facts_dirty(event_type):
                     "account_id": "A001",
                     "exchange_id": "DCE",
                     "symbol": "JD2609",
+                    "order_book_id": "JD2609",
                 }
             ),
         },
@@ -198,6 +200,7 @@ def test_position_fact_event_refreshes_only_affected_contract():
                     "account_id": "A001",
                     "exchange_id": "DCE",
                     "symbol": "JD2609-C-4000",
+                    "order_book_id": "JD2609C4000",
                     "fact_reason": "OPTION_MARGIN_ADJUSTMENT",
                 }
             ),

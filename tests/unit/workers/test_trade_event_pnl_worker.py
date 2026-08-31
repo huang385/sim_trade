@@ -78,9 +78,10 @@ def test_ack_failure_redelivery_keeps_fact_event_idempotent():
         "payload": json.dumps(
             {
                 "event_id": "EVENT-ACK-001",
-                "account_id": "A001",
-                "exchange_id": "DCE",
-                "symbol": "JD2609",
+                    "account_id": "A001",
+                    "exchange_id": "DCE",
+                    "symbol": "JD2609",
+                    "order_book_id": "JD2609",
             }
         ),
     }

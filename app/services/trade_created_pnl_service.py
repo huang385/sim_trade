@@ -94,7 +94,7 @@ class TradeCreatedPnlService:
             raise TradeCreatedPnlValidationError(
                 "账户事实事件event_id与payload不一致"
             )
-        required = ("account_id", "exchange_id", "symbol")
+        required = ("account_id", "exchange_id", "order_book_id")
         if any(not str(payload.get(name, "")).strip() for name in required):
             raise TradeCreatedPnlValidationError(
                 "账户事实事件缺少实时盈亏刷新字段"
@@ -126,7 +126,7 @@ class TradeCreatedPnlService:
 
         account_id = str(payload["account_id"]).strip()
         exchange_id = str(payload.get("exchange_id") or "").strip().upper()
-        symbol = str(payload.get("symbol") or "").strip().upper()
+        order_book_id = str(payload.get("order_book_id") or "").strip().upper()
         if event_type in {
             "TRADE_CREATED",
             "POSITION_UPDATED",
@@ -135,7 +135,7 @@ class TradeCreatedPnlService:
             version = self.pnl_store.mark_contract_dirty_once(
                 event_id=event_id,
                 exchange_id=exchange_id,
-                symbol=symbol,
+                order_book_id=order_book_id,
                 account_id=account_id,
                 processed_ttl_seconds=self.processed_ttl_seconds,
             )
@@ -164,7 +164,7 @@ class TradeCreatedPnlService:
                 self.cache.invalidate(
                     account_id=account_id,
                     exchange_id=exchange_id,
-                    symbol=symbol,
+                    order_book_id=order_book_id,
                 )
             else:
                 self.cache.invalidate(account_id=account_id)

@@ -139,25 +139,25 @@ def test_real_new_trade_dirty_cannot_be_cleared_by_older_pnl_cycle():
     suffix = uuid4().hex.upper()
     account_id = f"WS-DIRTY-A-{suffix}"
     exchange_id = "WST"
-    symbol = f"WS{suffix}"
-    member = pnl_dirty_contract_member(exchange_id, symbol)
+    order_book_id = f"WS{suffix}"
+    member = pnl_dirty_contract_member(exchange_id, order_book_id)
     store = RealtimePnlStore(redis_client)
     try:
         first = store.mark_contract_dirty(
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id=account_id,
         )
         second = store.mark_contract_dirty(
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             account_id=account_id,
         )
 
         assert int(second) > int(first)
         assert store.complete_dirty_contract(
             exchange_id=exchange_id,
-            symbol=symbol,
+            order_book_id=order_book_id,
             expected_version=first,
         ) is False
         assert redis_client.sismember(PNL_DIRTY_CONTRACTS_KEY, member)
@@ -173,7 +173,7 @@ def test_real_new_trade_dirty_cannot_be_cleared_by_older_pnl_cycle():
         redis_client.srem(PNL_DIRTY_CONTRACTS_KEY, member)
         redis_client.hdel(PNL_DIRTY_CONTRACT_VERSIONS_KEY, member)
         redis_client.delete(
-            pnl_dirty_contract_accounts_key(exchange_id, symbol),
+            pnl_dirty_contract_accounts_key(exchange_id, order_book_id),
             pnl_dirty_account_contracts_key(account_id),
         )
 

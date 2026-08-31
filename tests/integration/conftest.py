@@ -249,7 +249,7 @@ def integration_context():
             select(
                 Position.position_id,
                 Position.exchange_id,
-                Position.symbol,
+                Position.order_book_id,
             ).where(
                 Position.account_id == context.account_id
             )
@@ -394,7 +394,10 @@ def integration_context():
                 row.position_id,
             )
             pipeline.srem(
-                pnl_contract_positions_key(row.exchange_id, row.symbol),
+                pnl_contract_positions_key(
+                    row.exchange_id,
+                    row.order_book_id,
+                ),
                 row.position_id,
             )
             pipeline.delete(pnl_position_key(row.position_id))
@@ -402,7 +405,7 @@ def integration_context():
         for row in position_rows:
             contract_key = pnl_contract_positions_key(
                 row.exchange_id,
-                row.symbol,
+                row.order_book_id,
             )
             if redis_client.scard(contract_key) == 0:
                 redis_client.srem(

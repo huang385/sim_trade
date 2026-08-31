@@ -52,11 +52,14 @@ class PositionPnlSnapshot:
 
     @property
     def underlying_key(self) -> tuple[str, str] | None:
-        if not self.underlying_exchange_id or not self.underlying_symbol:
+        if (
+            not self.underlying_exchange_id
+            or not self.underlying_order_book_id
+        ):
             return None
         return (
             self.underlying_exchange_id.strip().upper(),
-            self.underlying_symbol.strip().upper(),
+            self.underlying_order_book_id.strip().upper(),
         )
 
 
