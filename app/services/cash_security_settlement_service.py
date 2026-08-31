@@ -244,7 +244,7 @@ class CashSecuritySettlementService:
                 commission=Decimal("0"),
                 realized_pnl=Decimal("0"),
                 daily_close_pnl=Decimal("0"),
-                trade_time=tick_event_time,
+                trade_time=now,
                 created_at=now,
             )
             self.trade_repository.add(db, trade)

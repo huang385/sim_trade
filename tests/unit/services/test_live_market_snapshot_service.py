@@ -73,6 +73,22 @@ def test_uses_order_book_id_for_snapshot_key_when_symbol_is_different():
     assert "603680.XSHG" in hgetall_calls[1].args[0]
 
 
+def test_internal_option_symbol_is_matched_case_insensitively():
+    service, tick = make_service(subscribed_codes="JD2610P3500")
+    latest = service.redis_client.pipeline.return_value.execute.return_value[1]
+    latest["order_book_id"] = "JD2610P3500"
+    latest["symbol"] = "jd2610-P-3500"
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id="JD2610P3500",
+        symbol="jd2610-P-3500",
+    )
+
+    assert event is not None
+    assert event.parsed_event.tick.symbol == "jd2610-P-3500"
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -142,6 +158,23 @@ def test_explicit_bootstrap_snapshot_can_price_before_subscription_is_ready():
 
     assert event is not None
     assert event.parsed_event.tick.source == "YMM_DATA_SDK"
+
+
+def test_explicit_bootstrap_snapshot_must_match_expected_stream_message_id():
+    service, tick = make_service(
+        status_value="DISCONNECTED",
+        subscribed_codes="",
+        ingest_type="REST_SNAPSHOT",
+        source="YMM_DATA_SDK",
+    )
+
+    assert service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
+        symbol=tick.symbol,
+        allow_bootstrap_snapshot=True,
+        expected_bootstrap_stream_message_id="older-snapshot-0",
+    ) is None
 
 
 def test_missing_stream_message_id_is_not_used():

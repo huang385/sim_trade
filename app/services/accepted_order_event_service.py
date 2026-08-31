@@ -241,6 +241,10 @@ class AcceptedOrderEventService:
                     symbol=order.symbol,
                     status=OrderStatus(order.status),
                     instrument_type=order.instrument_type,
+                    price_snapshot_source=getattr(order, "price_snapshot_source", None),
+                    price_snapshot_stream_message_id=(
+                        getattr(order, "price_snapshot_stream_message_id", None)
+                    ),
                     order=MatchingOrder(
                         direction=OrderDirection(order.direction),
                         offset_flag=OffsetFlag(order.offset_flag),
@@ -308,6 +312,10 @@ class AcceptedOrderEventService:
                 symbol=order.symbol,
                 status=OrderStatus(order.status),
                 instrument_type=order.instrument_type,
+                price_snapshot_source=getattr(order, "price_snapshot_source", None),
+                price_snapshot_stream_message_id=(
+                    getattr(order, "price_snapshot_stream_message_id", None)
+                ),
                 order=MatchingOrder(
                     direction=OrderDirection(order.direction),
                     offset_flag=OffsetFlag(order.offset_flag),

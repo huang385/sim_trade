@@ -948,6 +948,22 @@ class DailySettlementService:
         )
 
     @staticmethod
+    def _futures_replay_pnl_components(
+        projection: Any,
+    ) -> tuple[Decimal, Decimal]:
+        """Return the daily futures holding and close PnL components.
+
+        A fully closed futures position has no holding PnL, but its close PnL
+        is still a realized fact for the trading day and must be retained.
+        """
+        holding_pnl = (
+            quantize_money(Decimal(projection.holding_pnl))
+            if projection.ending_volume > 0
+            else ZERO
+        )
+        return holding_pnl, quantize_money(Decimal(projection.close_pnl))
+
+    @staticmethod
     def _consume_cash_security_adjustments(
         position: Position,
         adjustments: Sequence[CashSecurityCorporateActionPositionAdjustment],
@@ -1523,6 +1539,16 @@ class DailySettlementService:
 
                         settlement_margin = ZERO
                         option_market_value = ZERO
+                        if projection.instrument_type == InstrumentType.FUTURES.value:
+                            holding_pnl, close_pnl = self._futures_replay_pnl_components(
+                                projection
+                            )
+                            futures_holding_pnl = quantize_money(
+                                futures_holding_pnl + holding_pnl
+                            )
+                            futures_close_pnl = quantize_money(
+                                futures_close_pnl + close_pnl
+                            )
                         if (
                             projection.instrument_type
                             == InstrumentType.FUTURES.value
@@ -1556,13 +1582,6 @@ class DailySettlementService:
                             )
                             for detail in replay_details:
                                 detail.realtime_required_margin = ZERO
-                            futures_holding_pnl = quantize_money(
-                                futures_holding_pnl
-                                + projection.holding_pnl
-                            )
-                            futures_close_pnl = quantize_money(
-                                futures_close_pnl + projection.close_pnl
-                            )
                         elif (
                             projection.instrument_type in OPTION_TYPES
                             and projection.ending_volume > 0

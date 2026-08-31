@@ -47,6 +47,7 @@ class LiveMarketSnapshotService:
         order_book_id: str,
         symbol: str,
         allow_bootstrap_snapshot: bool = False,
+        expected_bootstrap_stream_message_id: str | None = None,
     ) -> LiveMatchingEvent | None:
         """条件全部满足时返回撮合事件，否则安全等待下一条行情。"""
 
@@ -94,6 +95,15 @@ class LiveMarketSnapshotService:
         stream_message_id = latest.get("stream_message_id", "").strip()
         if not stream_message_id:
             return None
+        # 订单到达撮合可以显式复用“本订单定价时”的同步快照，消除首次
+        # 订阅尚未确认与订单事件已到达之间的竞态。若缓存已被另一条快照
+        # 覆盖，则宁可等待实时 Tick，不能改用未经该订单确认的历史行情。
+        if (
+            is_bootstrap_snapshot
+            and expected_bootstrap_stream_message_id is not None
+            and stream_message_id != expected_bootstrap_stream_message_id
+        ):
+            return None
         try:
             tick = MarketTickStore.mapping_to_tick(latest)
         except Exception:
@@ -101,7 +111,10 @@ class LiveMarketSnapshotService:
         if (
             tick.exchange_id != normalized_exchange
             or tick.order_book_id != normalized_order_book_id
-            or tick.symbol != normalized_symbol
+            # 参考数据中的内部 symbol 允许保留源端大小写（例如商品期权
+            # jd2610-P-3500），而下单与 Redis 查询入口会统一转为大写。
+            # 身份校验仍保留 symbol 这道防线，但两侧必须按相同规则比较。
+            or normalize_code(tick.symbol) != normalized_symbol
         ):
             return None
 

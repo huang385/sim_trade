@@ -53,6 +53,30 @@ def test_cash_security_trade_cash_effect_uses_turnover_and_fee_once(
     assert DailySettlementService._trade_cash_effect(trade) == expected
 
 
+@pytest.mark.parametrize(
+    ("ending_volume", "expected_holding_pnl"),
+    [
+        (3, Decimal("12.500000")),
+        (0, Decimal("0")),
+    ],
+)
+def test_futures_replay_keeps_close_pnl_after_position_is_fully_closed(
+    ending_volume, expected_holding_pnl
+):
+    projection = SimpleNamespace(
+        ending_volume=ending_volume,
+        holding_pnl=Decimal("12.5"),
+        close_pnl=Decimal("-80"),
+    )
+
+    holding_pnl, close_pnl = DailySettlementService._futures_replay_pnl_components(
+        projection
+    )
+
+    assert holding_pnl == expected_holding_pnl
+    assert close_pnl == Decimal("-80.000000")
+
+
 def test_cash_security_corporate_action_adjustment_stream_is_only_validated_before_projection():
     position = SimpleNamespace(
         total_volume=100,

@@ -1,4 +1,5 @@
 import logging
+import os
 import queue
 import signal
 import threading
@@ -7,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy.orm import Session
@@ -61,6 +63,33 @@ from app.services.market_tick_validation_service import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _shutdown_request_path(pid: int | None = None) -> Path:
+    """Return the per-process file used by stop_all.ps1 on Windows."""
+
+    process_id = os.getpid() if pid is None else pid
+    project_root = Path(__file__).resolve().parents[2]
+    return (
+        project_root
+        / ".runtime"
+        / "control"
+        / f"market-data-subscriber.{process_id}.stop"
+    )
+
+
+def _watch_shutdown_request(
+    worker: "MarketDataSubscriberWorker",
+    request_path: Path,
+    *,
+    poll_seconds: float = 0.2,
+) -> None:
+    """Translate the Windows stop-file request into the normal shutdown path."""
+
+    while not worker.stop_event.wait(poll_seconds):
+        if request_path.is_file():
+            worker.request_stop()
+            return
 
 
 def utc_now() -> datetime:
@@ -1046,9 +1075,19 @@ def main() -> None:
     worker = build_worker()
     signal.signal(signal.SIGINT, worker.request_stop)
     signal.signal(signal.SIGTERM, worker.request_stop)
+    request_path = _shutdown_request_path()
+    request_watcher = threading.Thread(
+        target=_watch_shutdown_request,
+        args=(worker, request_path),
+        name="MarketDataShutdownRequest",
+        daemon=True,
+    )
+    request_watcher.start()
     try:
         worker.run_forever()
     finally:
+        request_watcher.join(timeout=1)
+        request_path.unlink(missing_ok=True)
         # shutdown 已保证消费线程退出，Redis 不会被仍在运行的线程继续使用。
         redis_client.close()
 

@@ -730,7 +730,7 @@ class CloseTradeSettlementHandler:
             commission=actual_commission,
             realized_pnl=realized_pnl,
             daily_close_pnl=daily_close_pnl,
-            trade_time=command.tick_event_time,
+            trade_time=now,
             created_at=now,
         )
 

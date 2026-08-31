@@ -49,6 +49,7 @@ class OrderPriceResolver:
         *,
         request: OrderCreateRequest,
         order_book_id: str,
+        instrument_symbol: str | None = None,
         price_tick: Decimal,
         trading_day: date,
         allow_bootstrap_snapshot: bool = False,
@@ -63,7 +64,10 @@ class OrderPriceResolver:
         event_kwargs = {
             "exchange_id": request.exchange_id,
             "order_book_id": order_book_id,
-            "symbol": request.symbol,
+            # 请求字段 symbol 承载对外标准代码（order_book_id）。部分期权
+            # 的内部行情 symbol 使用不同格式，例如 SH2701C2080 对应
+            # SH701C2080；盘口 Tick 校验必须使用参考数据中的内部 symbol。
+            "symbol": instrument_symbol or request.symbol,
         }
         if allow_bootstrap_snapshot:
             event_kwargs["allow_bootstrap_snapshot"] = True

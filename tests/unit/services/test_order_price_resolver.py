@@ -103,6 +103,28 @@ def test_last_price_is_fixed_from_one_snapshot():
     )
     snapshots.get_matching_event.return_value = make_event(last_price=Decimal("4400"))
     assert result.resolved_price == Decimal("4354")
+
+
+def test_internal_instrument_symbol_is_used_for_option_tick_validation():
+    resolver, snapshots = make_resolver(make_event())
+    request = make_request(OrderType.LAST).model_copy(
+        update={"symbol": "SH2701C2080"}
+    )
+
+    result = resolver.resolve(
+        request=request,
+        order_book_id="SH2701C2080",
+        instrument_symbol="SH701C2080",
+        price_tick=Decimal("1"),
+        trading_day=TRADING_DAY,
+    )
+
+    assert result.resolved_price == Decimal("4354")
+    snapshots.get_matching_event.assert_called_once_with(
+        exchange_id="DCE",
+        order_book_id="SH2701C2080",
+        symbol="SH701C2080",
+    )
     assert result.last_price == Decimal("4354")
 
 

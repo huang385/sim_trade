@@ -46,6 +46,10 @@ class MatchingOrderCandidate:
     order: MatchingOrder
     # 服务端订单事实中的精确合约类型；撮合协调器据此选择产品边界。
     instrument_type: str = "FUTURES"
+    # 对手价、最新价等非限价订单会在受理时固化定价行情。订单到达撮合仅可
+    # 显式复用本订单刚刚使用的数据库快照，不能放开使用任意历史快照。
+    price_snapshot_source: str | None = None
+    price_snapshot_stream_message_id: str | None = None
 
 
 @dataclass(frozen=True)

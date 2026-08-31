@@ -42,6 +42,7 @@ def make_rules():
     return SimpleNamespace(
         instrument=SimpleNamespace(
             order_book_id="JD2609-C-4000",
+            instrument_type="FUTURES_OPTION",
         ),
         underlying_instrument=SimpleNamespace(
             order_book_id="JD2609",
@@ -66,6 +67,7 @@ def test_missing_option_prices_create_pre_subscription_and_return_retry_error():
 
     with pytest.raises(ServiceUnavailableError) as caught:
         service._get_option_margin_prices(
+            db=Mock(),
             request=request,
             rules=rules,
             authorized_account=account,
@@ -99,6 +101,7 @@ def test_other_market_price_business_error_does_not_create_subscription():
 
     with pytest.raises(BusinessRuleError) as caught:
         service._get_option_margin_prices(
+            db=Mock(),
             request=make_request(),
             rules=make_rules(),
             authorized_account=SimpleNamespace(account_id="A001"),
@@ -106,6 +109,44 @@ def test_other_market_price_business_error_does_not_create_subscription():
 
     assert caught.value is original
     pre_subscriptions.request_codes.assert_not_called()
+
+
+def test_missing_option_prices_bootstraps_snapshot_and_retries_once():
+    expected_prices = Mock()
+    prices = Mock()
+    prices.get_margin_prices.side_effect = [
+        BusinessRuleError(
+            "行情缺失",
+            error_code="OPTION_MARKET_PRICE_UNAVAILABLE",
+        ),
+        expected_prices,
+    ]
+    service = make_service(
+        market_prices=prices,
+        pre_subscriptions=Mock(),
+    )
+    bootstrap = Mock(return_value=True)
+    service._bootstrap_order_market_data = bootstrap
+    db = Mock()
+    request = make_request()
+    rules = make_rules()
+    account = SimpleNamespace(account_id="A001")
+
+    result = service._get_option_margin_prices(
+        db=db,
+        request=request,
+        rules=rules,
+        authorized_account=account,
+    )
+
+    assert result is expected_prices
+    assert prices.get_margin_prices.call_count == 2
+    bootstrap.assert_called_once_with(
+        db,
+        request=request,
+        rules=rules,
+        authorized_account=account,
+    )
 
 
 def test_missing_futures_order_price_requests_its_own_market_data():

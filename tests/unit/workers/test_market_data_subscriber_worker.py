@@ -16,6 +16,8 @@ from app.workers.market_data_subscriber_worker import (
     MarketDataSourceStatus,
     MarketDataSubscriberWorker,
     QueuedTick,
+    _shutdown_request_path,
+    _watch_shutdown_request,
 )
 from tests.unit.services.test_market_tick_normalizer import make_data, make_raw, normalize
 
@@ -43,6 +45,35 @@ class FakeSubscription:
 
     def join(self, timeout=None):
         self.join_called += 1
+
+
+def test_shutdown_request_path_is_scoped_to_process_id():
+    path = _shutdown_request_path(41240)
+
+    assert path.name == "market-data-subscriber.41240.stop"
+    assert path.parent.name == "control"
+    assert path.parent.parent.name == ".runtime"
+
+
+def test_shutdown_request_file_requests_worker_stop(tmp_path):
+    stop_event = threading.Event()
+    worker = SimpleNamespace(
+        stop_event=stop_event,
+        request_stop=Mock(side_effect=stop_event.set),
+    )
+    request_path = tmp_path / "market-data-subscriber.41240.stop"
+    watcher = threading.Thread(
+        target=_watch_shutdown_request,
+        args=(worker, request_path),
+        kwargs={"poll_seconds": 0.01},
+    )
+    watcher.start()
+
+    request_path.touch()
+    watcher.join(timeout=1)
+
+    assert not watcher.is_alive()
+    worker.request_stop.assert_called_once_with()
 
 
 def make_worker(

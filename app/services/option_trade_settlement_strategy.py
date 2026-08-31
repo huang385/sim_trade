@@ -137,7 +137,7 @@ class OptionTradeSettlementStrategy:
             commission=actual_commission,
             realized_pnl=Decimal("0.000000"),
             daily_close_pnl=Decimal("0.000000"),
-            trade_time=command.tick_event_time,
+            trade_time=now,
             created_at=now,
         )
         trade_repository.add(db, trade)

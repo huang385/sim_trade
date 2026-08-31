@@ -46,10 +46,25 @@ class OrderArrivalMatchingService:
         symbol: str,
         order_snapshot: MatchingOrderCandidate | None = None,
     ) -> OrderArrivalMatchResult:
+        expected_bootstrap_stream_message_id = None
+        if (
+            order_snapshot is not None
+            and order_snapshot.price_snapshot_source == "YMM_DATA_SDK"
+            and order_snapshot.price_snapshot_stream_message_id
+        ):
+            expected_bootstrap_stream_message_id = (
+                order_snapshot.price_snapshot_stream_message_id
+            )
         event = self.live_market_snapshot_service.get_matching_event(
             exchange_id=exchange_id,
             order_book_id=order_book_id,
             symbol=symbol,
+            allow_bootstrap_snapshot=(
+                expected_bootstrap_stream_message_id is not None
+            ),
+            expected_bootstrap_stream_message_id=(
+                expected_bootstrap_stream_message_id
+            ),
         )
         if event is None:
             return OrderArrivalMatchResult(

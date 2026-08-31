@@ -236,12 +236,13 @@ class OrderService:
     def _get_option_margin_prices(
         self,
         *,
+        db: Session,
         request: OrderCreateRequest,
         rules: OrderReferenceRules,
         authorized_account: Account,
         order_price: Decimal | None = None,
     ) -> OptionMarginMarketPrices:
-        """读取卖方保证金价格；首次缺行情时自动登记临时订阅需求。"""
+        """读取卖方保证金价格；缺行情时同步补取快照后重试一次。"""
 
         if (
             self.option_market_price_service is None
@@ -267,28 +268,32 @@ class OrderService:
                 or self.market_pre_subscription_store is None
             ):
                 raise
-            # 兼容尚未调用准备接口的旧客户端：首次卖出开仓发现行情缺失时，
-            # 自动写入“期权+标的”临时需求。请求本身不创建订单、不冻结资金，
-            # 客户端等待行情就绪后使用同一client_order_id安全重试即可。
-            self.option_permission_service.validate(
-                account=authorized_account,
-                instrument=rules.instrument,
-                direction=request.direction,
-                offset_flag=request.offset_flag,
-            )
-            try:
-                self.market_pre_subscription_store.request_codes(
-                    account_id=request.account_id,
-                    codes={
-                        rules.instrument.order_book_id,
-                        rules.underlying_instrument.order_book_id,
-                    },
-                )
-            except RedisError as redis_exc:
-                raise ServiceUnavailableError(
-                    "行情预订阅服务暂不可用",
-                    error_code="MARKET_PRE_SUBSCRIPTION_UNAVAILABLE",
-                ) from redis_exc
+            # 限价期权卖开此前只登记“期权+标的”的临时订阅，必须由客户再次
+            # 提交订单。这里复用非限价单的同步补快照链路：先登记需求，再调用
+            # current_snapshot() 写入统一行情链路，并立即重试保证金价格读取。
+            # 快照暂不可用时仍保留订阅需求，由行情 Worker 继续补齐。
+            if self._bootstrap_order_market_data(
+                db,
+                request=request,
+                rules=rules,
+                authorized_account=authorized_account,
+            ):
+                try:
+                    return self.option_market_price_service.get_margin_prices(
+                        option_instrument=rules.instrument,
+                        underlying_instrument=rules.underlying_instrument,
+                        order_limit_price=(
+                            order_price
+                            if order_price is not None
+                            else request.limit_price
+                        ),
+                    )
+                except BusinessRuleError as retry_exc:
+                    if (
+                        retry_exc.error_code
+                        != "OPTION_MARKET_PRICE_UNAVAILABLE"
+                    ):
+                        raise
             raise ServiceUnavailableError(
                 "期权和标的行情正在准备，请稍后重试下单",
                 error_code="OPTION_MARKET_DATA_PREPARING",
@@ -551,6 +556,7 @@ class OrderService:
                     pricing = self.order_price_resolver.resolve(
                         request=request,
                         order_book_id=rules.instrument.order_book_id,
+                        instrument_symbol=rules.instrument.symbol,
                         price_tick=Decimal(rules.instrument.price_tick),
                         trading_day=trading_day,
                     )
@@ -571,6 +577,7 @@ class OrderService:
                         pricing = self.order_price_resolver.resolve(
                             request=request,
                             order_book_id=rules.instrument.order_book_id,
+                            instrument_symbol=rules.instrument.symbol,
                             price_tick=Decimal(rules.instrument.price_tick),
                             trading_day=trading_day,
                             allow_bootstrap_snapshot=True,
@@ -710,6 +717,7 @@ class OrderService:
                         error_code="OPTION_MARGIN_CONTEXT_INCOMPLETE",
                     )
                 prices = self._get_option_margin_prices(
+                    db=db,
                     request=request,
                     rules=rules,
                     authorized_account=authorized_account,
