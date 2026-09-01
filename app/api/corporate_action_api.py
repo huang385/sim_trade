@@ -40,7 +40,7 @@ def _service() -> CashSecurityCorporateActionService:
 
 
 @admin_router.post("", response_model=CorporateActionResponse)
-def import_corporate_action(request: CorporateActionImportRequest, db: Session = Depends(get_db)):
+def import_corporate_action(request: CorporateActionImportRequest, db: Session = Depends(get_db, scope="function")):
     """仅管理端导入公告事实；导入本身不会立即向任何账户派发资产。"""
     service = _service()
     action = service.import_action(db, payload=request.model_dump(exclude={"components"}), components=[row.model_dump() for row in request.components])
@@ -50,7 +50,7 @@ def import_corporate_action(request: CorporateActionImportRequest, db: Session =
 
 
 @admin_router.post("/{action_id}/confirm", response_model=CorporateActionResponse)
-def confirm_corporate_action(action_id: str, db: Session = Depends(get_db)):
+def confirm_corporate_action(action_id: str, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.confirm(db, action_id=action_id)
     db.commit()
@@ -59,7 +59,7 @@ def confirm_corporate_action(action_id: str, db: Session = Depends(get_db)):
 
 
 @admin_router.post("/{action_id}/entitlements/{trading_day}", response_model=CorporateActionResponse)
-def capture_entitlements(action_id: str, trading_day: date, db: Session = Depends(get_db)):
+def capture_entitlements(action_id: str, trading_day: date, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.capture_entitlements(db, action_id=action_id, trading_day=trading_day)
     db.commit()
@@ -67,7 +67,7 @@ def capture_entitlements(action_id: str, trading_day: date, db: Session = Depend
 
 
 @admin_router.post("/{action_id}/ex-date/{trading_day}", response_model=CorporateActionResponse)
-def apply_ex_date(action_id: str, trading_day: date, db: Session = Depends(get_db)):
+def apply_ex_date(action_id: str, trading_day: date, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.apply_ex_date(db, action_id=action_id, trading_day=trading_day)
     db.commit()
@@ -75,7 +75,7 @@ def apply_ex_date(action_id: str, trading_day: date, db: Session = Depends(get_d
 
 
 @admin_router.post("/{action_id}/payment/{trading_day}", response_model=CorporateActionResponse)
-def pay_corporate_action(action_id: str, trading_day: date, db: Session = Depends(get_db)):
+def pay_corporate_action(action_id: str, trading_day: date, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.pay_cash(db, action_id=action_id, trading_day=trading_day)
     db.commit()
@@ -83,7 +83,7 @@ def pay_corporate_action(action_id: str, trading_day: date, db: Session = Depend
 
 
 @admin_router.post("/{action_id}/listing/{trading_day}", response_model=CorporateActionResponse)
-def list_corporate_action_shares(action_id: str, trading_day: date, db: Session = Depends(get_db)):
+def list_corporate_action_shares(action_id: str, trading_day: date, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.list_pending_shares(db, action_id=action_id, trading_day=trading_day)
     db.commit()
@@ -91,7 +91,7 @@ def list_corporate_action_shares(action_id: str, trading_day: date, db: Session 
 
 
 @admin_router.post("/{action_id}/maturity/{trading_day}", response_model=CorporateActionResponse)
-def apply_bond_maturity(action_id: str, trading_day: date, db: Session = Depends(get_db)):
+def apply_bond_maturity(action_id: str, trading_day: date, db: Session = Depends(get_db, scope="function")):
     service = _service()
     service.apply_bond_maturity(db, action_id=action_id, trading_day=trading_day)
     db.commit()
@@ -99,14 +99,14 @@ def apply_bond_maturity(action_id: str, trading_day: date, db: Session = Depends
 
 
 @admin_router.post("/{action_id}/price-factor", response_model=CorporateActionResponse)
-def record_price_factor(action_id: str, request: PriceAdjustmentFactorCreate, db: Session = Depends(get_db)):
+def record_price_factor(action_id: str, request: PriceAdjustmentFactorCreate, db: Session = Depends(get_db, scope="function")):
     _service().record_price_adjustment_factor(db, action_id=action_id, **request.model_dump())
     db.commit()
     return db.scalar(select(CashSecurityCorporateAction).where(CashSecurityCorporateAction.action_id == action_id))
 
 
 @router.post("/{action_id}/subscribe", response_model=CorporateActionEntitlementResponse)
-def subscribe_rights(action_id: str, request: RightsSubscriptionRequest, current_user: AppUser = Depends(require_active_user), db: Session = Depends(get_db)):
+def subscribe_rights(action_id: str, request: RightsSubscriptionRequest, current_user: AppUser = Depends(require_active_user), db: Session = Depends(get_db, scope="function")):
     """配股是唯一由客户主动触发的公司行为；资格仍来自登记日权益快照。"""
     account = db.scalar(select(Account).where(Account.account_id == request.account_id))
     trading_day = account.trading_day if account is not None and account.trading_day is not None else date.today()
@@ -120,7 +120,7 @@ def subscribe_rights(action_id: str, request: RightsSubscriptionRequest, current
 def adjust_historical_bars(
     request: AdjustedPriceBarsRequest,
     _: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """Apply official corporate-action factors to caller-provided raw OHLC bars.
 
@@ -136,7 +136,7 @@ def adjust_historical_bars(
 
 
 @router.get("/{action_id}/entitlements", response_model=list[CorporateActionEntitlementResponse])
-def list_my_entitlements(action_id: str, account_id: str = Query(min_length=1), current_user: AppUser = Depends(require_active_user), db: Session = Depends(get_db)):
+def list_my_entitlements(action_id: str, account_id: str = Query(min_length=1), current_user: AppUser = Depends(require_active_user), db: Session = Depends(get_db, scope="function")):
     scope = AccountAccessScope.from_current_user(current_user)
     query = select(CashSecurityCorporateActionEntitlement).where(CashSecurityCorporateActionEntitlement.action_id == action_id, CashSecurityCorporateActionEntitlement.account_id == account_id).order_by(CashSecurityCorporateActionEntitlement.id)
     rows = db.scalars(query).all()

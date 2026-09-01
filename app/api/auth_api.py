@@ -76,7 +76,7 @@ def login(
     payload: LoginRequest,
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AuthService = Depends(get_auth_service),
 ):
     result = service.login(
@@ -95,7 +95,7 @@ def login(
 def refresh(
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AuthService = Depends(get_auth_service),
 ):
     token = request.cookies.get(settings.auth_refresh_cookie_name, "")
@@ -113,7 +113,7 @@ def refresh(
 def logout(
     request: Request,
     response: Response,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AuthService = Depends(get_auth_service),
 ):
     service.logout(
@@ -131,7 +131,7 @@ def logout(
 @router.get("/me", response_model=CurrentUserResponse)
 def me(
     current_user: AppUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),

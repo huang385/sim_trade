@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Sequence
 
 from sqlalchemy import select
@@ -98,6 +99,17 @@ class AccountRepository:
         """启动恢复扫描只读取账户编号，避免加载大批ORM资金对象。"""
 
         return db.scalars(select(Account.account_id).order_by(Account.id)).all()
+
+    @staticmethod
+    def list_distinct_trading_days(db: Session) -> Sequence[date]:
+        """返回账户账本当前使用的非空交易日。"""
+
+        return db.scalars(
+            select(Account.trading_day)
+            .where(Account.trading_day.is_not(None))
+            .distinct()
+            .order_by(Account.trading_day)
+        ).all()
 
     @staticmethod
     def list_by_user_id(

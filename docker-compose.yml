@@ -94,9 +94,9 @@ services:
 
   api:
     <<: *app-host
-    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_ADDRESS:-127.0.0.1}", "--port", "${API_PUBLISHED_PORT:-8000}", "--no-access-log"]
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_ADDRESS:-127.0.0.1}", "--port", "${API_PUBLISHED_PORT:-8000}", "--limit-concurrency", "${API_LIMIT_CONCURRENCY:-24}", "--no-access-log"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://${API_BIND_ADDRESS:-127.0.0.1}:${API_PUBLISHED_PORT:-8000}/health', timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' else 1)"]
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://${API_BIND_ADDRESS:-127.0.0.1}:${API_PUBLISHED_PORT:-8000}/live', timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' else 1)"]
       interval: 10s
       timeout: 5s
       retries: 5

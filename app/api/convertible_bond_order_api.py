@@ -27,7 +27,7 @@ router = APIRouter(prefix="/api/convertible-bond/orders", tags=["可转债订单
 def create_convertible_bond_order(
     request: ConvertibleBondOrderCreateRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: ConvertibleBondOrderService = Depends(get_convertible_bond_order_service),
 ):
     return service.create_order(
@@ -42,7 +42,7 @@ def cancel_convertible_bond_order(
     order_id: str,
     request: OrderCancelRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: ConvertibleBondOrderCancellationService = Depends(
         get_convertible_bond_order_cancellation_service
     ),

@@ -408,10 +408,10 @@ class RealtimePnlService:
                 local_models: dict[str, PositionRealtimePnl] = {}
                 local_deltas: dict[str, list[Decimal]] = {}
                 local_additions: list[
-                    tuple[str, str, str, str, str]
+                    tuple[str, str, str, str]
                 ] = []
                 local_removals: list[
-                    tuple[str, str, str, str, str]
+                    tuple[str, str, str, str]
                 ] = []
                 for position in positions:
                     result = self.calculator.calculate_position(

@@ -34,7 +34,7 @@ router = APIRouter(
 )
 def upsert_current_margin_rule(
     request: MarginRuleCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),
@@ -56,7 +56,7 @@ def upsert_current_margin_rule(
 def get_current_margin_rule(
     exchange_id: str,
     symbol: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),
@@ -80,7 +80,7 @@ def list_current_margin_rules(
     exchange_id: str | None = Query(
         default=None,
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),
@@ -101,7 +101,7 @@ def list_current_margin_rules(
 )
 def upsert_daily_margin_rule(
     request: MarginRuleDailyCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),
@@ -124,7 +124,7 @@ def get_daily_margin_rule(
     trading_day: date,
     exchange_id: str,
     symbol: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),
@@ -150,7 +150,7 @@ def list_daily_margin_rules(
     exchange_id: str | None = Query(
         default=None,
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: MarginRuleService = Depends(
         get_margin_rule_service
     ),

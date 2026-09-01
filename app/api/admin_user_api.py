@@ -31,7 +31,7 @@ def get_admin_user_service() -> AdminUserService:
 @router.post("", response_model=UserResponse)
 def create_user(
     request: UserCreateRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AdminUserService = Depends(get_admin_user_service),
 ):
     return service.create_user(db, request)
@@ -39,7 +39,7 @@ def create_user(
 
 @router.get("", response_model=list[UserResponse])
 def list_users(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AdminUserService = Depends(get_admin_user_service),
 ):
     return service.list_users(db)
@@ -49,7 +49,7 @@ def list_users(
 def update_user_status(
     user_id: str,
     request: UserStatusUpdateRequest,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AdminUserService = Depends(get_admin_user_service),
 ):
     return service.update_status(

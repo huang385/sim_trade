@@ -24,6 +24,10 @@ class FakeRepository:
         self.calls += 1
         return self.rows
 
+    def list_account_candidate_schedules(self, _db, **_kwargs):
+        self.calls += 1
+        return self.rows
+
 
 def instrument():
     return SimpleNamespace(
@@ -126,3 +130,31 @@ def test_cash_security_trading_day_does_not_require_product_id():
 
     assert result == date(2026, 8, 10)
     assert repository.calls == 1
+
+
+def test_account_creation_uses_active_session_trading_day():
+    repository = FakeRepository([row()])
+    service = TradingDayService(repository=repository)
+
+    result = service.resolve_for_account_creation(
+        object(),
+        account_type="FUTURES",
+        now=datetime(2026, 8, 10, 21, 30, tzinfo=SHANGHAI),
+    )
+
+    assert result == date(2026, 8, 11)
+
+
+def test_account_creation_during_break_uses_next_session():
+    next_session = row(trading_day=date(2026, 8, 11))
+    next_session["sessions"][0]["start_at"] = "2026-08-11T09:30:00+08:00"
+    next_session["sessions"][0]["end_at"] = "2026-08-11T11:30:00+08:00"
+    service = TradingDayService(repository=FakeRepository([next_session]))
+
+    result = service.resolve_for_account_creation(
+        object(),
+        account_type="SECURITIES_CASH",
+        now=datetime(2026, 8, 10, 16, 0, tzinfo=SHANGHAI),
+    )
+
+    assert result == date(2026, 8, 11)

@@ -241,6 +241,114 @@ class TradingDayService:
             )
         return next(iter(matches))
 
+    def resolve_for_account_creation(
+        self,
+        db: Session,
+        *,
+        account_type: str,
+        now: datetime | None = None,
+    ) -> date:
+        """按上海时间和有效交易时段确定新账户的初始交易日。"""
+
+        normalized_type = normalize_code(account_type)
+        if normalized_type in {"STOCK", "SECURITIES_CASH"}:
+            instrument_types = ("STOCK", "CONVERTIBLE_BOND")
+        elif normalized_type in {"FUTURES", "OPTION"}:
+            instrument_types = ("FUTURES", "FUTURES_OPTION", "INDEX_OPTION")
+        else:
+            raise BusinessRuleError(
+                "当前账户类型无法根据交易时段初始化交易日",
+                error_code="ACCOUNT_TRADING_DAY_UNSUPPORTED",
+            )
+
+        local_now = now or self.now_provider()
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=SHANGHAI)
+        else:
+            local_now = local_now.astimezone(SHANGHAI)
+        rows = self.repository.list_account_candidate_schedules(
+            db,
+            instrument_types=instrument_types,
+            start_day=local_now.date() - timedelta(days=1),
+            end_day=local_now.date() + timedelta(days=14),
+        )
+
+        sessions: list[TradingSession] = []
+        for row in rows:
+            if not row.get("calendar_is_open"):
+                continue
+            if str(row.get("calendar_status") or "").upper() != "OPEN":
+                continue
+            if str(row.get("schedule_status") or "").upper() not in {
+                "OPEN",
+                "READY",
+            }:
+                continue
+            raw_sessions = row.get("sessions")
+            if isinstance(raw_sessions, str):
+                raw_sessions = json.loads(raw_sessions)
+            if not isinstance(raw_sessions, list):
+                raise BusinessRuleError(
+                    "品种交易时段格式不合法",
+                    error_code="TRADING_SCHEDULE_INVALID",
+                )
+            for raw in raw_sessions:
+                try:
+                    start_at = self._parse_datetime(raw["start_at"])
+                    end_at = self._parse_datetime(raw["end_at"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise BusinessRuleError(
+                        "品种交易时段格式不合法",
+                        error_code="TRADING_SCHEDULE_INVALID",
+                    ) from exc
+                if end_at <= start_at:
+                    raise BusinessRuleError(
+                        "品种交易时段起止时间不合法",
+                        error_code="TRADING_SCHEDULE_INVALID",
+                    )
+                if bool(raw.get("allow_open", True)):
+                    sessions.append(
+                        TradingSession(
+                            trading_day=row["trading_day"],
+                            start_at=start_at,
+                            end_at=end_at,
+                            allow_open=True,
+                            allow_close=bool(raw.get("allow_close", True)),
+                        )
+                    )
+
+        active_days = {
+            item.trading_day
+            for item in sessions
+            if item.start_at <= local_now < item.end_at
+        }
+        if len(active_days) > 1:
+            raise BusinessRuleError(
+                "当前交易时段映射到多个账户交易日",
+                error_code="TRADING_DAY_AMBIGUOUS",
+            )
+        if active_days:
+            return next(iter(active_days))
+
+        future_sessions = [item for item in sessions if item.start_at >= local_now]
+        if not future_sessions:
+            raise BusinessRuleError(
+                "当前账户类型缺少可用交易日历或后续交易时段",
+                error_code="TRADING_SCHEDULE_MISSING",
+            )
+        next_start = min(item.start_at for item in future_sessions)
+        next_days = {
+            item.trading_day
+            for item in future_sessions
+            if item.start_at == next_start
+        }
+        if len(next_days) != 1:
+            raise BusinessRuleError(
+                "下一交易时段映射到多个账户交易日",
+                error_code="TRADING_DAY_AMBIGUOUS",
+            )
+        return next(iter(next_days))
+
     def invalidate(self) -> None:
         with self._lock:
             self._cache.clear()

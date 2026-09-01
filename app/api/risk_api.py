@@ -26,7 +26,7 @@ def get_risk_snapshot(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """返回当前用户有权访问的账户风险状态和最近强平任务。"""
 
@@ -54,7 +54,7 @@ def list_risk_events(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """分页上限内读取账户风险审计记录，不暴露其他用户账户。"""
 
@@ -73,7 +73,7 @@ def list_liquidation_tasks(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """读取强平任务进度；账户转移或权限撤销后立即停止访问。"""
 

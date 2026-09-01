@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 from uuid import uuid4
@@ -494,7 +494,13 @@ class TradeSettlementService:
             )
 
             fill_price = quantize_money(match_result.fill_price)
-            now = utc_now()
+            # 成交业务时间来自触发撮合的行情事件，而不是Worker实际处理时刻。
+            # 重放同一Tick时必须保留相同时间事实。
+            now = command.tick_event_time
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=timezone.utc)
+            else:
+                now = now.astimezone(timezone.utc)
             if order.offset_flag != OffsetFlag.OPEN.value:
                 trade = self.close_handler.apply(
                     db,

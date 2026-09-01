@@ -64,7 +64,7 @@ def list_trade_page(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: TradeQueryService = Depends(get_trade_query_service),
 ):
     """返回可实际继续翻页的成交游标协议；旧列表接口保持兼容。"""
@@ -92,7 +92,7 @@ def get_trade(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: TradeQueryService = Depends(get_trade_query_service),
 ):
     """按系统成交编号查询一条成交。"""
@@ -114,7 +114,7 @@ def list_trade_position_allocations(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: TradeQueryService = Depends(get_trade_query_service),
 ):
     """查询平仓 Trade 实际关闭的逐笔持仓、保证金、手续费和盈亏。"""
@@ -139,7 +139,7 @@ def list_trades(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: TradeQueryService = Depends(get_trade_query_service),
 ):
     """按账户或订单查询成交；当前数据量较小，后续可增加游标分页。"""

@@ -26,7 +26,7 @@ def list_positions(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: PositionQueryService = Depends(get_position_query_service),
 ):
     """查询指定账户的多空持仓汇总。"""

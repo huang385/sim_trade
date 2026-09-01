@@ -287,7 +287,8 @@ def test_index_option_short_margin_uses_cffex_formula_and_releases_downward():
         order_book_id="000300",
         exchange_id="CFFEX",
         symbol="000300",
-        contract_multiplier=Decimal("1"),
+        # 指数本身不可交易，参考数据允许乘数为0。
+        contract_multiplier=Decimal("0"),
     )
 
     service.adjust(Mock(), account_id="A1", position_id="P1")

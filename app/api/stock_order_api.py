@@ -32,7 +32,7 @@ router = APIRouter(prefix="/api/stock/orders", tags=["股票订单"])
 def create_stock_order(
     request: StockOrderCreateRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: StockOrderService = Depends(get_stock_order_service),
 ):
     return service.create_order(
@@ -47,7 +47,7 @@ def cancel_stock_order(
     order_id: str,
     request: OrderCancelRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: StockOrderCancellationService = Depends(
         get_stock_order_cancellation_service
     ),
@@ -70,7 +70,7 @@ def list_stock_order_fee_components(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     order = authorization.require_order_access(db, current_user, order_id)
     if order.instrument_type != "STOCK":

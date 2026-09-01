@@ -31,7 +31,7 @@ router = APIRouter(
 def create_account(
     request: AccountCreate,
     _admin: AppUser = Depends(require_admin_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: AccountService = Depends(
         get_account_service
     ),
@@ -56,7 +56,7 @@ def get_account(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """
     查询账户。
@@ -77,7 +77,7 @@ def list_accounts(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """
     查询全部账户。

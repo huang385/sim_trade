@@ -16,6 +16,10 @@ from app.models.account import Account
 from app.repositories.account_repository import AccountRepository
 from app.schemas.account_schema import AccountCreate
 from app.repositories.user_repository import UserRepository
+from app.services.trading_day_service import (
+    TradingDayService,
+    get_trading_day_service,
+)
 
 
 class AccountService:
@@ -27,9 +31,11 @@ class AccountService:
         self,
         repository: AccountRepository,
         user_repository: UserRepository | None = None,
+        trading_day_service: TradingDayService | None = None,
     ):
         self.repository = repository
         self.user_repository = user_repository or UserRepository()
+        self.trading_day_service = trading_day_service or get_trading_day_service()
 
     def create_account(
         self,
@@ -56,6 +62,20 @@ class AccountService:
             raise ResourceConflictError(
                 "账户已经存在"
             )
+
+        account_trading_days = tuple(
+            self.repository.list_distinct_trading_days(db)
+        )
+        if len(account_trading_days) > 1:
+            raise DataAccessError("现有账户交易日不一致，禁止创建新账户")
+        trading_day = (
+            account_trading_days[0]
+            if account_trading_days
+            else self.trading_day_service.resolve_for_account_creation(
+                db,
+                account_type=request.account_type.value,
+            )
+        )
 
         account = Account(
             account_id=request.account_id,
@@ -90,6 +110,7 @@ class AccountService:
 
             risk_ratio=0,
             status=AccountStatus.NORMAL.value,
+            trading_day=trading_day,
         )
 
         try:

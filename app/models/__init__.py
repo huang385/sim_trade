@@ -33,6 +33,7 @@ from app.models.position_freeze_allocation import PositionFreezeAllocation
 from app.models.trade_position_allocation import TradePositionAllocation
 from app.models.app_user import AppUser
 from app.models.auth_refresh_session import AuthRefreshSession
+from app.models.market_sdk_token_binding import MarketSdkTokenBinding
 from app.models.liquidation_task import LiquidationTask
 from app.models.risk_event import RiskEvent
 from app.models.daily_settlement import (
@@ -84,6 +85,7 @@ __all__ = [
     "TradePositionAllocation",
     "AppUser",
     "AuthRefreshSession",
+    "MarketSdkTokenBinding",
     "LiquidationTask",
     "RiskEvent",
     "DailySettlementBatch",

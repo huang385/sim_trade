@@ -744,14 +744,18 @@ class OrderService:
                         option_rule.extra_margin_rate
                     ),
                 )
-                underlying_multiplier = Decimal(
-                    rules.underlying_instrument.contract_multiplier
-                )
+                # 股指参考标的是不可交易指数，contract_multiplier 按模型
+                # 约定可以为0；中金所期权公式只使用期权自身乘数。这里的
+                # underlying_multiplier 对股指期权只是协议占位值。
+                underlying_multiplier = Decimal("1")
                 underlying_margin_rate = Decimal("0")
                 underlying_margin_per_lot = Decimal("0.000000")
                 # 商品期权公式需要标的期货每手保证金；股指期权公式直接
                 # 使用指数点位，因此不查询也不伪造标的保证金规则。
                 if instrument_type == InstrumentType.FUTURES_OPTION.value:
+                    underlying_multiplier = Decimal(
+                        rules.underlying_instrument.contract_multiplier
+                    )
                     underlying_margin_rate = max(
                         Decimal(
                             rules.underlying_margin_rule.long_margin_rate
@@ -1399,6 +1403,79 @@ class OrderService:
             next_cursor=next_cursor,
             has_more=has_more,
         )
+
+
+class OrderQueryService:
+    """订单只读查询；禁止为GET请求构造行情SDK和完整下单服务图。"""
+
+    def __init__(self, repository: OrderRepository | None = None) -> None:
+        self.order_repository = repository or OrderRepository()
+
+    def list_orders(
+        self,
+        db: Session,
+        account_id: str,
+        *,
+        after_id: int | None = None,
+        limit: int = 100,
+    ) -> Sequence[Order]:
+        return self.order_repository.list_by_account(
+            db=db,
+            account_id=account_id.strip(),
+            after_id=after_id,
+            limit=limit,
+        )
+
+    def list_order_page(
+        self,
+        db: Session,
+        account_id: str,
+        *,
+        trading_day: date | None = None,
+        cursor: str | None,
+        limit: int,
+    ) -> OrderPageResponse:
+        normalized_account_id = account_id.strip()
+        filters = {
+            "account_id": normalized_account_id,
+            "trading_day": trading_day.isoformat() if trading_day else None,
+        }
+        before_id = None
+        if cursor is not None:
+            before_id = decode_cursor(
+                cursor,
+                expected_kind="orders",
+                expected_filters=filters,
+            ).before_id
+        rows = list(
+            self.order_repository.list_page_by_account(
+                db,
+                normalized_account_id,
+                trading_day=trading_day,
+                before_id=before_id,
+                fetch_size=limit + 1,
+            )
+        )
+        has_more = len(rows) > limit
+        items = rows[:limit]
+        next_cursor = (
+            encode_cursor(
+                kind="orders",
+                before_id=items[-1].id,
+                filters=filters,
+            )
+            if has_more and items
+            else None
+        )
+        return OrderPageResponse(
+            items=items,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )
+
+
+def get_order_query_service() -> OrderQueryService:
+    return OrderQueryService()
 
 
 def get_order_service() -> OrderService:

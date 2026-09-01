@@ -38,7 +38,7 @@ def get_cash_security_history_bars(
     end_date: date = Query(),
     adjustment_mode: str = Query(default="RAW", pattern="^(RAW|FORWARD|BACKWARD)$"),
     _: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     if end_date < start_date:
         from app.common.exceptions import BusinessRuleError
@@ -60,7 +60,7 @@ def prepare_option_market_data(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: OptionMarketPreSubscriptionService = Depends(
         get_option_market_pre_subscription_service
     ),
@@ -84,7 +84,7 @@ def get_option_market_data_status(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: OptionMarketPreSubscriptionService = Depends(
         get_option_market_pre_subscription_service
     ),

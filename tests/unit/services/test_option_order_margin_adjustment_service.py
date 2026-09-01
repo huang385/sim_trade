@@ -1,3 +1,4 @@
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -6,6 +7,7 @@ import pytest
 
 from app.common.exceptions import DataAccessError
 from app.enums.option_enums import MarginPriceMode
+from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.services.option_order_margin_adjustment_service import (
     OptionOrderMarginAdjustmentResult,
     OptionOrderMarginAdjustmentService,
@@ -15,7 +17,45 @@ from app.services.trade_settlement_service import (
     SettlementCommand,
     TradeSettlementService,
 )
-from datetime import datetime, timezone
+
+
+NOW = datetime(2026, 9, 1, 5, 45, tzinfo=timezone.utc)
+
+
+def market_values(
+    *, exchange_id: str, order_book_id: str, symbol: str, price: str
+) -> dict[str, str]:
+    return MarketTickStore.tick_to_mapping(
+        SimpleNamespace(
+            model_dump=lambda **_kwargs: {
+                "source_event_id": f"TICK-{order_book_id}",
+                "source": "YMM_LIVE_DATA",
+                "ingest_type": "LIVE_CALLBACK",
+                "order_book_id": order_book_id,
+                "exchange_id": exchange_id,
+                "symbol": symbol,
+                "trading_day": date(2026, 9, 1),
+                "event_time": NOW,
+                "local_recv_time": NOW,
+                "server_time": NOW,
+                "sequence_id": 1,
+                "last_price": Decimal(price),
+                "pre_close": None,
+                "open_price": None,
+                "high_price": None,
+                "low_price": None,
+                "cumulative_volume": 1,
+                "cumulative_turnover": None,
+                "open_interest": None,
+                "bid_price_1": None,
+                "bid_volume_1": 0,
+                "ask_price_1": None,
+                "ask_volume_1": 0,
+                "raw_update_time": None,
+                "raw_update_millisec": None,
+            }
+        )
+    )
 
 
 def make_order(**overrides):
@@ -195,6 +235,76 @@ def test_missing_market_marks_valuation_unavailable_without_freeze():
     assert order.margin_risk_state == "VALUATION_UNAVAILABLE"
     assert account.risk_state == "VALUATION_UNAVAILABLE"
     assert order.frozen_margin == Decimal("1000")
+
+
+def test_index_option_order_revalues_with_zero_index_multiplier():
+    """不可交易指数的乘数为0时，股指期权仍按期权乘数重估。"""
+
+    snapshot = {
+        "rule_id": 70,
+        "rule_version": "EXCHANGE_FORMULA_V1",
+        "margin_algorithm": "CFFEX_INDEX_OPTION",
+        "margin_adjustment_rate": "0.12",
+        "minimum_guarantee_rate": "0.5",
+        "out_of_money_deduction_rate": "1",
+        "minimum_underlying_margin_ratio": "0",
+        "extra_margin_rate": "0",
+    }
+    order = make_order(
+        order_book_id="MO2610C6200",
+        exchange_id="CFFEX",
+        symbol="MO2610-C-6200",
+        instrument_type="INDEX_OPTION",
+        remaining_volume=1,
+        underlying_order_book_id="000852.XSHG",
+        limit_price=Decimal("1399.6"),
+        commission_contract_multiplier=Decimal("100"),
+        margin_rule_id=70,
+        margin_rule_version="EXCHANGE_FORMULA_V1",
+        margin_rule_snapshot=snapshot,
+    )
+    instrument = SimpleNamespace(
+        id=1,
+        order_book_id=order.order_book_id,
+        exchange_id=order.exchange_id,
+        instrument_type=order.instrument_type,
+        underlying_instrument_id=2,
+        option_type="CALL",
+        strike_price=Decimal("6200"),
+    )
+    underlying = SimpleNamespace(
+        id=2,
+        order_book_id="000852.XSHG",
+        exchange_id="XSHG",
+        contract_multiplier=Decimal("0"),
+    )
+    store = Mock()
+    store.get_latest_many.return_value = {
+        ("CFFEX", "MO2610C6200"): market_values(
+            exchange_id="CFFEX",
+            order_book_id="MO2610C6200",
+            symbol="MO2610-C-6200",
+            price="1399.6",
+        ),
+        ("XSHG", "000852.XSHG"): market_values(
+            exchange_id="XSHG",
+            order_book_id="000852.XSHG",
+            symbol="000852.XSHG",
+            price="7714.8181",
+        ),
+    }
+    repository = Mock()
+    repository.get_by_order_book_id.return_value = underlying
+    service = OptionOrderMarginAdjustmentService(
+        market_tick_store=store,
+        instrument_repository=repository,
+    )
+
+    result = service._calculate_required(
+        Mock(), order=order, instrument=instrument
+    )
+
+    assert result.total_margin == Decimal("232537.817200")
 
 
 def test_adjust_adds_account_and_order_facts_in_same_transaction():

@@ -323,18 +323,15 @@ class DailySettlementService:
     def _acquire_exclusive_lock(self, connection: Connection) -> None:
         if connection.dialect.name == "postgresql":
             connection.execute(
-                text("SELECT pg_advisory_lock(:lock_key)"),
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
                 {"lock_key": DAILY_SETTLEMENT_ADVISORY_LOCK_KEY},
             )
-            connection.commit()
 
     def _release_exclusive_lock(self, connection: Connection) -> None:
         if connection.dialect.name == "postgresql":
-            connection.execute(
-                text("SELECT pg_advisory_unlock(:lock_key)"),
-                {"lock_key": DAILY_SETTLEMENT_ADVISORY_LOCK_KEY},
-            )
-            connection.commit()
+            # 事务级锁由当前专用连接的事务结束原子释放，不再额外执行一次
+            # pg_advisory_unlock查询。
+            connection.rollback()
 
     @staticmethod
     def _instrument_models(

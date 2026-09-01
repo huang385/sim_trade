@@ -39,7 +39,7 @@ def get_account_realtime_pnl(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
     ),
@@ -64,7 +64,7 @@ def get_account_trading_snapshot(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
     ),
@@ -93,7 +93,7 @@ def get_position_realtime_pnl(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: RealtimePnlQueryService = Depends(
         get_realtime_pnl_query_service
     ),

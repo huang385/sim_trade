@@ -222,10 +222,6 @@ class OptionMarginAdjustmentService:
                     * underlying_multiplier
                     * underlying_rate
                 )
-            else:
-                underlying_multiplier = Decimal(
-                    underlying.contract_multiplier
-                )
             calculator = self.option_margin_resolver.resolve(
                 instrument_type=position.instrument_type,
                 exchange_id=instrument.exchange_id,

@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     postgres_db: str = "sim_trade"
     postgres_user: str = "postgres"
     postgres_password: str = "root"
+    # 单API实例的连接预算。超载时应快速失败，不能让请求在连接池内等待
+    # 30秒并拖死健康检查。当前暂不做多Worker扩容。
+    postgres_pool_size: int = 10
+    postgres_max_overflow: int = 20
+    postgres_pool_timeout_seconds: float = 3.0
+    postgres_pool_recycle_seconds: int = 1800
 
     redis_host: str = "127.0.0.1"
     redis_port: int = 6379
@@ -67,6 +73,9 @@ class Settings(BaseSettings):
     auth_max_login_failures: int = 5
     auth_login_lock_minutes: int = 15
     auth_login_rate_limit_per_minute: int = 30
+    # Argon2一次验证会占用较多内存；单实例内必须限制并行验证数。
+    auth_password_verify_max_concurrency: int = 4
+    auth_password_verify_acquire_timeout_seconds: float = 1.0
     auth_refresh_cookie_name: str = "sim_trade_refresh"
     auth_refresh_cookie_secure: bool = False
     auth_refresh_cookie_samesite: str = "lax"

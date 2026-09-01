@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from app.common.exceptions import (
     AuthenticationError,
     DataAccessError,
+    RateLimitError,
     ServiceUnavailableError,
 )
 from app.common.time_utils import utc_now
@@ -63,6 +64,22 @@ def test_password_uses_argon2id_and_never_stores_plaintext():
     assert password_hash.startswith("$argon2id$")
     assert service.verify_password(password_hash, password) is True
     assert service.verify_password(password_hash, "wrong-password") is False
+
+
+def test_password_verify_fails_fast_when_all_slots_are_busy():
+    service = PasswordService(
+        PasswordHasher(time_cost=1, memory_cost=8192, parallelism=1),
+        max_verify_concurrency=1,
+        verify_acquire_timeout_seconds=0,
+    )
+    assert service._verify_slots.acquire(blocking=False) is True
+    try:
+        with pytest.raises(RateLimitError) as exc_info:
+            service.verify_password("invalid-hash", "password")
+    finally:
+        service._verify_slots.release()
+
+    assert exc_info.value.error_code == "PASSWORD_VERIFY_BUSY"
 
 
 def test_access_and_refresh_tokens_have_strict_separate_types():

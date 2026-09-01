@@ -21,7 +21,15 @@ from app.services.order_cancellation_service import (
     OrderCancellationService,
     get_order_cancellation_service,
 )
-from app.services.order_service import OrderService, get_order_service
+from app.services.order_service import (
+    OrderQueryService,
+    OrderService,
+    get_order_query_service,
+    get_order_service as get_order_command_service,
+)
+
+# 保留既有API测试和依赖覆盖名称；只读路由现在取得轻量查询服务。
+get_order_service = get_order_query_service
 
 
 router = APIRouter(
@@ -35,8 +43,8 @@ router = APIRouter(
 def create_order(
     request: OrderCreateRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
-    service: OrderService = Depends(get_order_service),
+    db: Session = Depends(get_db, scope="function"),
+    service: OrderService = Depends(get_order_command_service),
 ):
     """
     接收限价开仓订单。
@@ -64,8 +72,8 @@ def list_order_page(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
-    service: OrderService = Depends(get_order_service),
+    db: Session = Depends(get_db, scope="function"),
+    service: OrderQueryService = Depends(get_order_service),
 ):
     """
     按数据库主键倒序返回订单分页。
@@ -89,7 +97,7 @@ def cancel_order(
     order_id: str,
     request: OrderCancelRequest,
     current_user: AppUser = Depends(require_active_user),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: OrderCancellationService = Depends(
         get_order_cancellation_service
     ),
@@ -116,7 +124,7 @@ def get_order(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
 ):
     """
     按系统订单编号查询订单。
@@ -141,8 +149,8 @@ def list_orders(
     authorization: AccountAuthorizationService = Depends(
         get_account_authorization_service
     ),
-    db: Session = Depends(get_db),
-    service: OrderService = Depends(get_order_service),
+    db: Session = Depends(get_db, scope="function"),
+    service: OrderQueryService = Depends(get_order_service),
 ):
     """
     查询指定账户的订单列表。

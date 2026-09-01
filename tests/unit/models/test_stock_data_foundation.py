@@ -187,7 +187,15 @@ def test_account_service_creates_stock_account_with_zero_market_value():
             )
         )
         db.commit()
-        account = AccountService(AccountRepository()).create_account(
+        trading_day_service = SimpleNamespace(
+            resolve_for_account_creation=lambda *_args, **_kwargs: date(
+                2026, 8, 17
+            )
+        )
+        account = AccountService(
+            AccountRepository(),
+            trading_day_service=trading_day_service,
+        ).create_account(
             db,
             AccountCreate(
                 account_id="STOCK-SERVICE-A",
@@ -199,6 +207,27 @@ def test_account_service_creates_stock_account_with_zero_market_value():
         )
         assert account.account_type == "STOCK"
         assert account.stock_market_value == Decimal("0.000000")
+        assert account.trading_day == date(2026, 8, 17)
+
+        def unexpected_resolution(*_args, **_kwargs):
+            raise AssertionError("已有交易日时不应重新按时段推导")
+
+        inherited = AccountService(
+            AccountRepository(),
+            trading_day_service=SimpleNamespace(
+                resolve_for_account_creation=unexpected_resolution
+            ),
+        ).create_account(
+            db,
+            AccountCreate(
+                account_id="STOCK-SERVICE-B",
+                user_id="STOCK-U",
+                account_name="第二股票账户",
+                account_type=AccountType.STOCK,
+                initial_cash=Decimal("100000"),
+            ),
+        )
+        assert inherited.trading_day == date(2026, 8, 17)
 
 
 def test_stock_rule_repository_resolves_exactly_one_effective_rule():

@@ -26,7 +26,7 @@ def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(
         bearer_scheme
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     token_service: TokenService = Depends(get_token_service),
 ) -> AppUser:
     """

@@ -534,8 +534,8 @@ class RealtimePnlStore:
         positions: list[PositionRealtimePnl],
         accounts: list[AccountRealtimePnl],
         dirty_version: str,
-        additions: list[tuple[str, str, str, str, str]],
-        removals: list[tuple[str, str, str, str, str]],
+        additions: list[tuple[str, str, str, str]],
+        removals: list[tuple[str, str, str, str]],
         mark_dirty: bool = True,
         emit_risk_events: bool = True,
     ) -> list[list[str]]:

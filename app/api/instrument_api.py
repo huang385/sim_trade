@@ -35,7 +35,7 @@ catalog_router = APIRouter(
 def search_tradeable_derivatives(
     q: str = Query(min_length=1, max_length=64),
     limit: int = Query(default=50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(get_instrument_service),
 ):
     """搜索可交易期货与期权，供桌面端合约下拉列表按需加载。"""
@@ -51,7 +51,7 @@ def search_tradeable_derivatives(
 def search_tradeable_stocks(
     q: str = Query(min_length=2, max_length=64),
     limit: int = Query(default=50, ge=1, le=100),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(get_instrument_service),
 ):
     """搜索可交易股票和可转债，供桌面端证券代码输入提示使用。"""
@@ -61,7 +61,7 @@ def search_tradeable_stocks(
 
 @catalog_router.get("", response_model=list[InstrumentCatalogItem])
 def list_tradeable_futures(
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(get_instrument_service),
 ):
     """查询当前允许交易的期货合约，供桌面端选择和订阅。"""
@@ -75,7 +75,7 @@ def list_tradeable_futures(
 )
 def upsert_instrument(
     request: InstrumentCreate,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(
         get_instrument_service
     ),
@@ -99,7 +99,7 @@ def upsert_instrument(
 def get_instrument(
     exchange_id: str,
     symbol: str,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(
         get_instrument_service
     ),
@@ -126,7 +126,7 @@ def list_instruments(
     only_active: bool | None = Query(
         default=None,
     ),
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db, scope="function"),
     service: InstrumentService = Depends(
         get_instrument_service
     ),

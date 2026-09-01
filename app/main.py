@@ -99,8 +99,16 @@ def root():
     }
 
 
+@app.get("/live")
+async def liveness_check():
+    """只证明API事件循环仍可响应，不占用数据库或Redis连接。"""
+
+    return {"status": "ok"}
+
+
+@app.get("/ready")
 @app.get("/health")
-def health_check():
+def readiness_check():
     """
     检查PostgreSQL和Redis连接状态。
     """

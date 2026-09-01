@@ -284,10 +284,6 @@ class PnlSnapshotPersistenceService:
                     * underlying_multiplier
                     * underlying_rate
                 )
-            else:
-                underlying_multiplier = Decimal(
-                    underlying.contract_multiplier
-                )
             if underlying_multiplier <= 0:
                 raise ValueError("期权标的乘数快照不合法")
             calculator = self.option_margin_resolver.resolve(

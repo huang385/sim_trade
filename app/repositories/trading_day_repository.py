@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import Session
 
 
@@ -39,6 +39,41 @@ class TradingDayRepository:
                 "exchange_id": exchange_id,
                 "product_code": product_code,
                 "instrument_type": instrument_type,
+                "start_day": start_day,
+                "end_day": end_day,
+            },
+        ).mappings()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def list_account_candidate_schedules(
+        db: Session,
+        *,
+        instrument_types: tuple[str, ...],
+        start_day: date,
+        end_day: date,
+    ) -> list[dict[str, Any]]:
+        """读取开户时用于确定账户交易日的候选交易时段。"""
+
+        statement = text(
+            "SELECT schedule.trading_day, schedule.exchange_id, "
+            "schedule.product_code, schedule.instrument_type, "
+            "schedule.sessions, schedule.status AS schedule_status, "
+            "calendar.is_open AS calendar_is_open, "
+            "calendar.status AS calendar_status "
+            "FROM product_trading_schedule AS schedule "
+            "JOIN trading_calendar AS calendar "
+            "ON calendar.exchange_id = schedule.exchange_id "
+            "AND calendar.trading_day = schedule.trading_day "
+            "WHERE schedule.instrument_type IN :instrument_types "
+            "AND schedule.trading_day BETWEEN :start_day AND :end_day "
+            "ORDER BY schedule.trading_day, schedule.exchange_id, "
+            "schedule.product_code"
+        ).bindparams(bindparam("instrument_types", expanding=True))
+        rows = db.execute(
+            statement,
+            {
+                "instrument_types": instrument_types,
                 "start_day": start_day,
                 "end_day": end_day,
             },

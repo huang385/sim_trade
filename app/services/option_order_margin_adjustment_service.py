@@ -183,8 +183,9 @@ class OptionOrderMarginAdjustmentService:
                 * underlying_multiplier
                 * underlying_rate
             )
-        else:
-            underlying_multiplier = Decimal(underlying.contract_multiplier)
+        # INDEX 标的不是可交易合约，contract_multiplier 可以合法为0；
+        # CFFEX_INDEX_OPTION 公式只使用 option_multiplier，协议中的标的
+        # 乘数固定传1，不能因此把有效行情误判成估值不可用。
         if option_multiplier <= 0 or underlying_multiplier <= 0:
             raise DataAccessError(
                 "活动期权订单合约乘数快照不合法",

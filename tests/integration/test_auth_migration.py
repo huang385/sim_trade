@@ -97,8 +97,8 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            # 公司行为、权益和除权除息事实是当前 Head。
-            assert revision == "20260819_0036"
+            # 交易日历与现金产品交易时段迁移是当前 Head。
+            assert revision == "20260831_0041"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -120,9 +120,9 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
                 "'option_expiry_settlement_detail')"
             ).fetchone()[0]
             # PostgreSQL wraps the downgrade chain in one transaction.  The
-            # The irreversible corporate-action boundary rolls the entire
+            # irreversible corporate-action boundary rolls the entire
             # downgrade chain back, so the database remains at the head.
-            assert revision == "20260819_0036"
+            assert revision == "20260831_0041"
             assert settlement_tables == 5
 
 
