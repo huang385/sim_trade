@@ -1,4 +1,5 @@
 import json
+from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -1015,6 +1016,76 @@ class DailySettlementService:
             error_code="CASH_SECURITY_REPLAY_FACT_INCOMPLETE",
         )
 
+    @staticmethod
+    def _select_derivative_replay_inputs(
+        *,
+        details: Sequence[Any],
+        trades: Sequence[Any],
+        allocations: Sequence[Any],
+        derivative_position_ids: set[str],
+        trading_day: date,
+    ) -> tuple[list[Any], list[Any], list[Any]]:
+        """只保留会影响目标交易日日终状态的衍生品回放事实。
+
+        已在目标日前完全平仓的逐笔持仓，其开/平仓成交已经进入此前
+        结算，不应要求本次结算仍能取得该历史合约，也不应重复计入。
+        当日成交仍全部保留，以便对无法关联持仓的异常事实继续 fail-closed。
+        """
+
+        derivative_details = [
+            item for item in details if item.position_id in derivative_position_ids
+        ]
+        detail_ids = {
+            item.position_detail_id for item in derivative_details
+        }
+        allocations_by_detail: dict[str, list[Any]] = defaultdict(list)
+        for item in allocations:
+            if item.position_detail_id in detail_ids:
+                allocations_by_detail[item.position_detail_id].append(item)
+
+        scoped_detail_ids: set[str] = set()
+        for detail in derivative_details:
+            detail_allocations = allocations_by_detail[detail.position_detail_id]
+            closed_volume = sum(
+                int(item.close_volume)
+                for item in detail_allocations
+                if item.close_trading_day <= trading_day
+            )
+            closed_today = any(
+                item.close_trading_day == trading_day
+                for item in detail_allocations
+            )
+            if (
+                int(detail.original_volume) > closed_volume
+                or detail.open_trading_day == trading_day
+                or closed_today
+            ):
+                scoped_detail_ids.add(detail.position_detail_id)
+
+        replay_details = [
+            item
+            for item in derivative_details
+            if item.position_detail_id in scoped_detail_ids
+        ]
+        replay_allocations = [
+            item
+            for item in allocations
+            if item.position_detail_id in scoped_detail_ids
+        ]
+        required_trade_ids = {
+            item.open_trade_id for item in replay_details
+        } | {item.trade_id for item in replay_allocations}
+        replay_trades = [
+            item
+            for item in trades
+            if item.instrument_type not in CASH_SECURITY_TYPES
+            and (
+                item.trade_id in required_trade_ids
+                or item.trading_day == trading_day
+            )
+        ]
+        return replay_details, replay_trades, replay_allocations
+
     def _settle_batch_from_facts(
         self,
         *,
@@ -1089,24 +1160,17 @@ class DailySettlementService:
                     for item in positions
                     if item.instrument_type not in CASH_SECURITY_TYPES
                 }
-                replay_details = [
-                    item
-                    for item in details
-                    if item.position_id in derivative_position_ids
-                ]
-                replay_detail_ids = {
-                    item.position_detail_id for item in replay_details
-                }
-                replay_allocations = [
-                    item
-                    for item in allocations
-                    if item.position_detail_id in replay_detail_ids
-                ]
-                replay_trades = [
-                    item
-                    for item in trades
-                    if item.instrument_type not in CASH_SECURITY_TYPES
-                ]
+                (
+                    replay_details,
+                    replay_trades,
+                    replay_allocations,
+                ) = self._select_derivative_replay_inputs(
+                    details=details,
+                    trades=trades,
+                    allocations=allocations,
+                    derivative_position_ids=derivative_position_ids,
+                    trading_day=trading_day,
+                )
                 prior_position_rows = list(
                     self.repository.list_prior_position_settlements(
                         db, trading_day

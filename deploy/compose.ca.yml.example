@@ -1,0 +1,12 @@
+# 仅当REMOTE_MARKET_DATA_CA_FILE=/run/secrets/market-data-ca.pem时叠加本文件：
+# docker compose --env-file .env.production -f docker-compose.yml \
+#   -f deploy/compose.ca.yml up -d
+x-ca-mount: &ca-mount
+  type: bind
+  source: ./deploy/certs/market-data-ca.pem
+  target: /run/secrets/market-data-ca.pem
+  read_only: true
+
+services:
+  market-data-subscriber:
+    volumes: [*ca-mount]

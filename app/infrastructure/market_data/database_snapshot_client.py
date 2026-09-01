@@ -48,14 +48,17 @@ class YmmDatabaseSnapshotClient:
         sdk_module=None,
     ) -> None:
         token = config.ymm_data_sdk_token.strip()
-        mode = config.remote_market_data_mode.strip()
-        if not token:
+        mode = (
+            getattr(config, "ymm_data_sdk_mode", "")
+            or config.remote_market_data_mode
+        ).strip()
+        if not token and mode.lower() != "local":
             raise DatabaseSnapshotConfigurationError(
-                "缺少 YMM_DATA_SDK_TOKEN"
+                "YMM_DATA_SDK_MODE为lan或TS时缺少YMM_DATA_SDK_TOKEN"
             )
         if mode.lower() not in {"lan", "ts", "local"}:
             raise DatabaseSnapshotConfigurationError(
-                "REMOTE_MARKET_DATA_MODE 必须是 lan、TS 或 local"
+                "YMM_DATA_SDK_MODE 必须是 lan、TS 或 local"
             )
         if sdk_module is None:
             try:
@@ -76,7 +79,7 @@ class YmmDatabaseSnapshotClient:
         with self._lock:
             if self._initialized:
                 return
-            self.sdk.init(token=self.token, mode=self.mode)
+            self.sdk.init(token=self.token or None, mode=self.mode)
             self._initialized = True
 
     @staticmethod

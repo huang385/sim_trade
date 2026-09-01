@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     remote_market_data_api_token: str = ""
     # 历史行情数据库SDK凭证，仅用于新增订阅时补取最后一条Tick。
     ymm_data_sdk_token: str = ""
+    # Data SDK与Live SDK允许使用不同连接模式。为空时回退到旧的共享变量，
+    # 兼容尚未迁移的本地配置；生产部署应显式设置该值。
+    ymm_data_sdk_mode: str = ""
     # 历史行情数据库SDK与实时行情SDK使用不同凭证。当前仅纳入统一配置
     # 校验，具体调用方必须按需读取，且不得记录实际Token。
     remote_market_data_timeout_seconds: float = 3.0

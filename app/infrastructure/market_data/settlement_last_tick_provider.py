@@ -77,7 +77,10 @@ class YmmSettlementLastTickProvider:
         sleep=time.sleep,
     ) -> None:
         self.token = config.ymm_data_sdk_token.strip()
-        mode = config.remote_market_data_mode.strip()
+        mode = (
+            getattr(config, "ymm_data_sdk_mode", "")
+            or config.remote_market_data_mode
+        ).strip()
         self.sdk = sdk_module
         self.mode = mode
         self.timeout_seconds = max(
@@ -94,13 +97,13 @@ class YmmSettlementLastTickProvider:
         with self._lock:
             if self._initialized:
                 return
-            if not self.token:
+            if not self.token and self.mode.lower() != "local":
                 raise SettlementLastTickConfigurationError(
-                    "缺少 YMM_DATA_SDK_TOKEN"
+                    "YMM_DATA_SDK_MODE为lan或TS时缺少YMM_DATA_SDK_TOKEN"
                 )
             if self.mode.lower() not in {"lan", "ts", "local"}:
                 raise SettlementLastTickConfigurationError(
-                    "REMOTE_MARKET_DATA_MODE 必须是 lan、TS 或 local"
+                    "YMM_DATA_SDK_MODE 必须是 lan、TS 或 local"
                 )
             if self.sdk is None:
                 try:
@@ -111,7 +114,7 @@ class YmmSettlementLastTickProvider:
                     ) from exc
                 self.sdk = sdk_module
             self.mode = "TS" if self.mode.lower() == "ts" else self.mode.lower()
-            self.sdk.init(token=self.token, mode=self.mode)
+            self.sdk.init(token=self.token or None, mode=self.mode)
             self._initialized = True
 
     @staticmethod

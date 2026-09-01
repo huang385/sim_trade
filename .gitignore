@@ -2,6 +2,18 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
+
+# 私有SDK wheel只允许保存在部署机器本地；提交空目录占位文件即可
+private-wheels/*
+!private-wheels/.gitkeep
+# 防止私有SDK再次被放回旧的参考文档目录并提交
+docs/reference/ymm_data_sdk-*.whl
+docs/reference/ymm_live_data_sdk-*.whl
+
+# 生产私有CA及本地启用的Compose覆盖文件
+deploy/certs/
+deploy/compose.ca.yml
 
 # Python字节码和测试缓存
 __pycache__/

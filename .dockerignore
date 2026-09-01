@@ -1,0 +1,22 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+!.env.production.example
+.runtime
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+docs
+deploy
+scripts
+requirements-dev.txt
+STRESS_TEST_REPORT_*.md
+
+# private-wheels不能忽略：构建阶段需要读取；Dockerfile不会把它复制到最终阶段。

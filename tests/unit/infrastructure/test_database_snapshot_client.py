@@ -2,7 +2,10 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from app.infrastructure.market_data.database_snapshot_client import (
+    DatabaseSnapshotConfigurationError,
     YmmDatabaseSnapshotClient,
 )
 
@@ -85,3 +88,31 @@ def test_single_snapshot_response_is_supported():
     result = client.fetch_latest_many(["JD2608"])
 
     assert result["JD2608"]["last"] == 200
+
+
+def test_local_mode_allows_empty_token_and_uses_dedicated_mode():
+    sdk = Mock()
+    sdk.get_future_latest_trading_date.return_value = "2026-08-13"
+    sdk.current_snapshot.return_value = make_snapshot("JD2608")
+    config = make_config(
+        ymm_data_sdk_token="",
+        ymm_data_sdk_mode="local",
+        remote_market_data_mode="lan",
+    )
+
+    YmmDatabaseSnapshotClient(config, sdk_module=sdk).fetch_latest_many(
+        ["JD2608"]
+    )
+
+    sdk.init.assert_called_once_with(token=None, mode="local")
+
+
+def test_remote_data_mode_still_requires_token():
+    with pytest.raises(
+        DatabaseSnapshotConfigurationError,
+        match="YMM_DATA_SDK_TOKEN",
+    ):
+        YmmDatabaseSnapshotClient(
+            make_config(ymm_data_sdk_token="", ymm_data_sdk_mode="lan"),
+            sdk_module=Mock(),
+        )

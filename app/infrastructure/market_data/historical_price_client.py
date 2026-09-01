@@ -27,11 +27,16 @@ class YmmHistoricalPriceClient:
 
     def __init__(self, config: Settings = settings, *, sdk_module=None) -> None:
         token = config.ymm_data_sdk_token.strip()
-        mode = config.remote_market_data_mode.strip()
-        if not token:
-            raise DatabaseSnapshotConfigurationError("Missing YMM_DATA_SDK_TOKEN")
+        mode = (
+            getattr(config, "ymm_data_sdk_mode", "")
+            or config.remote_market_data_mode
+        ).strip()
+        if not token and mode.lower() != "local":
+            raise DatabaseSnapshotConfigurationError(
+                "YMM_DATA_SDK_TOKEN is required for lan or TS mode"
+            )
         if mode.lower() not in {"lan", "ts", "local"}:
-            raise DatabaseSnapshotConfigurationError("REMOTE_MARKET_DATA_MODE is invalid")
+            raise DatabaseSnapshotConfigurationError("YMM_DATA_SDK_MODE is invalid")
         if sdk_module is None:
             try:
                 import ymm_data_sdk as sdk_module
@@ -44,7 +49,7 @@ class YmmHistoricalPriceClient:
 
     def _initialize(self) -> None:
         if not self.initialized:
-            self.sdk.init(token=self.token, mode=self.mode)
+            self.sdk.init(token=self.token or None, mode=self.mode)
             self.initialized = True
 
     def fetch_daily_bars(

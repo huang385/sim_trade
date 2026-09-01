@@ -1,0 +1,15 @@
+[Unit]
+Description=sim_trade manual settlement for trading day %i
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+# 安装前替换为仓库的绝对路径；%i必须由人工确认后传入YYYY-MM-DD交易日。
+User=YOUR_DEPLOY_USER
+Group=docker
+WorkingDirectory=/PATH/TO/sim_trade
+ExecStart=/usr/bin/docker compose --env-file .env.production -f docker-compose.yml run --rm api python -m app.scripts.run_daily_settlement --trading-day %i
+TimeoutStartSec=infinity
+
+# 故意不提供Timer：结算只能在人工核实交易日、行情和业务状态后触发。

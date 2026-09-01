@@ -99,6 +99,24 @@ def test_fetch_many_allows_missing_previous_tick_for_new_contract():
     assert pair.previous is None
 
 
+def test_local_mode_allows_empty_token_and_uses_dedicated_mode():
+    sdk = FakeSdk(
+        _frame([("JD2608", "2026-08-13 15:03:37.730", DAY, 4470)])
+    )
+    config = SimpleNamespace(
+        ymm_data_sdk_token="",
+        ymm_data_sdk_mode="local",
+        remote_market_data_mode="lan",
+        remote_market_data_timeout_seconds=0,
+    )
+
+    YmmSettlementLastTickProvider(
+        config, sdk_module=sdk
+    ).fetch_many(["JD2608"], DAY)
+
+    assert sdk.init_calls == [{"token": None, "mode": "local"}]
+
+
 def test_fetch_many_rejects_missing_current_tick():
     sdk = FakeSdk(
         _frame(

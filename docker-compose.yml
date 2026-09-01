@@ -1,0 +1,256 @@
+name: sim-trade
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: ${LOG_MAX_SIZE:-20m}
+    max-file: "${LOG_MAX_FILE:-5}"
+
+x-app-base: &app-base
+  image: ${SIM_TRADE_IMAGE:-sim-trade:production}
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - ${SIM_TRADE_ENV_FILE:-.env.production}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  logging: *default-logging
+  cpus: ${APP_CPUS:-1.0}
+  mem_limit: ${APP_MEMORY_LIMIT:-1g}
+  security_opt:
+    - no-new-privileges:true
+
+x-app-bridge: &app-bridge
+  <<: *app-base
+  environment:
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    TZ: ${TZ:-Asia/Shanghai}
+  networks:
+    - backend
+
+x-app-host: &app-host
+  <<: *app-base
+  environment:
+    # Data SDK local模式固定访问宿主机loopback；这两个服务因此使用host网络。
+    POSTGRES_HOST: 127.0.0.1
+    POSTGRES_PORT: "${POSTGRES_PUBLISHED_PORT:-15432}"
+    REDIS_HOST: 127.0.0.1
+    REDIS_PORT: "${REDIS_PUBLISHED_PORT:-16379}"
+    TZ: ${TZ:-Asia/Shanghai}
+  network_mode: host
+
+services:
+  postgres:
+    image: postgres:17-bookworm
+    env_file:
+      - ${SIM_TRADE_ENV_FILE:-.env.production}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_BIND_ADDRESS:-127.0.0.1}:${POSTGRES_PUBLISHED_PORT:-15432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 60s
+    shm_size: 256mb
+    logging: *default-logging
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-2g}
+    networks:
+      - backend
+
+  redis:
+    image: redis:8-bookworm
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_BIND_ADDRESS:-127.0.0.1}:${REDIS_PUBLISHED_PORT:-16379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging: *default-logging
+    mem_limit: ${REDIS_MEMORY_LIMIT:-1g}
+    networks:
+      - backend
+
+  api:
+    <<: *app-host
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "${API_BIND_ADDRESS:-127.0.0.1}", "--port", "${API_PUBLISHED_PORT:-8000}", "--no-access-log"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://${API_BIND_ADDRESS:-127.0.0.1}:${API_PUBLISHED_PORT:-8000}/health', timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  websocket-gateway:
+    <<: *app-bridge
+    command: ["python", "-m", "app.scripts.run_websocket_gateway"]
+    deploy:
+      replicas: 1
+    ports:
+      - "${WS_BIND_ADDRESS:-127.0.0.1}:${WS_PUBLISHED_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)); raise SystemExit(0 if d.get('status') == 'ok' and d.get('single_instance_lease') is True else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  outbox-publisher:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.outbox_publisher_worker"]
+
+  order-event-consumer:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.order_event_consumer_worker"]
+
+  market-data-subscriber:
+    <<: *app-host
+    command: ["python", "-m", "app.workers.market_data_subscriber_worker"]
+
+  matching:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.matching_worker"]
+
+  trade-event-pnl:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.trade_event_pnl_worker"]
+
+  realtime-pnl:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.realtime_pnl_worker"]
+
+  pnl-snapshot-persistence:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.pnl_snapshot_persistence_worker"]
+
+  cash-valuation-tick:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.run_cash_security_valuation_tick_worker"]
+
+  cash-valuation-fact:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.run_cash_security_valuation_fact_worker"]
+
+  cash-valuation-persistence:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.run_cash_security_valuation_persistence_worker"]
+
+  risk-monitor:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.risk_monitor_worker"]
+
+  realtime-event-projection:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.realtime_event_projection_worker"]
+
+  reference-sync:
+    image: ${REFERENCE_SYNC_IMAGE:-reference-sync:production}
+    build:
+      context: ../reference-sync
+      dockerfile: Dockerfile
+      additional_contexts:
+        private_wheels: ./private-wheels
+    env_file:
+      # 第一份只保存reference-sync专用的RQData凭证；数据库凭证以后者为准。
+      - ../reference-sync/.env
+      - ${SIM_TRADE_ENV_FILE:-.env.production}
+    environment:
+      DATABASE_URL: ""
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "${POSTGRES_PUBLISHED_PORT:-15432}"
+      REFERENCE_PROVIDER: YMM
+      DEFAULT_DATA_SOURCE: YMM
+      YMM_DATA_MODE: local
+      # local模式不使用Data SDK Token；RQData license仍供缺失接口回退使用。
+      YMM_DATA_TOKEN: ""
+      TZ: ${TZ:-Asia/Shanghai}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    network_mode: host
+    volumes:
+      - reference-sync-runtime:/opt/reference-sync/runtime
+      - reference-sync-logs:/opt/reference-sync/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,pathlib; p=int(pathlib.Path('/opt/reference-sync/runtime/reference_sync_scheduler.lock').read_text()); os.kill(p, 0)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    cpus: ${REFERENCE_SYNC_CPUS:-1.0}
+    mem_limit: ${REFERENCE_SYNC_MEMORY_LIMIT:-2g}
+    security_opt:
+      - no-new-privileges:true
+
+  user-registration:
+    image: ${USER_REGISTRATION_IMAGE:-user-registration:production}
+    build:
+      context: ${USER_REGISTRATION_BUILD_CONTEXT:-../user_registration}
+      dockerfile: Dockerfile
+    env_file:
+      - ${USER_REGISTRATION_ENV_FILE:-../user_registration/.env}
+    environment:
+      PORTAL_HOST: ${PORTAL_BIND_ADDRESS:-127.0.0.1}
+      PORTAL_PORT: "${PORTAL_PUBLISHED_PORT:-8008}"
+      PORTAL_DATA_DIR: /data
+      PORTAL_COOKIE_SECURE: "${PORTAL_COOKIE_SECURE:-true}"
+      DEBUG: "false"
+      SIMTRADE_BASE_URL: http://${API_BIND_ADDRESS:-127.0.0.1}:${API_PUBLISHED_PORT:-8000}
+      TZ: ${TZ:-Asia/Shanghai}
+    command: ["python", "-m", "uvicorn", "backend.main:app", "--host", "${PORTAL_BIND_ADDRESS:-127.0.0.1}", "--port", "${PORTAL_PUBLISHED_PORT:-8008}", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]
+    network_mode: host
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ${USER_REGISTRATION_DATA_DIR:-../user_registration/.data}:/data
+    user: "${PORTAL_UID:-1000}:${PORTAL_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    logging: *default-logging
+    cpus: ${PORTAL_CPUS:-0.5}
+    mem_limit: ${PORTAL_MEMORY_LIMIT:-512m}
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; d=json.load(urllib.request.urlopen('http://${PORTAL_BIND_ADDRESS:-127.0.0.1}:${PORTAL_PUBLISHED_PORT:-8008}/api/health', timeout=5)); raise SystemExit(0 if d.get('ok') is True else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  reference-sync-runtime:
+  reference-sync-logs:
