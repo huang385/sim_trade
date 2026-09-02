@@ -5,7 +5,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.common.exceptions import BusinessRuleError
-from app.services.trading_day_service import TradingDayService
+from app.services.trading_day_service import (
+    TradingDayService,
+    TradingSessionState,
+)
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -158,3 +161,31 @@ def test_account_creation_during_break_uses_next_session():
     )
 
     assert result == date(2026, 8, 11)
+
+
+def test_session_state_distinguishes_open_and_closed_for_target_day():
+    service = TradingDayService(repository=FakeRepository([row()]))
+
+    assert service.session_state(
+        object(),
+        instrument=instrument(),
+        trading_day=date(2026, 8, 11),
+        now=datetime(2026, 8, 10, 21, 30, tzinfo=SHANGHAI),
+    ) == TradingSessionState.OPEN
+    assert service.session_state(
+        object(),
+        instrument=instrument(),
+        trading_day=date(2026, 8, 11),
+        now=datetime(2026, 8, 11, 8, 30, tzinfo=SHANGHAI),
+    ) == TradingSessionState.CLOSED
+
+
+def test_session_state_is_unknown_when_target_day_schedule_is_missing():
+    service = TradingDayService(repository=FakeRepository([row()]))
+
+    assert service.session_state(
+        object(),
+        instrument=instrument(),
+        trading_day=date(2026, 8, 12),
+        now=datetime(2026, 8, 11, 8, 30, tzinfo=SHANGHAI),
+    ) == TradingSessionState.UNKNOWN

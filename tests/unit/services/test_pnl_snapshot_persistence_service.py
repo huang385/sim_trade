@@ -7,6 +7,8 @@ from unittest.mock import Mock, call
 from app.services.pnl_snapshot_persistence_service import (
     PnlSnapshotPersistenceService,
 )
+from app.services.trading_day_service import TradingSessionState
+from app.services.valuation import ValuationPriceResolver
 
 
 def test_old_trading_day_market_price_is_rejected():
@@ -610,6 +612,177 @@ def test_missing_market_persists_unavailable_state_and_keeps_dirty_version():
     pnl_store.complete_dirty_account.assert_not_called()
     pnl_store.get_accounts_many.assert_not_called()
     pnl_store.get_positions_many.assert_not_called()
+
+
+def test_closed_carried_futures_position_recovers_account_with_settlement_basis():
+    position, detail = make_position("P1", "JD2609", "4070")
+    account = make_account()
+    account.trading_day = date(2026, 9, 3)
+    account.risk_state = "VALUATION_UNAVAILABLE"
+    position.trading_day = account.trading_day
+    detail.open_trading_day = date(2026, 9, 2)
+    detail.pnl_base_price = Decimal("4074")
+    instrument = SimpleNamespace(
+        id=1,
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        symbol="JD2609",
+        product_id="JD",
+        instrument_type="FUTURES",
+        underlying_instrument_id=None,
+    )
+    position_repository = Mock()
+    position_repository.list_active_by_account_for_update.return_value = [
+        position
+    ]
+    position_repository.list_open_details_by_position_ids_for_update.return_value = [
+        detail
+    ]
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = [instrument]
+    instrument_repository.list_by_ids.return_value = []
+    trading_day_service = Mock()
+    trading_day_service.session_state.return_value = TradingSessionState.CLOSED
+    service = PnlSnapshotPersistenceService(
+        session_factory=Mock(),
+        pnl_store=Mock(),
+        market_tick_store=Mock(
+            get_latest_many=Mock(
+                return_value={
+                    ("DCE", "JD2609"): {
+                        "source": "YMM_LIVE_DATA",
+                        "ingest_type": "LIVE_CALLBACK",
+                        "trading_day": "2026-09-02",
+                        "last_price": "4074",
+                    }
+                }
+            )
+        ),
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+        valuation_price_resolver=ValuationPriceResolver(
+            trading_day_service
+        ),
+    )
+
+    complete = service._recalculate_locked_account(Mock(), account)
+
+    assert complete is True
+    assert account.risk_state == "NORMAL"
+    assert position.daily_position_pnl == Decimal("0.000000")
+    assert account.daily_position_pnl == Decimal("0.000000")
+
+
+def test_closed_carried_short_option_uses_settlement_option_and_underlying():
+    account = make_account()
+    account.trading_day = date(2026, 9, 3)
+    account.risk_state = "VALUATION_UNAVAILABLE"
+    position = SimpleNamespace(
+        position_id="P-OPT",
+        account_id="A001",
+        order_book_id="JD2609-C-4000",
+        exchange_id="DCE",
+        symbol="JD2609-C-4000",
+        direction="SHORT",
+        instrument_type="FUTURES_OPTION",
+        multiplier_snapshot=Decimal("15"),
+        total_volume=1,
+        used_margin=Decimal("5000"),
+        realtime_required_margin=Decimal("5000"),
+        option_market_value=Decimal("1500"),
+        margin_rule_id=7,
+        margin_rule_version="V1",
+        margin_rule_snapshot={
+            "rule_id": 7,
+            "rule_version": "V1",
+            "margin_algorithm": "COMMODITY_FUTURES_OPTION",
+            "margin_adjustment_rate": "1",
+            "minimum_guarantee_rate": "0",
+            "out_of_money_deduction_rate": "1",
+            "minimum_underlying_margin_ratio": "0.5",
+            "extra_margin_rate": "0",
+            "underlying_margin_rate": "0.1",
+            "underlying_multiplier": "10",
+        },
+        margin_price_mode="SETTLEMENT",
+        margin_option_price=Decimal("100"),
+        margin_underlying_price=Decimal("4074"),
+        margin_calculated_at=None,
+        trading_day=account.trading_day,
+        unrealized_pnl=Decimal("0"),
+        daily_position_pnl=Decimal("0"),
+        updated_at=None,
+    )
+    detail = SimpleNamespace(
+        position_detail_id="PD-OPT",
+        position_id="P-OPT",
+        open_price=Decimal("95"),
+        pnl_base_price=Decimal("100"),
+        open_trading_day=date(2026, 9, 2),
+        remaining_volume=1,
+        realtime_required_margin=Decimal("5000"),
+        multiplier_snapshot=Decimal("15"),
+        margin_rule_id=7,
+        margin_rule_version="V1",
+        margin_rule_snapshot=position.margin_rule_snapshot,
+        margin_price_mode="SETTLEMENT",
+        margin_option_price=Decimal("100"),
+        margin_underlying_price=Decimal("4074"),
+        margin_calculated_at=None,
+        updated_at=None,
+    )
+    option = SimpleNamespace(
+        id=1,
+        order_book_id="JD2609-C-4000",
+        exchange_id="DCE",
+        symbol="JD2609-C-4000",
+        product_id="JD",
+        instrument_type="FUTURES_OPTION",
+        underlying_instrument_id=2,
+        option_type="CALL",
+        strike_price=Decimal("4000"),
+    )
+    underlying = SimpleNamespace(
+        id=2,
+        order_book_id="JD2609",
+        exchange_id="DCE",
+        symbol="JD2609",
+        product_id="JD",
+        instrument_type="FUTURES",
+        underlying_instrument_id=None,
+    )
+    position_repository = Mock()
+    position_repository.list_active_by_account_for_update.return_value = [
+        position
+    ]
+    position_repository.list_open_details_by_position_ids_for_update.return_value = [
+        detail
+    ]
+    instrument_repository = Mock()
+    instrument_repository.list_by_order_book_ids.return_value = [option]
+    instrument_repository.list_by_ids.return_value = [underlying]
+    trading_day_service = Mock()
+    trading_day_service.session_state.return_value = TradingSessionState.CLOSED
+    service = PnlSnapshotPersistenceService(
+        session_factory=Mock(),
+        pnl_store=Mock(),
+        market_tick_store=Mock(get_latest_many=Mock(return_value={})),
+        position_repository=position_repository,
+        instrument_repository=instrument_repository,
+        valuation_price_resolver=ValuationPriceResolver(
+            trading_day_service
+        ),
+    )
+
+    complete = service._recalculate_locked_account(Mock(), account)
+
+    assert complete is True
+    assert account.risk_state == "NORMAL"
+    assert position.margin_price_mode == "SETTLEMENT"
+    assert position.margin_option_price == Decimal("100")
+    assert position.margin_underlying_price == Decimal("4074")
+    assert position.realtime_required_margin > Decimal("0")
+    assert detail.margin_price_mode == "SETTLEMENT"
 
 
 def test_option_amounts_are_recalculated_from_database_facts_not_redis():

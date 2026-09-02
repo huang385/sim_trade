@@ -38,6 +38,10 @@ from app.services.product_strategy_registry import (
     ProductStrategyRegistry,
     product_strategy_registry,
 )
+from app.services.valuation import (
+    ValuationPriceResolver,
+    ValuationPriceSource,
+)
 
 
 RISK_QUANT = Decimal("0.00000001")
@@ -65,6 +69,7 @@ class _PositionFactUpdate:
     realtime_required_margin: Decimal
     option_price: Decimal | None
     underlying_price: Decimal | None
+    margin_price_mode: MarginPriceMode | None
     detail_margin_shares: tuple[tuple[object, Decimal], ...]
 
 
@@ -92,6 +97,7 @@ class PnlSnapshotPersistenceService:
         risk_store: RiskStore | None = None,
         settlement_gate_service: SettlementGateService | None = None,
         product_registry: ProductStrategyRegistry | None = None,
+        valuation_price_resolver: ValuationPriceResolver | None = None,
     ):
         self.session_factory = session_factory
         self.pnl_store = pnl_store
@@ -111,6 +117,9 @@ class PnlSnapshotPersistenceService:
             settlement_gate_service or SettlementGateService()
         )
         self.product_registry = product_registry or product_strategy_registry
+        self.valuation_price_resolver = (
+            valuation_price_resolver or ValuationPriceResolver()
+        )
 
     @staticmethod
     def _risk(used_margin: Decimal, equity: Decimal) -> Decimal:
@@ -127,46 +136,12 @@ class PnlSnapshotPersistenceService:
         *,
         expected_trading_day,
     ) -> Decimal | None:
-        """只把能够完整反序列化的正数行情交给资金计算。"""
+        """兼容旧调用；实时行情的严格校验由独立解析器统一实现。"""
 
-        if not values:
-            return None
-        try:
-            tick = MarketTickStore.mapping_to_tick(values)
-        except Exception:
-            # 单元测试和历史Redis快照可能只保存经过上游校验的核心字段；
-            # 仍要求受支持的来源组合、交易日和有限正数价格全部满足。
-            if (
-                (
-                    values.get("source"),
-                    values.get("ingest_type"),
-                )
-                not in {
-                    ("YMM_LIVE_DATA", "LIVE_CALLBACK"),
-                    ("YMM_DATA_SDK", "REST_SNAPSHOT"),
-                }
-                or (
-                    expected_trading_day is not None
-                    and values.get("trading_day")
-                    != expected_trading_day.isoformat()
-                )
-            ):
-                return None
-            try:
-                price = Decimal(values.get("last_price", ""))
-            except Exception:
-                return None
-            return price if price.is_finite() and price > 0 else None
-        if (
-            tick.last_price is None
-            or tick.last_price <= 0
-            or (
-                expected_trading_day is not None
-                and tick.trading_day != expected_trading_day
-            )
-        ):
-            return None
-        return tick.last_price
+        return ValuationPriceResolver.realtime_price(
+            values,
+            expected_trading_day=expected_trading_day,
+        )
 
     def _calculate_position_pnl(
         self,
@@ -249,6 +224,7 @@ class PnlSnapshotPersistenceService:
         underlying,
         mark_price: Decimal,
         underlying_price: Decimal | None,
+        margin_price_mode: MarginPriceMode,
     ) -> _PositionFactUpdate:
         multiplier = Decimal(position.multiplier_snapshot)
         if multiplier <= 0:
@@ -300,7 +276,7 @@ class PnlSnapshotPersistenceService:
                     option_multiplier=multiplier,
                     underlying_multiplier=underlying_multiplier,
                     volume=position.total_volume,
-                    price_mode=MarginPriceMode.REALTIME,
+                    price_mode=margin_price_mode,
                     calculated_at=utc_now(),
                     rule=rule,
                     underlying_margin_per_lot=underlying_margin_per_lot,
@@ -313,6 +289,7 @@ class PnlSnapshotPersistenceService:
             realtime_required_margin=required,
             option_price=mark_price,
             underlying_price=underlying_price,
+            margin_price_mode=margin_price_mode,
             detail_margin_shares=self._allocate_detail_margin(
                 details,
                 total_margin=required,
@@ -420,14 +397,18 @@ class PnlSnapshotPersistenceService:
                     instrument.exchange_id.strip().upper(),
                     instrument.order_book_id.strip().upper(),
                 )
-                mark_price = self._mark_price(
-                    latest.get(key, {}),
+                resolved_price = self.valuation_price_resolver.resolve_position(
+                    db,
+                    instrument=instrument,
+                    market_values=latest.get(key, {}),
+                    details=position_details,
                     expected_trading_day=getattr(
                         account, "trading_day", None
                     ),
                 )
-                if mark_price is None:
+                if resolved_price is None:
                     raise ValueError("持仓行情不可用")
+                mark_price = resolved_price.price
                 product_strategy = self.product_registry.resolve(
                     position.instrument_type
                 )
@@ -447,19 +428,48 @@ class PnlSnapshotPersistenceService:
                         instrument.underlying_instrument_id
                     )
                     underlying_price = None
-                    if underlying is not None:
-                        underlying_price = self._mark_price(
-                            latest.get(
-                                (
-                                    underlying.exchange_id.strip().upper(),
-                                    underlying.symbol.strip().upper(),
+                    margin_price_mode = MarginPriceMode(
+                        resolved_price.source.value
+                    )
+                    if resolved_price.source == ValuationPriceSource.REALTIME:
+                        if underlying is not None:
+                            underlying_price = self._mark_price(
+                                latest.get(
+                                    (
+                                        underlying.exchange_id.strip().upper(),
+                                        underlying.order_book_id.strip().upper(),
+                                    ),
+                                    {},
                                 ),
-                                {},
-                            ),
-                            expected_trading_day=getattr(
-                                account, "trading_day", None
-                            ),
-                        )
+                                expected_trading_day=getattr(
+                                    account, "trading_day", None
+                                ),
+                            )
+                    elif position.direction == PositionDirection.SHORT.value:
+                        if (
+                            getattr(position, "margin_price_mode", None)
+                            != MarginPriceMode.SETTLEMENT.value
+                        ):
+                            raise ValueError("期权缺少结算保证金价格模式")
+                        try:
+                            settled_option = Decimal(
+                                position.margin_option_price
+                            )
+                            underlying_price = Decimal(
+                                position.margin_underlying_price
+                            )
+                        except (AttributeError, TypeError, ArithmeticError):
+                            raise ValueError(
+                                "期权缺少可信结算保证金价格"
+                            ) from None
+                        if (
+                            not settled_option.is_finite()
+                            or settled_option <= 0
+                            or settled_option != mark_price
+                            or not underlying_price.is_finite()
+                            or underlying_price <= 0
+                        ):
+                            raise ValueError("期权结算保证金价格不合法")
                     updates.append(
                         self._calculate_option_update(
                             position=position,
@@ -468,6 +478,7 @@ class PnlSnapshotPersistenceService:
                             underlying=underlying,
                             mark_price=mark_price,
                             underlying_price=underlying_price,
+                            margin_price_mode=margin_price_mode,
                         )
                     )
                 elif product_strategy.family == ProductFamily.FUTURES:
@@ -487,6 +498,7 @@ class PnlSnapshotPersistenceService:
                             realtime_required_margin=Decimal("0.000000"),
                             option_price=None,
                             underlying_price=None,
+                            margin_price_mode=None,
                             detail_margin_shares=(),
                         )
                     )
@@ -550,14 +562,14 @@ class PnlSnapshotPersistenceService:
                 update.realtime_required_margin
             )
             if update.option_price is not None:
-                position.margin_price_mode = MarginPriceMode.REALTIME.value
+                position.margin_price_mode = update.margin_price_mode.value
                 position.margin_option_price = update.option_price
                 position.margin_underlying_price = update.underlying_price
                 position.margin_calculated_at = now
             position.updated_at = now
             for detail, margin_share in update.detail_margin_shares:
                 detail.realtime_required_margin = margin_share
-                detail.margin_price_mode = MarginPriceMode.REALTIME.value
+                detail.margin_price_mode = update.margin_price_mode.value
                 detail.margin_option_price = update.option_price
                 detail.margin_underlying_price = update.underlying_price
                 detail.margin_calculated_at = now

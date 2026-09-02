@@ -3,6 +3,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from enum import Enum
 from functools import lru_cache
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -34,6 +35,14 @@ class TradingSession:
 class CachedSchedule:
     sessions: tuple[TradingSession, ...]
     expires_at: float
+
+
+class TradingSessionState(str, Enum):
+    """指定交易日下，品种当前所处的交易时段状态。"""
+
+    OPEN = "OPEN"
+    CLOSED = "CLOSED"
+    UNKNOWN = "UNKNOWN"
 
 
 class TradingDayService:
@@ -196,6 +205,53 @@ class TradingDayService:
                 error_code="OUTSIDE_TRADING_SESSION",
             )
         return next(iter(matches))
+
+    def session_state(
+        self,
+        db: Session,
+        *,
+        instrument: Instrument,
+        trading_day: date,
+        now: datetime | None = None,
+    ) -> TradingSessionState:
+        """返回品种当前是否处于指定交易日的有效交易时段。
+
+        缺少品种或有效时段时返回 ``UNKNOWN``，调用方必须按失败关闭处理；
+        只有明确加载到目标交易日时段且当前不在其中，才返回 ``CLOSED``。
+        """
+
+        exchange_id = normalize_code(instrument.exchange_id)
+        product_code = normalize_code(str(instrument.product_id or ""))
+        instrument_type = normalize_code(instrument.instrument_type)
+        if not exchange_id or not product_code or not instrument_type:
+            return TradingSessionState.UNKNOWN
+        local_now = now or self.now_provider()
+        if local_now.tzinfo is None:
+            local_now = local_now.replace(tzinfo=SHANGHAI)
+        else:
+            local_now = local_now.astimezone(SHANGHAI)
+        try:
+            schedule = self._get_schedule(
+                db,
+                key=(exchange_id, product_code, instrument_type),
+                now=local_now,
+            )
+        except (BusinessRuleError, TypeError, ValueError):
+            return TradingSessionState.UNKNOWN
+        target_sessions = tuple(
+            item
+            for item in schedule.sessions
+            if item.trading_day == trading_day
+        )
+        if not target_sessions:
+            return TradingSessionState.UNKNOWN
+        if any(
+            item.start_at <= local_now < item.end_at
+            and (item.allow_open or item.allow_close)
+            for item in target_sessions
+        ):
+            return TradingSessionState.OPEN
+        return TradingSessionState.CLOSED
 
     def resolve_for_cash_security_order(
         self,
