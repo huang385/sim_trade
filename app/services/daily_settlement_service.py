@@ -279,7 +279,7 @@ class DailySettlementService:
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.cancellation_service = cancellation_service or OrderCancellationService()
         self.tick_store = tick_store or MarketTickStore(
-            redis_client, stream_name=settings.market_tick_stream_name
+            redis_client, stream_name=settings.futures_market_tick_stream_name
         )
         self.settlement_price_provider = settlement_price_provider
         self.option_margin_resolver = (

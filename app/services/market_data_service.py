@@ -6,6 +6,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.common.code_utils import normalize_code
+from app.enums.market_feed_enums import (
+    MarketFeedDomain,
+    resolve_market_feed_domain,
+)
 from app.infrastructure.market_data.market_tick_store import (
     MarketTickStore,
     MarketTickStoreResult,
@@ -39,6 +43,7 @@ class MarketInstrumentSnapshot:
     exchange_id: str
     symbol: str
     is_active: bool
+    instrument_type: str
 
 
 class MarketDataService:
@@ -51,11 +56,13 @@ class MarketDataService:
         normalizer: MarketTickNormalizer,
         validation_service: MarketTickValidationService,
         tick_store: MarketTickStore,
+        market_domain: MarketFeedDomain,
     ):
         self.instrument_repository = instrument_repository
         self.normalizer = normalizer
         self.validation_service = validation_service
         self.tick_store = tick_store
+        self.market_domain = market_domain
 
         # 缓存与 Worker 生命周期一致，不按时间过期；None 表示负缓存。
         self._instrument_cache: dict[str, MarketInstrumentSnapshot | None] = {}
@@ -68,6 +75,9 @@ class MarketDataService:
             exchange_id=instrument.exchange_id,
             symbol=instrument.symbol,
             is_active=bool(instrument.is_active),
+            instrument_type=str(
+                getattr(instrument.instrument_type, "value", instrument.instrument_type)
+            ),
         )
 
     def _get_cached_instrument(
@@ -128,6 +138,10 @@ class MarketDataService:
     ) -> MarketDataProcessResult:
         if instrument is None:
             raise MarketTickValidationError("合约不存在")
+        if resolve_market_feed_domain(instrument.instrument_type) != self.market_domain:
+            raise MarketTickValidationError(
+                f"合约不属于当前行情域: {self.market_domain.value}"
+            )
         tick = self.normalizer.normalize(
             data=data,
             raw=raw,

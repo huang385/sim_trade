@@ -37,11 +37,11 @@
    chmod 600 .env.production
    ```
 
-   至少必须填写 `POSTGRES_PASSWORD`、`AUTH_JWT_SECRET`、`API_CORS_ALLOWED_ORIGINS`、Live 行情接入需要的地址/用户配置和 `REMOTE_MARKET_DATA_API_TOKEN`。Data SDK 使用独立的 `YMM_DATA_SDK_MODE=local`，在 SDK 服务器本机不需要 `YMM_DATA_SDK_TOKEN`；只有把 Data SDK 改为 `lan` 或 `TS` 时才填写该 Token。JWT Secret 应由安全随机源生成且至少 32 字节，不要写入命令历史、Git 或聊天记录。`AUTH_REFRESH_COOKIE_SECURE=true` 与 `DEBUG=false` 必须保持不变。
+   至少必须填写 `POSTGRES_PASSWORD`、`AUTH_JWT_SECRET`、`API_CORS_ALLOWED_ORIGINS`，以及两套 Live 行情凭证：`FUTURES_MARKET_DATA_API_USER`、`FUTURES_MARKET_DATA_API_TOKEN`、`SECURITIES_MARKET_DATA_API_USER`、`SECURITIES_MARKET_DATA_API_TOKEN`。Data SDK 使用独立的 `YMM_DATA_SDK_MODE=local`，在 SDK 服务器本机不需要 `YMM_DATA_SDK_TOKEN`；只有把 Data SDK 改为 `lan` 或 `TS` 时才填写该 Token。JWT Secret 应由安全随机源生成且至少 32 字节，不要写入命令历史、Git 或聊天记录。`AUTH_REFRESH_COOKIE_SECURE=true` 与 `DEBUG=false` 必须保持不变。
 
-   `REMOTE_MARKET_DATA_MODE` 只控制 Live SDK；`YMM_DATA_SDK_MODE` 只控制 Data SDK。`REMOTE_MARKET_DATA_API_TOKEN` 是 Live SDK 的策略凭证，`YMM_DATA_SDK_TOKEN` 是 Data SDK 在 `lan`/`TS` 下的凭证；两套凭证不能混用。Live SDK 即使使用 `local` 仍需要自己的策略 Token。
+   `REMOTE_MARKET_DATA_MODE` 只控制两条 Live SDK 连接；`YMM_DATA_SDK_MODE` 只控制 Data SDK。期货域与证券域的 Live Token 不得互换或留空，`YMM_DATA_SDK_TOKEN` 则是 Data SDK 在 `lan`/`TS` 下的独立凭证。Live SDK 即使使用 `local` 仍需要各自的策略 Token。
 
-   `api` 和 `market-data-subscriber` 使用 host 网络，因此 Compose 会把它们的数据库连接覆盖为 `127.0.0.1:15432` 和 `127.0.0.1:16379`。独立端口可避免与 SDK 服务器已有的 PostgreSQL 冲突；其他 Worker 仍通过隔离的 bridge 网络使用服务名 `postgres`、`redis` 和标准端口。不要把 `POSTGRES_BIND_ADDRESS`、`REDIS_BIND_ADDRESS` 或 `API_BIND_ADDRESS` 改为 `0.0.0.0`，修改发布端口时也必须保持 Compose 映射与 host 网络服务配置一致。
+   `api`、`futures-market-data` 和 `securities-market-data` 使用 host 网络，因此 Compose 会把它们的数据库连接覆盖为 `127.0.0.1:15432` 和 `127.0.0.1:16379`。独立端口可避免与 SDK 服务器已有的 PostgreSQL 冲突；其他 Worker 仍通过隔离的 bridge 网络使用服务名 `postgres`、`redis` 和标准端口。不要把 `POSTGRES_BIND_ADDRESS`、`REDIS_BIND_ADDRESS` 或 `API_BIND_ADDRESS` 改为 `0.0.0.0`，修改发布端口时也必须保持 Compose 映射与 host 网络服务配置一致。
 
    reference-sync 的 RQData license 单独保存在 `../reference-sync/.env`，该文件必须为权限 `600`。Compose 后加载 `.env.production` 获取当前主库账号，并强制覆盖 `POSTGRES_HOST=127.0.0.1`、发布端口、`REFERENCE_PROVIDER=YMM`、`YMM_DATA_MODE=local` 和空 Data SDK Token。RQData license 与 YMM Data SDK Token 是不同凭证；即使 Data SDK 的 `local` 模式无需 Token，YMM 缺失接口的回退仍可能需要 RQData license。
 
@@ -92,7 +92,7 @@
    ```bash
    docker compose --env-file .env.production ps
    docker compose --env-file .env.production logs --tail=200 api websocket-gateway
-   docker compose --env-file .env.production logs --tail=200 market-data-subscriber matching realtime-pnl
+   docker compose --env-file .env.production logs --tail=200 futures-market-data securities-market-data futures-matching securities-matching realtime-pnl
    docker compose --env-file .env.production logs --tail=200 reference-sync
    ```
 

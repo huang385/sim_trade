@@ -122,6 +122,8 @@ def test_rebuild_restores_repairs_and_removes_active_order_indexes(
             account_id="GHOST-A",
             exchange_id="GHOST-X",
             symbol="GHOST-S",
+            order_book_id="GHOST-S",
+            instrument_type="FUTURES",
         )
         index.upsert_active_order_for_rebuild(ghost)
         with SessionLocal() as db:

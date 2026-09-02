@@ -5,7 +5,11 @@ import pytest
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.active_order_index import ActiveOrderIndex
+from app.infrastructure.cash_security_valuation_store import (
+    CashSecurityValuationStore,
+)
 from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
     RemoteMarketDataConfigurationError,
@@ -24,14 +28,15 @@ from app.services.market_data_code_mapping_service import (
 pytestmark = pytest.mark.integration
 
 
-def configured_codes():
-    codes = set()
+def configured_codes(domain: MarketFeedDomain):
     index = ActiveOrderIndex(redis_client)
-    for order_id in index.list_all_order_ids():
-        detail = index.get_active_order(order_id)
-        if detail.get("order_book_id"):
-            codes.add(detail["order_book_id"])
-    codes.update(RealtimePnlStore(redis_client).list_active_contract_codes())
+    codes = index.list_active_contract_codes(domain)
+    position_source = (
+        RealtimePnlStore(redis_client)
+        if domain == MarketFeedDomain.FUTURES_MARKET
+        else CashSecurityValuationStore(redis_client)
+    )
+    codes.update(position_source.list_active_contract_codes())
     if not codes:
         pytest.skip("Redis中没有活动订单或有效持仓合约")
     with SessionLocal() as db:
@@ -41,18 +46,21 @@ def configured_codes():
     return set(snapshot.source_codes)
 
 
-def selected_test_code() -> str:
+def selected_test_code(domain: MarketFeedDomain) -> str:
     """优先验收当前人工测试主力合约，避免低频合约造成假失败。"""
 
-    codes = configured_codes()
-    if "JD2609" in codes:
+    codes = configured_codes(domain)
+    if domain == MarketFeedDomain.FUTURES_MARKET and "JD2609" in codes:
         return "JD2609"
     return sorted(codes)[0]
 
 
-def create_real_client_or_skip() -> RemoteFeedClient:
+def create_real_client_or_skip(domain: MarketFeedDomain) -> RemoteFeedClient:
     try:
-        sdk_client = create_remote_sdk_client(settings)
+        sdk_client = create_remote_sdk_client(
+            settings,
+            domain=domain,
+        )
     except RemoteMarketDataSdkUnavailableError as exc:
         pytest.skip(str(exc))
     except RemoteMarketDataConfigurationError as exc:
@@ -60,11 +68,12 @@ def create_real_client_or_skip() -> RemoteFeedClient:
     return RemoteFeedClient(sdk_client)
 
 
-def test_real_ymm_live_data_connects_subscribes_and_closes():
+@pytest.mark.parametrize("domain", list(MarketFeedDomain))
+def test_real_ymm_live_data_connects_subscribes_and_closes(domain):
     """无论是否开盘，真实SDK都必须完成鉴权、订阅并正常关闭线程。"""
 
-    code = selected_test_code()
-    client = create_real_client_or_skip()
+    code = selected_test_code(domain)
+    client = create_real_client_or_skip(domain)
     subscribed = threading.Event()
     errors = []
 
@@ -90,11 +99,12 @@ def test_real_ymm_live_data_connects_subscribes_and_closes():
     assert not subscription.is_alive()
 
 
-def test_real_ymm_live_data_receives_tick_when_source_is_publishing():
+@pytest.mark.parametrize("domain", list(MarketFeedDomain))
+def test_real_ymm_live_data_receives_tick_when_source_is_publishing(domain):
     """交易时段必须收到真实Tick；中心尚无行情时只跳过Tick专项验收。"""
 
-    code = selected_test_code()
-    client = create_real_client_or_skip()
+    code = selected_test_code(domain)
+    client = create_real_client_or_skip(domain)
     subscribed = threading.Event()
     tick_received = threading.Event()
     received = []

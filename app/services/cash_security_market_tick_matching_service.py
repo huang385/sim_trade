@@ -34,15 +34,19 @@ class CashSecurityMarketTickMatchingService:
         order_repository: OrderRepository | None = None,
         matching_strategy: CashSecurityMatchingStrategy | None = None,
         settlement_service: CashSecuritySettlementService | None = None,
+        enabled: bool = True,
     ) -> None:
         self.session_factory = session_factory
         self.active_order_index = active_order_index
         self.order_repository = order_repository or OrderRepository()
         self.matching_strategy = matching_strategy or CashSecurityMatchingStrategy()
         self.settlement_service = settlement_service or CashSecuritySettlementService()
+        self.enabled = enabled
 
     def process(self, *, stream_message_id: str, fields: Mapping[str, str]) -> MarketTickMatchResult:
         event = parse_market_tick_event(fields)
+        if not self.enabled:
+            return MarketTickMatchResult(0, 0, 0, 0, 0)
         order_ids = sorted(self.active_order_index.list_instrument_order_ids(event.exchange_id, event.symbol))
         return self._process_order_ids(
             order_ids=order_ids,
@@ -66,6 +70,8 @@ class CashSecurityMarketTickMatchingService:
         """
 
         _ = order_snapshot
+        if not self.enabled:
+            return MarketTickMatchResult(0, 0, 0, 0, 0)
         return self._process_order_ids(
             order_ids=[order_id],
             stream_message_id=stream_message_id,

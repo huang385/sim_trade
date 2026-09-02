@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.active_order_index import ActiveOrderIndex
 
 
@@ -13,6 +14,7 @@ def make_order(order_id: str = "O-1"):
         exchange_id="DCE",
         symbol="JD2609",
         order_book_id="JD2609",
+        instrument_type="FUTURES",
     )
 
 
@@ -29,7 +31,7 @@ def test_add_updates_active_contract_set_in_same_lua_command():
 
     arguments = redis_client.eval.call_args.args
     assert arguments[1] == 7
-    assert "active_order_contracts" in arguments
+    assert "active_order_contracts:futures" in arguments
     assert "DCE|JD2609|JD2609" in arguments
 
 
@@ -46,9 +48,10 @@ def test_remove_checks_contract_set_and_contract_member_in_same_lua():
     )
 
     arguments = redis_client.eval.call_args.args
-    assert arguments[1] == 7
+    assert arguments[1] == 8
     assert "SCARD" in arguments[0]
-    assert "active_order_contracts" in arguments
+    assert "active_order_contracts:futures" in arguments
+    assert "active_order_contracts:securities" in arguments
 
 
 @pytest.mark.parametrize("instrument_type", ["FUTURES_OPTION", "INDEX_OPTION"])
@@ -98,8 +101,30 @@ def test_list_active_contract_codes_does_not_read_order_hashes():
     }
     index = ActiveOrderIndex(redis_client)
 
-    assert index.list_active_contract_codes() == {
+    assert index.list_active_contract_codes(
+        MarketFeedDomain.FUTURES_MARKET
+    ) == {
         "JD2609",
         "AG2612",
     }
     redis_client.hgetall.assert_not_called()
+
+
+def test_stock_order_is_indexed_only_in_securities_domain():
+    redis_client = Mock()
+    redis_client.eval.return_value = 1
+    order = make_order()
+    order.instrument_type = "STOCK"
+    order.exchange_id = "XSHG"
+    order.symbol = "600033"
+    order.order_book_id = "600033.XSHG"
+
+    ActiveOrderIndex(redis_client).add_active_order(
+        order,
+        event_id="E-STOCK",
+        processed_ttl_seconds=60,
+    )
+
+    arguments = redis_client.eval.call_args.args
+    assert "active_order_contracts:securities" in arguments
+    assert "active_order_contracts:futures" not in arguments

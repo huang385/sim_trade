@@ -3,8 +3,9 @@ import logging
 import threading
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import MarketDataProcessAction
 from app.services.market_data_code_mapping_service import (
@@ -16,6 +17,7 @@ from app.workers.market_data_subscriber_worker import (
     MarketDataSourceStatus,
     MarketDataSubscriberWorker,
     QueuedTick,
+    build_worker,
     _shutdown_request_path,
     _watch_shutdown_request,
 )
@@ -45,6 +47,35 @@ class FakeSubscription:
 
     def join(self, timeout=None):
         self.join_called += 1
+
+
+def test_two_market_worker_builders_use_independent_domain_resources():
+    with (
+        patch(
+            "app.workers.market_data_subscriber_worker.remote_sdk_client_kwargs"
+        ),
+        patch(
+            "app.workers.market_data_subscriber_worker.load_remote_sdk_client_class"
+        ),
+        patch(
+            "app.workers.market_data_subscriber_worker.YmmDatabaseSnapshotClient"
+        ),
+    ):
+        futures = build_worker(MarketFeedDomain.FUTURES_MARKET)
+        securities = build_worker(MarketFeedDomain.SECURITIES_MARKET)
+
+    assert futures.tick_store.stream_name != securities.tick_store.stream_name
+    assert futures.tick_store.source_status_key != (
+        securities.tick_store.source_status_key
+    )
+    assert futures.market_data_service.market_domain == (
+        MarketFeedDomain.FUTURES_MARKET
+    )
+    assert securities.market_data_service.market_domain == (
+        MarketFeedDomain.SECURITIES_MARKET
+    )
+    assert futures.subscription_service.pre_subscription_source is not None
+    assert securities.subscription_service.pre_subscription_source is None
 
 
 def test_shutdown_request_path_is_scoped_to_process_id():
@@ -89,7 +120,7 @@ def make_worker(
     index = Mock()
     index.list_all_order_ids.side_effect = lambda: set(details)
     index.get_active_order.side_effect = details.get
-    index.list_active_contract_codes.side_effect = lambda: {
+    index.list_active_contract_codes.side_effect = lambda _domain: {
         detail["order_book_id"]
         for detail in details.values()
         if detail.get("order_book_id")

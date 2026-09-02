@@ -52,6 +52,7 @@ class OrderPriceResolver:
         instrument_symbol: str | None = None,
         price_tick: Decimal,
         trading_day: date,
+        instrument_type: object | None = None,
         allow_bootstrap_snapshot: bool = False,
     ) -> ResolvedOrderPrice:
         if request.order_type == OrderType.LIMIT:
@@ -69,6 +70,8 @@ class OrderPriceResolver:
             # SH701C2080；盘口 Tick 校验必须使用参考数据中的内部 symbol。
             "symbol": instrument_symbol or request.symbol,
         }
+        if instrument_type is not None:
+            event_kwargs["instrument_type"] = instrument_type
         if allow_bootstrap_snapshot:
             event_kwargs["allow_bootstrap_snapshot"] = True
         event = self.live_market_snapshot_service.get_matching_event(**event_kwargs)

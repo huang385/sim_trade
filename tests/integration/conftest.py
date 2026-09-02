@@ -303,6 +303,12 @@ def integration_context():
             )
         )
         db.execute(
+            delete(OutboxEvent).where(
+                OutboxEvent.aggregate_type == "RISK",
+                OutboxEvent.aggregate_id == context.account_id,
+            )
+        )
+        db.execute(
             delete(PositionDetail).where(
                 PositionDetail.account_id == context.account_id
             )

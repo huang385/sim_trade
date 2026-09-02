@@ -169,7 +169,7 @@ class TradeSettlementService:
             or OptionOrderMarginAdjustmentService(
                 market_tick_store=MarketTickStore(
                     redis_client,
-                    stream_name=settings.market_tick_stream_name,
+                    stream_name=settings.futures_market_tick_stream_name,
                 )
             )
         )

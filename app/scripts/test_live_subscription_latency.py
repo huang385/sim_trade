@@ -18,6 +18,12 @@ from ymm_live_data_sdk import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="打印 YMM 实时行情回调")
     parser.add_argument("--code", default="JD2609", help="标准行情代码")
+    parser.add_argument(
+        "--domain",
+        required=True,
+        choices=("futures", "securities"),
+        help="选择要测试的独立行情连接",
+    )
     parser.add_argument("--seconds", type=float, default=30.0, help="订阅时长")
     parser.add_argument(
         "--mode",
@@ -44,9 +50,10 @@ def main() -> None:
         raise SystemExit("--seconds 必须大于 0")
 
     code = args.code.strip().upper()
-    token = os.getenv("REMOTE_MARKET_DATA_API_TOKEN", "").strip()
+    token_variable = f"{args.domain.upper()}_MARKET_DATA_API_TOKEN"
+    token = os.getenv(token_variable, "").strip()
     if not token:
-        raise SystemExit("缺少 REMOTE_MARKET_DATA_API_TOKEN")
+        raise SystemExit(f"缺少 {token_variable}")
 
     def on_tick(messages: Any) -> None:
         # SDK 0.7 一次回调传入一批 tuple；逐条打印便于直接查看内容。

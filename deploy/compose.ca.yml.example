@@ -8,5 +8,7 @@ x-ca-mount: &ca-mount
   read_only: true
 
 services:
-  market-data-subscriber:
+  futures-market-data:
+    volumes: [*ca-mount]
+  securities-market-data:
     volumes: [*ca-mount]

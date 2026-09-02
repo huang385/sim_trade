@@ -19,7 +19,7 @@ function Stop-MarketDataSubscriberGracefully {
     )
 
     New-Item -ItemType Directory -Path $ControlDirectory -Force | Out-Null
-    $requestPath = Join-Path $ControlDirectory "$Name.$ProcessId.stop"
+    $requestPath = Join-Path $ControlDirectory "market-data-subscriber.$ProcessId.stop"
     Set-Content -LiteralPath $requestPath -Value "stop" -Encoding ascii
 
     try {
@@ -57,7 +57,7 @@ Get-ChildItem -LiteralPath $PidDirectory -Filter "*.json" -File | ForEach-Object
         $process = Get-Process -Id ([int]$record.pid) -ErrorAction SilentlyContinue
         if ($null -ne $process -and $process.StartTime.ToUniversalTime().ToString("o") -eq $record.started_at_utc) {
             if ($PSCmdlet.ShouldProcess("$($record.name) (PID $($record.pid))", "Stop")) {
-                if ($record.name -eq "market-data-subscriber") {
+                if ($record.name -in @("futures-market-data", "securities-market-data")) {
                     Stop-MarketDataSubscriberGracefully `
                         -Process $process `
                         -ProcessId ([int]$record.pid) `

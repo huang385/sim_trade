@@ -24,15 +24,19 @@ Python 3.12并包含FastAPI、PostgreSQL、ClickHouse和RQData服务依赖。它
 ```env
 REMOTE_MARKET_DATA_MODE=lan
 REMOTE_MARKET_DATA_BASE_URL=
-REMOTE_MARKET_DATA_API_TOKEN=
+FUTURES_MARKET_DATA_API_USER=
+FUTURES_MARKET_DATA_API_TOKEN=
+SECURITIES_MARKET_DATA_API_USER=
+SECURITIES_MARKET_DATA_API_TOKEN=
 YMM_DATA_SDK_TOKEN=
 REMOTE_MARKET_DATA_CA_FILE=
 REMOTE_MARKET_DATA_VERIFY_SSL=true
 ```
 
 `MODE`按管理员要求选择`lan`、`TS`或`local`。使用模式内置地址时无需填写
-`BASE_URL`；管理员要求自定义WSS地址时再填写。Token不能为空，代码和日志不会
-输出Token、完整连接地址或SDK会话信息。官方客户端不支持关闭TLS校验。
+`BASE_URL`；管理员要求自定义WSS地址时再填写。期货域与证券域分别建立客户端，
+用户名和Token都不能为空，也不能跨域回退。代码和日志不会输出Token、完整连接
+地址或SDK会话信息。官方客户端不支持关闭TLS校验。
 
 `YMM_DATA_SDK_TOKEN`属于`ymm_data_sdk`数据库客户端，与Live SDK Token分开
 配置。它只在新增实际行情订阅时低频查询一次当前交易日最后Tick，不进行轮询。
@@ -66,7 +70,7 @@ REMOTE_MARKET_DATA_VERIFY_SSL=true
 
 ## 订阅、重连和停止
 
-一个Worker只创建一个`LiveMarketDataClient`。启动顺序是状态消费者、行情消费者、
+每个行情域Worker只创建一个`LiveMarketDataClient`。启动顺序是状态消费者、行情消费者、
 批量订阅；活动订单和活动持仓合约变化后，通过公开`subscribe()`/`unsubscribe()`
 批量增订和退订。SDK负责心跳、网络重连及重连后的订阅恢复，项目不再启动第二套
 网络重连循环。Worker停止时调用`client.close()`并等待行情、状态线程退出。
@@ -74,7 +78,8 @@ REMOTE_MARKET_DATA_VERIFY_SSL=true
 新状态键为：
 
 ```text
-market:source:ymm_live_data:status
+market:source:ymm_live_data:futures:status
+market:source:ymm_live_data:securities:status
 ```
 
 旧行情源代码、文档和Redis状态键已在真实连接、真实Tick及下游链路验收完成后删除。

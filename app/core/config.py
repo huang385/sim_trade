@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -38,6 +39,39 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
     )
+
+    @model_validator(mode="after")
+    def validate_market_domain_isolation(self):
+        pairs = (
+            (
+                self.futures_market_tick_stream_name,
+                self.securities_market_tick_stream_name,
+                "两个行情域不能共用 Tick Stream",
+            ),
+            (
+                self.futures_market_source_status_key,
+                self.securities_market_source_status_key,
+                "两个行情域不能共用状态键",
+            ),
+            (
+                self.futures_matching_consumer_group,
+                self.securities_matching_consumer_group,
+                "两个行情域不能共用撮合 Consumer Group",
+            ),
+            (
+                self.futures_arrival_consumer_group,
+                self.securities_arrival_consumer_group,
+                "两个行情域不能共用到达撮合 Consumer Group",
+            ),
+        )
+        for left, right, message in pairs:
+            if left.strip() == right.strip():
+                raise ValueError(message)
+        futures_token = self.futures_market_data_api_token.strip()
+        securities_token = self.securities_market_data_api_token.strip()
+        if futures_token and futures_token == securities_token:
+            raise ValueError("期货域与证券域不能共用同一个行情 Token")
+        return self
 
     app_name: str = "sim_trade"
     app_env: str = "dev"
@@ -135,8 +169,10 @@ class Settings(BaseSettings):
     # YMM Live Data客户端。Token和可选自定义地址只允许通过.env或环境变量提供。
     # mode使用官方SDK定义的lan、TS或local；若管理员要求直连，也可提供base_url。
     remote_market_data_base_url: str = ""
-    remote_market_data_api_user: str = ""
-    remote_market_data_api_token: str = ""
+    futures_market_data_api_user: str = ""
+    futures_market_data_api_token: str = ""
+    securities_market_data_api_user: str = ""
+    securities_market_data_api_token: str = ""
     # 历史行情数据库SDK凭证，仅用于新增订阅时补取最后一条Tick。
     ymm_data_sdk_token: str = ""
     # Data SDK与Live SDK允许使用不同连接模式。为空时回退到旧的共享变量，
@@ -162,17 +198,41 @@ class Settings(BaseSettings):
     remote_market_data_reconnect_max_seconds: float = 30.0
     remote_market_data_queue_size: int = 10_000
     remote_market_data_shutdown_drain_timeout_seconds: float = 10.0
-    market_tick_stream_name: str = "stream:market-ticks"
+    futures_market_tick_stream_name: str = "stream:market-ticks:futures"
+    securities_market_tick_stream_name: str = "stream:market-ticks:securities"
+    futures_market_source_status_key: str = (
+        "market:source:ymm_live_data:futures:status"
+    )
+    securities_market_source_status_key: str = (
+        "market:source:ymm_live_data:securities:status"
+    )
 
     # 行情撮合 Consumer Group。首次创建使用 $，只消费建组后的实时 Tick。
-    market_matching_consumer_group: str = "group:matching-engine"
-    market_matching_consumer_name: str | None = None
+    futures_matching_consumer_group: str = "group:matching-futures"
+    securities_matching_consumer_group: str = "group:matching-securities"
+    futures_matching_consumer_name: str | None = None
+    securities_matching_consumer_name: str | None = None
+    futures_arrival_consumer_group: str = "group:arrival-matching-futures"
+    securities_arrival_consumer_group: str = "group:arrival-matching-securities"
+    futures_arrival_consumer_name: str | None = None
+    securities_arrival_consumer_name: str | None = None
+    futures_arrival_dead_letter_stream: str = (
+        "stream:orders:arrival-matching:futures:dead-letter"
+    )
+    securities_arrival_dead_letter_stream: str = (
+        "stream:orders:arrival-matching:securities:dead-letter"
+    )
     market_matching_batch_size: int = 100
     market_matching_block_ms: int = 5000
     market_matching_pending_idle_ms: int = 60000
     market_matching_max_retries: int = 10
     market_matching_failure_ttl_seconds: int = 604800
-    market_matching_dead_letter_stream: str = "stream:market-ticks:dead-letter"
+    futures_matching_dead_letter_stream: str = (
+        "stream:market-ticks:futures:matching:dead-letter"
+    )
+    securities_matching_dead_letter_stream: str = (
+        "stream:market-ticks:securities:matching:dead-letter"
+    )
     market_matching_retry_interval_seconds: float = 1.0
     # 撮合算法由注册器按名称创建；未知名称会让 Worker 在启动阶段失败。
     matching_engine_name: str = "VN"
@@ -186,7 +246,7 @@ class Settings(BaseSettings):
     pnl_pending_idle_ms: int = 60000
     pnl_event_max_retries: int = 10
     pnl_failure_ttl_seconds: int = 604800
-    pnl_dead_letter_stream: str = "stream:market-ticks:pnl:dead-letter"
+    pnl_dead_letter_stream: str = "stream:market-ticks:futures:pnl:dead-letter"
     pnl_consumer_retry_interval_seconds: float = 1.0
     # 行情持续消费，但实时盈亏只按该周期合并同一合约的最新行情。
     pnl_calculation_interval_ms: int = 500

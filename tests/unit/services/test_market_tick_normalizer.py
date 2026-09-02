@@ -81,6 +81,7 @@ def make_instrument(**overrides):
         "exchange_id": "SHFE",
         "symbol": "AG2609",
         "is_active": True,
+        "instrument_type": "FUTURES",
     }
     values.update(overrides)
     return SimpleNamespace(**values)

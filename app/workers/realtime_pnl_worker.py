@@ -833,11 +833,11 @@ def build_worker() -> RealtimePnlWorker:
     pnl_store = RealtimePnlStore(redis_client)
     market_tick_store = MarketTickStore(
         redis_client,
-        stream_name=settings.market_tick_stream_name,
+        stream_name=settings.futures_market_tick_stream_name,
     )
     consumer = MarketTickStreamConsumer(
         redis_client,
-        stream_name=settings.market_tick_stream_name,
+        stream_name=settings.futures_market_tick_stream_name,
         group_name=settings.pnl_consumer_group,
         consumer_name=(
             settings.pnl_consumer_name or generate_consumer_name()

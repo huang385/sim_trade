@@ -8,10 +8,12 @@ STOP_TIMEOUT_SECONDS="${STOP_TIMEOUT_SECONDS:-30}"
 APP_SERVICES=(
   api
   websocket-gateway
-  market-data-subscriber
+  futures-market-data
+  securities-market-data
   outbox-publisher
   order-event-consumer
-  matching
+  futures-matching
+  securities-matching
   trade-event-pnl
   realtime-pnl
   pnl-snapshot-persistence

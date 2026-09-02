@@ -16,6 +16,7 @@ from app.common.exceptions import (
     ServiceUnavailableError,
 )
 from app.enums.order_enums import OrderDirection
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.models.account import Account
 from app.models.order import Order
 from app.repositories.account_repository import AccountRepository
@@ -26,7 +27,7 @@ from app.services.fee_calculator import FeeCalculator
 from app.services.account_access_scope import AccountAccessScope
 from app.services.margin_calculator import MarginCalculator
 from app.services.order_freeze_service import OrderFreezeService
-from app.services.order_service import OrderService
+from app.services.order_service import OrderService, get_order_service
 from app.services.order_price_resolver import ResolvedOrderPrice
 from app.services.order_validation_service import OrderValidationService
 
@@ -319,6 +320,74 @@ def test_missing_market_price_bootstraps_snapshot_then_accepts_once():
     assert resolver.resolve.call_count == 2
     assert resolver.resolve.call_args_list[1].kwargs["allow_bootstrap_snapshot"] is True
     assert order_repository.create.call_args.kwargs["status"] == "ACCEPTED"
+
+
+@pytest.mark.parametrize(
+    ("instrument_type", "expected_domain"),
+    [
+        ("FUTURES", MarketFeedDomain.FUTURES_MARKET),
+        ("STOCK", MarketFeedDomain.SECURITIES_MARKET),
+    ],
+)
+def test_bootstrap_market_data_routes_to_the_instrument_domain(
+    instrument_type,
+    expected_domain,
+):
+    service = make_service()
+    mapping = Mock()
+    mapping.to_source.side_effect = lambda code: f"SRC-{code}"
+    mapping.to_internal.side_effect = lambda code: code.removeprefix("SRC-")
+    service.market_data_code_mapping_service = Mock()
+    service.market_data_code_mapping_service.build_snapshot.return_value = mapping
+    service.database_snapshot_client = Mock()
+    service.database_snapshot_client.fetch_latest_many.return_value = {
+        "SRC-RB2610": {"order_book_id": "SRC-RB2610"}
+    }
+    futures_service = Mock()
+    securities_service = Mock()
+    service.market_data_services = {
+        MarketFeedDomain.FUTURES_MARKET: futures_service,
+        MarketFeedDomain.SECURITIES_MARKET: securities_service,
+    }
+    service.market_pre_subscription_store = Mock()
+    rules = make_rules()
+    rules.instrument.instrument_type = instrument_type
+
+    assert service._bootstrap_order_market_data(
+        Mock(),
+        request=make_request(),
+        rules=rules,
+        authorized_account=SimpleNamespace(account_id="A001"),
+    )
+
+    selected = service.market_data_services[expected_domain]
+    selected.process.assert_called_once()
+    for domain, candidate in service.market_data_services.items():
+        if domain != expected_domain:
+            candidate.process.assert_not_called()
+
+
+def test_production_order_service_builds_both_market_domains(monkeypatch):
+    import app.infrastructure.market_data.database_snapshot_client as snapshot_module
+
+    monkeypatch.setattr(
+        snapshot_module,
+        "YmmDatabaseSnapshotClient",
+        Mock(return_value=Mock()),
+    )
+    service = get_order_service()
+
+    assert set(service.market_data_services) == set(MarketFeedDomain)
+    assert (
+        service.market_data_services[MarketFeedDomain.FUTURES_MARKET]
+        .market_domain
+        == MarketFeedDomain.FUTURES_MARKET
+    )
+    assert (
+        service.market_data_services[MarketFeedDomain.SECURITIES_MARKET]
+        .market_domain
+        == MarketFeedDomain.SECURITIES_MARKET
+    )
 
 
 @pytest.mark.parametrize(

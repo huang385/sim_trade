@@ -3,10 +3,15 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from app.core.config import settings
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.services.market_tick_matching_service import (
     UnsupportedMarketTickEventError,
 )
-from app.workers.matching_worker import MatchingWorker, build_matching_worker
+from app.workers.matching_worker import (
+    MatchingWorker,
+    build_arrival_worker,
+    build_matching_worker,
+)
 
 
 FIELDS = {
@@ -202,7 +207,37 @@ def test_worker_is_built_with_engine_created_by_registry():
         "app.workers.matching_worker.create_matching_engine",
         return_value=fake_engine,
     ) as create_engine:
-        worker = build_matching_worker()
+        worker = build_matching_worker(MarketFeedDomain.FUTURES_MARKET)
 
     create_engine.assert_called_once_with(settings.matching_engine_name)
     assert worker.matching_service.matching_engine is fake_engine
+
+
+def test_securities_worker_uses_independent_stream_without_derivative_engine():
+    with patch(
+        "app.workers.matching_worker.create_matching_engine"
+    ) as create_engine:
+        worker = build_matching_worker(MarketFeedDomain.SECURITIES_MARKET)
+
+    create_engine.assert_not_called()
+    assert worker.stream_consumer.stream_name == (
+        settings.securities_market_tick_stream_name
+    )
+    assert worker.stream_consumer.group_name == (
+        settings.securities_matching_consumer_group
+    )
+    assert worker.matching_service.enabled is settings.stock_matching_enabled
+
+
+def test_arrival_consumers_have_independent_groups_and_failure_namespaces():
+    futures = build_arrival_worker(MarketFeedDomain.FUTURES_MARKET, Mock())
+    securities = build_arrival_worker(
+        MarketFeedDomain.SECURITIES_MARKET, Mock()
+    )
+
+    assert futures.stream_consumer.group_name != (
+        securities.stream_consumer.group_name
+    )
+    assert futures.stream_consumer.failure_key_factory("1-0") != (
+        securities.stream_consumer.failure_key_factory("1-0")
+    )

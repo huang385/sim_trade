@@ -15,7 +15,7 @@ from app.infrastructure.market_tick_stream_consumer import MarketTickStreamConsu
 from app.infrastructure.order_stream_consumer import OrderStreamConsumer
 from app.infrastructure.redis_keys import (
     CASH_VALUATION_TICK_CONSUMER_GROUP,
-    MARKET_TICK_STREAM,
+    SECURITIES_MARKET_TICK_STREAM,
     cash_valuation_tick_failure_key,
 )
 from app.services.cash_security_valuation_service import (
@@ -105,7 +105,7 @@ class CashSecurityValuationFactWorker:
 class CashSecurityValuationTickWorker:
     """Consume the standard tick stream without creating a second quote feed."""
 
-    def __init__(self, *, redis, service: CashSecurityValuationService, stream_name: str = MARKET_TICK_STREAM) -> None:
+    def __init__(self, *, redis, service: CashSecurityValuationService, stream_name: str = SECURITIES_MARKET_TICK_STREAM) -> None:
         self.service = service
         self.consumer_name = _consumer_name("cash-val-tick")
         self.stream_consumer = MarketTickStreamConsumer(

@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.logging_config import setup_logging
 from app.core.redis_client import redis_client
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.infrastructure.cash_security_valuation_store import (
     CashSecurityValuationStore,
@@ -51,6 +52,12 @@ from app.services.market_data_code_mapping_service import (
 from app.services.market_subscription_service import MarketSubscriptionService
 from app.infrastructure.market_pre_subscription_store import (
     MarketPreSubscriptionStore,
+)
+from app.infrastructure.redis_keys import (
+    FUTURES_MARKET_SOURCE_STATUS_KEY,
+    FUTURES_MARKET_TICK_STREAM,
+    SECURITIES_MARKET_SOURCE_STATUS_KEY,
+    SECURITIES_MARKET_TICK_STREAM,
 )
 from app.services.market_tick_normalizer import (
     MarketTickNormalizationError,
@@ -1002,21 +1009,32 @@ class MarketDataSubscriberWorker:
             self.shutdown()
 
 
-def build_worker() -> MarketDataSubscriberWorker:
+def build_worker(domain: MarketFeedDomain) -> MarketDataSubscriberWorker:
     """使用生产配置组装 Worker，本函数不记录用户名、Token 或完整地址。"""
 
     # 配置缺失应在进程启动阶段明确失败，不能静默保持IDLE或回退旧行情源。
-    remote_sdk_client_kwargs(settings)
+    remote_sdk_client_kwargs(settings, domain=domain)
     load_remote_sdk_client_class()
+    is_futures = domain == MarketFeedDomain.FUTURES_MARKET
     tick_store = MarketTickStore(
         redis_client,
-        stream_name=settings.market_tick_stream_name,
+        stream_name=(
+            FUTURES_MARKET_TICK_STREAM
+            if is_futures
+            else SECURITIES_MARKET_TICK_STREAM
+        ),
+        source_status_key=(
+            FUTURES_MARKET_SOURCE_STATUS_KEY
+            if is_futures
+            else SECURITIES_MARKET_SOURCE_STATUS_KEY
+        ),
     )
     market_data_service = MarketDataService(
         instrument_repository=InstrumentRepository(),
         normalizer=MarketTickNormalizer(),
         validation_service=MarketTickValidationService(),
         tick_store=tick_store,
+        market_domain=domain,
     )
     code_mapping_service = MarketDataCodeMappingService(
         InstrumentMarketDataMappingRepository()
@@ -1025,28 +1043,37 @@ def build_worker() -> MarketDataSubscriberWorker:
         active_order_index=ActiveOrderIndex(redis_client),
         # 活动持仓合约索引由实时盈亏Worker维护在Redis中。复用该索引可让
         # 已成交持仓继续接收行情，同时避免订阅Worker高频查询PostgreSQL。
-        active_position_contract_source=RealtimePnlStore(redis_client),
+        active_position_contract_source=(
+            RealtimePnlStore(redis_client)
+            if is_futures
+            else CashSecurityValuationStore(redis_client)
+        ),
         # 股票/可转债持仓不进入期货合约索引；复用现金证券估值维护的活动
         # 持仓索引，让现金证券持仓在无人看盘时也保持行情订阅，避免估值
         # 链和WebSocket严格快照因行情缺失而断档。
-        cash_security_position_source=CashSecurityValuationStore(redis_client),
+        cash_security_position_source=None,
         # 下单前临时需求与活动订单、持仓订阅取并集。商品期权写入
         # “期权+标的期货”，股指期权写入“期权+标的指数”。
-        pre_subscription_source=MarketPreSubscriptionStore(
-            redis_client,
-            ttl_seconds=settings.market_pre_subscription_ttl_seconds,
-            max_codes_per_account=(
-                settings.market_pre_subscription_max_codes_per_account
-            ),
+        pre_subscription_source=(
+            MarketPreSubscriptionStore(
+                redis_client,
+                ttl_seconds=settings.market_pre_subscription_ttl_seconds,
+                max_codes_per_account=(
+                    settings.market_pre_subscription_max_codes_per_account
+                ),
+            )
+            if is_futures
+            else None
         ),
         debounce_seconds=(
             settings.remote_market_data_subscription_debounce_seconds
         ),
+        market_domain=domain,
     )
     return MarketDataSubscriberWorker(
         session_factory=SessionLocal,
         feed_client=RemoteFeedClient(
-            lambda: create_remote_sdk_client(settings)
+            lambda: create_remote_sdk_client(settings, domain=domain)
         ),
         market_data_service=market_data_service,
         code_mapping_service=code_mapping_service,
@@ -1068,11 +1095,10 @@ def build_worker() -> MarketDataSubscriberWorker:
     )
 
 
-def main() -> None:
-    """命令行入口：python -m app.workers.market_data_subscriber_worker。"""
-
+def run_worker(domain: MarketFeedDomain) -> None:
+    """运行一个具有独立连接、状态和订阅集合的行情域进程。"""
     setup_logging()
-    worker = build_worker()
+    worker = build_worker(domain)
     signal.signal(signal.SIGINT, worker.request_stop)
     signal.signal(signal.SIGTERM, worker.request_stop)
     request_path = _shutdown_request_path()
@@ -1090,7 +1116,3 @@ def main() -> None:
         request_path.unlink(missing_ok=True)
         # shutdown 已保证消费线程退出，Redis 不会被仍在运行的线程继续使用。
         redis_client.close()
-
-
-if __name__ == "__main__":
-    main()

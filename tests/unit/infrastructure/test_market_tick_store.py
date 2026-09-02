@@ -106,7 +106,7 @@ def test_source_status_does_not_require_credentials():
     mapping = redis_client.hset.call_args.kwargs["mapping"]
     assert mapping == {"status": "RUNNING", "last_error": ""}
     redis_client.hdel.assert_called_once_with(
-        "market:source:ymm_live_data:status",
+        "market:source:ymm_live_data:futures:status",
         "duplicate_count",
         "stale_count",
         "age_stale_count",

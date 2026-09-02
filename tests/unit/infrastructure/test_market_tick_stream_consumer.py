@@ -65,7 +65,9 @@ def test_failure_counter_has_ttl_and_dead_letter_has_context():
     pipeline.execute.return_value = [3, True]
     consumer = make_consumer(redis_client)
     assert consumer.increment_failure("1-0") == 3
-    pipeline.expire.assert_called_once_with("market_matching_failure:1-0", 60)
+    pipeline.expire.assert_called_once_with(
+        "market_matching_failure:futures:1-0", 60
+    )
     redis_client.xadd.return_value = "9-0"
     consumer.publish_dead_letter(
         source_message_id="1-0",

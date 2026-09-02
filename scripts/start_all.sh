@@ -9,8 +9,10 @@ APP_SERVICES=(
   api
   outbox-publisher
   order-event-consumer
-  market-data-subscriber
-  matching
+  futures-market-data
+  securities-market-data
+  futures-matching
+  securities-matching
   trade-event-pnl
   realtime-pnl
   pnl-snapshot-persistence
@@ -58,6 +60,7 @@ echo "PostgreSQL与Redis健康，启动全部业务服务。"
 "${COMPOSE[@]}" up \
   -d \
   --no-deps \
+  --remove-orphans \
   --wait \
   --wait-timeout "$START_WAIT_TIMEOUT_SECONDS" \
   "${APP_SERVICES[@]}"

@@ -1,5 +1,6 @@
 from unittest.mock import Mock
 
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.services.market_subscription_service import MarketSubscriptionService
 
 
@@ -112,6 +113,22 @@ def test_option_short_margin_dependencies_join_subscription_union():
             "JD2609",
         }
     )
+
+
+def test_securities_domain_never_imports_derivative_margin_dependencies():
+    index = make_index({})
+    index.list_margin_dependency_codes.return_value = {"JD2609"}
+    service = MarketSubscriptionService(
+        active_order_index=index,
+        active_position_contract_source=make_position_source(
+            {"600033.XSHG"}
+        ),
+        debounce_seconds=3,
+        market_domain=MarketFeedDomain.SECURITIES_MARKET,
+    )
+
+    assert service.get_desired_codes() == frozenset({"600033.XSHG"})
+    index.list_margin_dependency_codes.assert_not_called()
 
 
 def test_temporary_option_and_underlying_codes_join_subscription_union():

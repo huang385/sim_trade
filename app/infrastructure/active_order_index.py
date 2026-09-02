@@ -5,8 +5,13 @@ from typing import Any
 
 from redis import Redis
 
+from app.enums.market_feed_enums import (
+    MarketFeedDomain,
+    resolve_market_feed_domain,
+)
 from app.infrastructure.redis_keys import (
-    ACTIVE_ORDER_CONTRACTS_KEY,
+    FUTURES_ACTIVE_ORDER_CONTRACTS_KEY,
+    SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY,
     ACTIVE_ORDERS_ALL_KEY,
     account_active_orders_key,
     active_order_contract_member,
@@ -51,6 +56,7 @@ if KEYS[7] ~= '' then
 end
 if redis.call('SCARD', KEYS[2]) == 0 and ARGV[3] ~= '' then
     redis.call('SREM', KEYS[6], ARGV[3])
+    redis.call('SREM', KEYS[8], ARGV[3])
 end
 if KEYS[5] ~= '' then
     redis.call('SET', KEYS[5], '1', 'EX', ARGV[2])
@@ -150,6 +156,13 @@ class ActiveOrderIndex:
         self.redis_client = redis_client
 
     @staticmethod
+    def _active_contracts_key(instrument_type: object) -> str:
+        domain = resolve_market_feed_domain(instrument_type)
+        if domain == MarketFeedDomain.FUTURES_MARKET:
+            return FUTURES_ACTIVE_ORDER_CONTRACTS_KEY
+        return SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY
+
+    @staticmethod
     def order_to_mapping(order: Any) -> dict[str, str]:
         """从订单对象提取活动索引需要的字段。"""
 
@@ -203,7 +216,7 @@ class ActiveOrderIndex:
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_order_event_key(event_id),
-            ACTIVE_ORDER_CONTRACTS_KEY,
+            self._active_contracts_key(order.instrument_type),
             self._underlying_dependency_key(order),
             order.order_id,
             processed_ttl_seconds,
@@ -234,7 +247,7 @@ class ActiveOrderIndex:
             instrument_active_orders_key(order.exchange_id, order.symbol),
             account_active_orders_key(order.account_id),
             ACTIVE_ORDERS_ALL_KEY,
-            ACTIVE_ORDER_CONTRACTS_KEY,
+            self._active_contracts_key(order.instrument_type),
             self._underlying_dependency_key(order),
             order.order_id,
             active_order_contract_member(
@@ -298,14 +311,15 @@ class ActiveOrderIndex:
             )
         self.redis_client.eval(
             REMOVE_ACTIVE_ORDER_SCRIPT,
-            7,
+            8,
             active_order_key(order_id),
             instrument_active_orders_key(exchange_id, symbol),
             account_active_orders_key(account_id),
             ACTIVE_ORDERS_ALL_KEY,
             processed_key,
-            ACTIVE_ORDER_CONTRACTS_KEY,
+            FUTURES_ACTIVE_ORDER_CONTRACTS_KEY,
             dependency_key,
+            SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY,
             order_id,
             processed_ttl_seconds,
             contract_member,
@@ -364,12 +378,20 @@ class ActiveOrderIndex:
 
         return self.redis_client.smembers(ACTIVE_ORDERS_ALL_KEY)
 
-    def list_active_contract_codes(self) -> set[str]:
-        """一次读取全部活动订单订阅代码，不再逐订单读取详情Hash。"""
+    def list_active_contract_codes(
+        self,
+        domain: MarketFeedDomain,
+    ) -> set[str]:
+        """一次读取指定行情域的活动订单订阅代码。"""
 
         codes: set[str] = set()
+        contracts_key = (
+            FUTURES_ACTIVE_ORDER_CONTRACTS_KEY
+            if domain == MarketFeedDomain.FUTURES_MARKET
+            else SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY
+        )
         for member in self.redis_client.smembers(
-            ACTIVE_ORDER_CONTRACTS_KEY
+            contracts_key
         ):
             try:
                 _exchange_id, _symbol, order_book_id = (
@@ -427,34 +449,30 @@ class ActiveOrderIndex:
         """
 
         removed = 0
-        members = sorted(
-            self.redis_client.smembers(ACTIVE_ORDER_CONTRACTS_KEY)
-        )
-        for member in members:
-            try:
-                exchange_id, symbol, _order_book_id = (
-                    parse_active_order_contract_member(str(member))
+        for contracts_key in (
+            FUTURES_ACTIVE_ORDER_CONTRACTS_KEY,
+            SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY,
+        ):
+            members = sorted(self.redis_client.smembers(contracts_key))
+            for member in members:
+                try:
+                    exchange_id, symbol, _order_book_id = (
+                        parse_active_order_contract_member(str(member))
+                    )
+                except (TypeError, ValueError):
+                    self.redis_client.srem(contracts_key, member)
+                    removed += 1
+                    continue
+                removed += int(
+                    self.redis_client.eval(
+                        REMOVE_EMPTY_ACTIVE_CONTRACT_SCRIPT,
+                        2,
+                        instrument_active_orders_key(exchange_id, symbol),
+                        contracts_key,
+                        member,
+                    )
+                    or 0
                 )
-            except (TypeError, ValueError):
-                self.redis_client.srem(
-                    ACTIVE_ORDER_CONTRACTS_KEY,
-                    member,
-                )
-                removed += 1
-                continue
-            removed += int(
-                self.redis_client.eval(
-                    REMOVE_EMPTY_ACTIVE_CONTRACT_SCRIPT,
-                    2,
-                    instrument_active_orders_key(
-                        exchange_id,
-                        symbol,
-                    ),
-                    ACTIVE_ORDER_CONTRACTS_KEY,
-                    member,
-                )
-                or 0
-            )
         return removed
 
     def remove_orphan_order_id(self, order_id: str) -> None:

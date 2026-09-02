@@ -20,6 +20,10 @@ from app.common.decimal_utils import quantize_money
 from app.common.pagination_cursor import decode_cursor, encode_cursor
 from app.common.time_utils import utc_now
 from app.enums.instrument_enums import InstrumentType
+from app.enums.market_feed_enums import (
+    MarketFeedDomain,
+    resolve_market_feed_domain,
+)
 from app.enums.account_enums import AccountType
 from app.enums.order_enums import (
     OffsetFlag,
@@ -185,6 +189,7 @@ class OrderService:
         product_registry: ProductStrategyRegistry | None = None,
         database_snapshot_client: YmmDatabaseSnapshotClient | None = None,
         market_data_service: MarketDataService | None = None,
+        market_data_services: dict[MarketFeedDomain, MarketDataService] | None = None,
         market_data_code_mapping_service: MarketDataCodeMappingService | None = None,
     ):
         # 依赖通过构造函数传入，方便单元测试替换为 Mock，
@@ -231,6 +236,7 @@ class OrderService:
         self.product_registry = product_registry or product_strategy_registry
         self.database_snapshot_client = database_snapshot_client
         self.market_data_service = market_data_service
+        self.market_data_services = market_data_services or {}
         self.market_data_code_mapping_service = market_data_code_mapping_service
 
     def _get_option_margin_prices(
@@ -382,9 +388,14 @@ class OrderService:
             rules=rules,
             authorized_account=authorized_account,
         )
+        market_data_service = self.market_data_service
+        if self.market_data_services:
+            market_data_service = self.market_data_services.get(
+                resolve_market_feed_domain(rules.instrument.instrument_type)
+            )
         if (
             self.database_snapshot_client is None
-            or self.market_data_service is None
+            or market_data_service is None
             or self.market_data_code_mapping_service is None
         ):
             return False
@@ -405,7 +416,7 @@ class OrderService:
                 data = dict(snapshot)
                 data["order_book_id"] = internal_code
                 data["channel"] = f"tick_{internal_code}"
-                self.market_data_service.process(
+                market_data_service.process(
                     db,
                     data=data,
                     raw={
@@ -559,6 +570,7 @@ class OrderService:
                         instrument_symbol=rules.instrument.symbol,
                         price_tick=Decimal(rules.instrument.price_tick),
                         trading_day=trading_day,
+                        instrument_type=rules.instrument.instrument_type,
                     )
                 except ServiceUnavailableError as exc:
                     if exc.error_code != "ORDER_PRICE_MARKET_DATA_UNAVAILABLE":
@@ -580,6 +592,7 @@ class OrderService:
                             instrument_symbol=rules.instrument.symbol,
                             price_tick=Decimal(rules.instrument.price_tick),
                             trading_day=trading_day,
+                            instrument_type=rules.instrument.instrument_type,
                             allow_bootstrap_snapshot=True,
                         )
                     except ServiceUnavailableError as retry_exc:
@@ -1503,6 +1516,34 @@ def get_order_service() -> OrderService:
     )
     from app.services.trading_day_service import get_trading_day_service
     from app.services.live_market_snapshot_service import LiveMarketSnapshotService
+    from app.enums.market_feed_enums import MarketFeedDomain
+    from app.infrastructure.redis_keys import (
+        FUTURES_MARKET_SOURCE_STATUS_KEY,
+        SECURITIES_MARKET_SOURCE_STATUS_KEY,
+    )
+
+    futures_market_data_service = MarketDataService(
+        instrument_repository=InstrumentRepository(),
+        normalizer=MarketTickNormalizer(),
+        validation_service=MarketTickValidationService(),
+        tick_store=MarketTickStore(
+            redis_client,
+            stream_name=settings.futures_market_tick_stream_name,
+            source_status_key=FUTURES_MARKET_SOURCE_STATUS_KEY,
+        ),
+        market_domain=MarketFeedDomain.FUTURES_MARKET,
+    )
+    securities_market_data_service = MarketDataService(
+        instrument_repository=InstrumentRepository(),
+        normalizer=MarketTickNormalizer(),
+        validation_service=MarketTickValidationService(),
+        tick_store=MarketTickStore(
+            redis_client,
+            stream_name=settings.securities_market_tick_stream_name,
+            source_status_key=SECURITIES_MARKET_SOURCE_STATUS_KEY,
+        ),
+        market_domain=MarketFeedDomain.SECURITIES_MARKET,
+    )
 
     return OrderService(
         order_repository=OrderRepository(),
@@ -1532,12 +1573,10 @@ def get_order_service() -> OrderService:
             ),
         ),
         database_snapshot_client=YmmDatabaseSnapshotClient(settings),
-        market_data_service=MarketDataService(
-            instrument_repository=InstrumentRepository(),
-            normalizer=MarketTickNormalizer(),
-            validation_service=MarketTickValidationService(),
-            tick_store=MarketTickStore(redis_client),
-        ),
+        market_data_services={
+            MarketFeedDomain.FUTURES_MARKET: futures_market_data_service,
+            MarketFeedDomain.SECURITIES_MARKET: securities_market_data_service,
+        },
         market_data_code_mapping_service=MarketDataCodeMappingService(
             InstrumentMarketDataMappingRepository()
         ),

@@ -4,7 +4,7 @@ from urllib.parse import quote, unquote
 from redis import Redis
 
 from app.common.exceptions import BusinessRuleError
-from app.infrastructure.redis_keys import MARKET_PRE_SUBSCRIPTIONS_KEY
+from app.infrastructure.redis_keys import FUTURES_MARKET_PRE_SUBSCRIPTIONS_KEY
 
 
 REQUEST_CODES_SCRIPT = """
@@ -44,7 +44,7 @@ class MarketPreSubscriptionStore:
         self,
         redis_client: Redis,
         *,
-        key: str = MARKET_PRE_SUBSCRIPTIONS_KEY,
+        key: str = FUTURES_MARKET_PRE_SUBSCRIPTIONS_KEY,
         ttl_seconds: int = 60,
         max_codes_per_account: int = 20,
         now_provider=None,

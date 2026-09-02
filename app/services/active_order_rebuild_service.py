@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
+from app.enums.instrument_enums import InstrumentType
 from app.enums.order_enums import LIMIT_LIKE_ORDER_TYPES, OffsetFlag, OrderStatus
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.repositories.order_repository import OrderRepository
@@ -56,12 +57,19 @@ class ActiveOrderRebuildService:
     def is_active_order(cls, order) -> bool:
         """按数据库最新状态判断订单是否仍应等待撮合。"""
 
+        instrument_type = str(getattr(order, "instrument_type", ""))
+        offset_flag = getattr(order, "offset_flag", None)
+        has_supported_offset = offset_flag in cls.SUPPORTED_OFFSET_FLAGS
+        is_cash_security = instrument_type in {
+            InstrumentType.STOCK.value,
+            InstrumentType.CONVERTIBLE_BOND.value,
+        }
         return bool(
             order is not None
             and order.status in cls.ACTIVE_STATUSES
             and order.remaining_volume > 0
             and order.order_type in LIMIT_LIKE_ORDER_TYPES
-            and order.offset_flag in cls.SUPPORTED_OFFSET_FLAGS
+            and (has_supported_offset or (is_cash_security and offset_flag is None))
         )
 
     def rebuild(self, db: Session) -> ActiveOrderRebuildResult:
@@ -77,6 +85,7 @@ class ActiveOrderRebuildService:
                 db,
                 last_id=last_id,
                 batch_size=self.batch_size,
+                include_cash_security=True,
             )
             if not orders:
                 break

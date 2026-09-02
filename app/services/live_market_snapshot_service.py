@@ -3,9 +3,11 @@ from dataclasses import dataclass
 from redis import Redis
 
 from app.common.code_utils import normalize_code
+from app.enums.market_feed_enums import MarketFeedDomain, resolve_market_feed_domain
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.redis_keys import (
-    YMM_LIVE_DATA_STATUS_KEY,
+    FUTURES_MARKET_SOURCE_STATUS_KEY,
+    SECURITIES_MARKET_SOURCE_STATUS_KEY,
     market_latest_key,
 )
 from app.schemas.market_tick_schema import MarketTickIngestType
@@ -29,8 +31,20 @@ class LiveMarketSnapshotService:
     当前订阅列表且行情源RUNNING，其最新盘口就视为该合约当前有效行情。
     """
 
-    def __init__(self, redis_client: Redis):
+    def __init__(
+        self,
+        redis_client: Redis,
+        *,
+        market_domain: MarketFeedDomain = MarketFeedDomain.FUTURES_MARKET,
+    ):
         self.redis_client = redis_client
+        self.market_domain = market_domain
+
+    @staticmethod
+    def _source_status_key(domain: MarketFeedDomain) -> str:
+        if domain == MarketFeedDomain.FUTURES_MARKET:
+            return FUTURES_MARKET_SOURCE_STATUS_KEY
+        return SECURITIES_MARKET_SOURCE_STATUS_KEY
 
     @staticmethod
     def _subscribed_codes(status: dict[str, str]) -> set[str]:
@@ -48,6 +62,7 @@ class LiveMarketSnapshotService:
         symbol: str,
         allow_bootstrap_snapshot: bool = False,
         expected_bootstrap_stream_message_id: str | None = None,
+        instrument_type: object | None = None,
     ) -> LiveMatchingEvent | None:
         """条件全部满足时返回撮合事件，否则安全等待下一条行情。"""
 
@@ -55,7 +70,12 @@ class LiveMarketSnapshotService:
         normalized_order_book_id = normalize_code(order_book_id)
         normalized_symbol = normalize_code(symbol)
         pipeline = self.redis_client.pipeline(transaction=False)
-        pipeline.hgetall(YMM_LIVE_DATA_STATUS_KEY)
+        domain = (
+            resolve_market_feed_domain(instrument_type)
+            if instrument_type is not None
+            else self.market_domain
+        )
+        pipeline.hgetall(self._source_status_key(domain))
         pipeline.hgetall(
             market_latest_key(
                 normalized_exchange,

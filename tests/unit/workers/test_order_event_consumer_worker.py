@@ -13,10 +13,7 @@ def make_worker(
     *,
     process_side_effect=None,
     failure_count=1,
-    arrival_matching_service=None,
-    cash_security_arrival_matching_service=None,
     cash_security_event_service=None,
-    market_order_execution_service=None,
 ):
     db = Mock()
     session_context = MagicMock()
@@ -45,11 +42,6 @@ def make_worker(
         stream_consumer=stream_consumer,
         event_service=event_service,
         cash_security_event_service=cash_security_event_service,
-        arrival_matching_service=arrival_matching_service,
-        cash_security_arrival_matching_service=(
-            cash_security_arrival_matching_service
-        ),
-        market_order_execution_service=market_order_execution_service,
         batch_size=100,
         block_ms=1,
         pending_idle_ms=60000,
@@ -74,129 +66,6 @@ def test_successful_message_is_acknowledged():
     assert result == "acknowledged"
     stream_consumer.acknowledge.assert_called_once_with("1-0")
     stream_consumer.clear_failure.assert_called_once_with("1-0")
-
-
-def test_accepted_order_triggers_arrival_matching_before_ack():
-    arrival_matching_service = Mock()
-    arrival_matching_service.match_if_ready.return_value = (
-        SimpleNamespace(action="SETTLED")
-    )
-    worker, stream_consumer, _, _ = make_worker(
-        arrival_matching_service=arrival_matching_service
-    )
-
-    result = worker.handle_message("1-0", FIELDS)
-
-    assert result == "acknowledged"
-    arrival_matching_service.match_if_ready.assert_called_once_with(
-        order_id="O-1",
-        exchange_id="DCE",
-        order_book_id="JD2609",
-        symbol="JD2609",
-        order_snapshot=None,
-    )
-    stream_consumer.acknowledge.assert_called_once_with("1-0")
-
-
-def test_cash_security_accepted_order_triggers_its_own_arrival_matching():
-    cash_arrival = Mock()
-    cash_arrival.match_if_ready.return_value = SimpleNamespace(
-        action="WAITING_FOR_LIVE_TICK"
-    )
-    cash_event_service = Mock()
-    cash_event_service.is_cash_security_event.return_value = True
-    cash_event_service.process.return_value = SimpleNamespace(
-        event_id="EVT-CASH-1",
-        event_type="STOCK_ORDER_ACCEPTED",
-        order_id="SO-1",
-        exchange_id="SSE",
-        order_book_id="600519.XSHG",
-        symbol="600519",
-        action="REGISTERED",
-    )
-    worker, stream_consumer, event_service, _ = make_worker(
-        cash_security_event_service=cash_event_service,
-        cash_security_arrival_matching_service=cash_arrival,
-    )
-
-    result = worker.handle_message(
-        "cash-1",
-        {
-            "event_id": "EVT-CASH-1",
-            "event_type": "STOCK_ORDER_ACCEPTED",
-            "payload": '{"order_id":"SO-1"}',
-        },
-    )
-
-    assert result == "acknowledged"
-    event_service.process.assert_not_called()
-    cash_arrival.match_if_ready.assert_called_once_with(
-        order_id="SO-1",
-        exchange_id="SSE",
-        order_book_id="600519.XSHG",
-        symbol="600519",
-    )
-    stream_consumer.acknowledge.assert_called_once_with("cash-1")
-
-
-def test_market_order_executes_and_cancels_before_ack():
-    market_execution = Mock()
-    worker, stream_consumer, event_service, _ = make_worker(
-        market_order_execution_service=market_execution
-    )
-    snapshot = object()
-    event_service.process.return_value = SimpleNamespace(
-        event_id="EVT-1",
-        event_type="ORDER_ACCEPTED",
-        order_id="O-1",
-        exchange_id="DCE",
-        symbol="JD2609",
-        action="MARKET_READY",
-        order_snapshot=snapshot,
-    )
-
-    result = worker.handle_message("1-0", FIELDS)
-
-    assert result == "acknowledged"
-    market_execution.execute.assert_called_once_with(
-        order_id="O-1", order_snapshot=snapshot
-    )
-    stream_consumer.acknowledge.assert_called_once_with("1-0")
-
-
-def test_arrival_matching_failure_keeps_order_event_pending():
-    arrival_matching_service = Mock()
-    arrival_matching_service.match_if_ready.side_effect = ConnectionError(
-        "redis down"
-    )
-    worker, stream_consumer, _, _ = make_worker(
-        arrival_matching_service=arrival_matching_service
-    )
-
-    result = worker.handle_message("1-0", FIELDS)
-
-    assert result == "retry"
-    stream_consumer.acknowledge.assert_not_called()
-
-
-def test_non_accepted_event_does_not_trigger_arrival_matching():
-    arrival_matching_service = Mock()
-    worker, _stream_consumer, event_service, _ = make_worker(
-        arrival_matching_service=arrival_matching_service
-    )
-    event_service.process.return_value = SimpleNamespace(
-        event_id="EVT-2",
-        event_type="ORDER_PARTIALLY_FILLED",
-        order_id="O-1",
-        exchange_id="DCE",
-        symbol="JD2609",
-        action="UPDATED",
-    )
-
-    result = worker.handle_message("2-0", FIELDS)
-
-    assert result == "acknowledged"
-    arrival_matching_service.match_if_ready.assert_not_called()
 
 
 def test_failed_message_is_not_acknowledged():

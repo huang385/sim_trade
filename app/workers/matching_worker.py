@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 import socket
+import threading
 from dataclasses import dataclass
 from threading import Event
 
@@ -14,6 +15,13 @@ from app.infrastructure.market_tick_stream_consumer import (
     MarketStreamMessage,
     MarketTickStreamConsumer,
 )
+from app.infrastructure.order_stream_consumer import OrderStreamConsumer
+from app.infrastructure.redis_keys import (
+    futures_arrival_matching_failure_key,
+    futures_matching_failure_key,
+    securities_arrival_matching_failure_key,
+    securities_matching_failure_key,
+)
 from app.matching.registry import create_matching_engine
 from app.repositories.order_repository import OrderRepository
 from app.services.market_tick_matching_service import (
@@ -22,9 +30,14 @@ from app.services.market_tick_matching_service import (
     UnsupportedMarketTickEventError,
 )
 from app.services.trade_settlement_service import TradeSettlementService
+from app.services.live_market_snapshot_service import LiveMarketSnapshotService
+from app.services.market_order_execution_service import MarketOrderExecutionService
+from app.services.order_arrival_matching_service import OrderArrivalMatchingService
+from app.services.order_cancellation_service import OrderCancellationService
+from app.workers.order_arrival_event_worker import OrderArrivalEventWorker
 from app.services.cash_security_market_tick_matching_service import CashSecurityMarketTickMatchingService
 from app.services.cash_security_settlement_service import CashSecuritySettlementService
-from app.services.market_tick_matching_router import MarketTickMatchingRouter
+from app.enums.market_feed_enums import MarketFeedDomain
 
 
 logger = logging.getLogger(__name__)
@@ -247,7 +260,7 @@ class MatchingWorker:
                 self.stop_event.wait(self.retry_interval_seconds)
 
 
-def build_matching_worker() -> MatchingWorker:
+def build_matching_worker(domain: MarketFeedDomain) -> MatchingWorker:
     """
     根据配置创建完整的撮合 Worker。
 
@@ -256,31 +269,54 @@ def build_matching_worker() -> MatchingWorker:
     避免 Worker 带着错误配置进入消费循环。
     """
 
-    consumer_name = settings.market_matching_consumer_name or generate_consumer_name()
+    is_futures = domain == MarketFeedDomain.FUTURES_MARKET
+    consumer_name = (
+        settings.futures_matching_consumer_name
+        if is_futures
+        else settings.securities_matching_consumer_name
+    ) or generate_consumer_name()
     consumer = MarketTickStreamConsumer(
         redis_client,
-        stream_name=settings.market_tick_stream_name,
-        group_name=settings.market_matching_consumer_group,
+        stream_name=(
+            settings.futures_market_tick_stream_name
+            if is_futures
+            else settings.securities_market_tick_stream_name
+        ),
+        group_name=(
+            settings.futures_matching_consumer_group
+            if is_futures
+            else settings.securities_matching_consumer_group
+        ),
         consumer_name=consumer_name,
-        dead_letter_stream=settings.market_matching_dead_letter_stream,
+        dead_letter_stream=(
+            settings.futures_matching_dead_letter_stream
+            if is_futures
+            else settings.securities_matching_dead_letter_stream
+        ),
         failure_ttl_seconds=settings.market_matching_failure_ttl_seconds,
+        failure_key_factory=(
+            futures_matching_failure_key
+            if is_futures
+            else securities_matching_failure_key
+        ),
     )
     active_order_index = ActiveOrderIndex(redis_client)
-    derivative_matching_service = MarketTickMatchingService(
-        session_factory=SessionLocal,
-        active_order_index=active_order_index,
-        order_repository=OrderRepository(),
-        matching_engine=create_matching_engine(settings.matching_engine_name),
-        settlement_service=TradeSettlementService(),
-    )
-    matching_service = MarketTickMatchingRouter(
-        derivative_service=derivative_matching_service,
-        cash_security_service=CashSecurityMarketTickMatchingService(
+    matching_service = (
+        MarketTickMatchingService(
+            session_factory=SessionLocal,
+            active_order_index=active_order_index,
+            order_repository=OrderRepository(),
+            matching_engine=create_matching_engine(settings.matching_engine_name),
+            settlement_service=TradeSettlementService(),
+        )
+        if is_futures
+        else CashSecurityMarketTickMatchingService(
             session_factory=SessionLocal,
             active_order_index=active_order_index,
             order_repository=OrderRepository(),
             settlement_service=CashSecuritySettlementService(),
-        ),
+            enabled=settings.stock_matching_enabled,
+        )
     )
     return MatchingWorker(
         stream_consumer=consumer,
@@ -293,18 +329,87 @@ def build_matching_worker() -> MatchingWorker:
     )
 
 
-def main() -> None:
-    """命令行入口：python -m app.workers.matching_worker。"""
+def build_arrival_worker(
+    domain: MarketFeedDomain,
+    matching_service,
+) -> OrderArrivalEventWorker:
+    """组装同一撮合进程内的订单到达事件消费者。"""
 
+    is_futures = domain == MarketFeedDomain.FUTURES_MARKET
+    consumer = OrderStreamConsumer(
+        redis_client,
+        stream_name=settings.order_stream_name,
+        group_name=(
+            settings.futures_arrival_consumer_group
+            if is_futures
+            else settings.securities_arrival_consumer_group
+        ),
+        consumer_name=(
+            settings.futures_arrival_consumer_name
+            if is_futures
+            else settings.securities_arrival_consumer_name
+        ) or generate_consumer_name().replace("matching", "arrival"),
+        dead_letter_stream=(
+            settings.futures_arrival_dead_letter_stream
+            if is_futures
+            else settings.securities_arrival_dead_letter_stream
+        ),
+        failure_ttl_seconds=settings.order_event_failure_ttl_seconds,
+        failure_key_factory=(
+            futures_arrival_matching_failure_key
+            if is_futures
+            else securities_arrival_matching_failure_key
+        ),
+    )
+    return OrderArrivalEventWorker(
+        domain=domain,
+        session_factory=SessionLocal,
+        stream_consumer=consumer,
+        order_repository=OrderRepository(),
+        arrival_matching_service=OrderArrivalMatchingService(
+            live_market_snapshot_service=LiveMarketSnapshotService(
+                redis_client,
+                market_domain=domain,
+            ),
+            matching_service=matching_service,
+        ),
+        market_order_execution_service=(
+            MarketOrderExecutionService(
+                session_factory=SessionLocal,
+                matching_service=matching_service,
+                cancellation_service=OrderCancellationService(),
+            )
+            if is_futures
+            else None
+        ),
+        batch_size=settings.order_consumer_batch_size,
+        block_ms=settings.order_consumer_block_ms,
+        pending_idle_ms=settings.order_pending_idle_ms,
+        max_retries=settings.order_event_max_retries,
+        retry_interval_seconds=settings.order_consumer_retry_interval_seconds,
+    )
+
+
+def run_matching_worker(domain: MarketFeedDomain) -> None:
+    """运行一个只消费所属行情流的撮合进程。"""
     setup_logging()
-    worker = build_matching_worker()
-    signal.signal(signal.SIGINT, worker.request_stop)
-    signal.signal(signal.SIGTERM, worker.request_stop)
+    worker = build_matching_worker(domain)
+    arrival_worker = build_arrival_worker(domain, worker.matching_service)
+
+    def request_stop(*_args) -> None:
+        worker.request_stop()
+        arrival_worker.request_stop()
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+    arrival_thread = threading.Thread(
+        target=arrival_worker.run_forever,
+        name=f"{domain.value}-order-arrival",
+    )
+    arrival_thread.start()
     try:
         worker.run_forever()
     finally:
+        request_stop()
+        arrival_thread.join()
         redis_client.close()
-
-
-if __name__ == "__main__":
-    main()

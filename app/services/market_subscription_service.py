@@ -3,6 +3,7 @@ from threading import RLock
 from typing import Any, Protocol
 
 from app.common.code_utils import normalize_code
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.active_order_index import ActiveOrderIndex
 
 
@@ -56,9 +57,11 @@ class MarketSubscriptionService:
         active_order_index: ActiveOrderIndex,
         active_position_contract_source: ActivePositionContractSource,
         debounce_seconds: float,
+        market_domain: MarketFeedDomain = MarketFeedDomain.FUTURES_MARKET,
         pre_subscription_source: PreSubscriptionContractSource | None = None,
         cash_security_position_source: ActivePositionContractSource | None = None,
     ):
+        self.market_domain = market_domain
         self.active_order_index = active_order_index
         self.active_position_contract_source = (
             active_position_contract_source
@@ -78,7 +81,9 @@ class MarketSubscriptionService:
         """从独立活动合约Set读取仍需撮合的订单合约。"""
 
         desired: set[str] = set()
-        for raw_code in self.active_order_index.list_active_contract_codes():
+        for raw_code in self.active_order_index.list_active_contract_codes(
+            self.market_domain
+        ):
             try:
                 desired.add(normalize_code(raw_code))
             except ValueError:
@@ -105,6 +110,8 @@ class MarketSubscriptionService:
     def _get_margin_dependency_codes(self) -> set[str]:
         """汇总活动期权卖方订单和空头持仓依赖的标的代码。"""
 
+        if self.market_domain != MarketFeedDomain.FUTURES_MARKET:
+            return set()
         desired: set[str] = set()
         for source in (
             self.active_order_index,

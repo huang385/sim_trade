@@ -2,9 +2,10 @@
 
 用法：
     python -m app.scripts.seed_market_sdk_binding --client-ip 192.168.11.100 \
+        --domain futures \
         [--remark 备注] [--mode lan] [--live-url ...] [--data-url ...]
 
-token读取.env（REMOTE_MARKET_DATA_API_TOKEN / YMM_DATA_SDK_TOKEN），
+token读取.env（对应行情域的 MARKET_DATA_API_TOKEN / YMM_DATA_SDK_TOKEN），
 不通过命令行传递，避免凭证进入shell历史。
 """
 
@@ -23,6 +24,12 @@ from app.models.market_sdk_token_binding import MarketSdkTokenBinding
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="绑定客户端IP与行情SDK凭证")
     parser.add_argument("--client-ip", required=True, help="客户端来源IP")
+    parser.add_argument(
+        "--domain",
+        required=True,
+        choices=("futures", "securities"),
+        help="向终端发放期货域或证券域实时行情Token",
+    )
     parser.add_argument("--remark", default="", help="备注，例如机器名或使用者")
     parser.add_argument(
         "--mode",
@@ -39,10 +46,11 @@ def main() -> None:
     load_dotenv(override=False)
     args = build_parser().parse_args()
 
-    live_token = os.getenv("REMOTE_MARKET_DATA_API_TOKEN", "").strip()
+    token_variable = f"{args.domain.upper()}_MARKET_DATA_API_TOKEN"
+    live_token = os.getenv(token_variable, "").strip()
     data_token = os.getenv("YMM_DATA_SDK_TOKEN", "").strip()
     if not live_token:
-        raise SystemExit("缺少 REMOTE_MARKET_DATA_API_TOKEN")
+        raise SystemExit(f"缺少 {token_variable}")
     if not data_token:
         raise SystemExit("缺少 YMM_DATA_SDK_TOKEN")
     if args.mode.strip().lower() not in {"lan", "ts", "local"}:

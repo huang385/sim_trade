@@ -124,13 +124,21 @@ services:
     <<: *app-bridge
     command: ["python", "-m", "app.workers.order_event_consumer_worker"]
 
-  market-data-subscriber:
+  futures-market-data:
     <<: *app-host
-    command: ["python", "-m", "app.workers.market_data_subscriber_worker"]
+    command: ["python", "-m", "app.workers.futures_market_data_worker"]
 
-  matching:
+  securities-market-data:
+    <<: *app-host
+    command: ["python", "-m", "app.workers.securities_market_data_worker"]
+
+  futures-matching:
     <<: *app-bridge
-    command: ["python", "-m", "app.workers.matching_worker"]
+    command: ["python", "-m", "app.workers.futures_matching_worker"]
+
+  securities-matching:
+    <<: *app-bridge
+    command: ["python", "-m", "app.workers.securities_matching_worker"]
 
   trade-event-pnl:
     <<: *app-bridge

@@ -2,6 +2,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.market_data.market_tick_store import MarketTickStoreResult
 from app.schemas.market_tick_schema import MarketTickIngestType
 from app.services.market_data_service import (
@@ -29,6 +30,7 @@ def make_service(repository=None, store=None):
             normalizer=normalizer,
             validation_service=validation,
             tick_store=store,
+            market_domain=MarketFeedDomain.FUTURES_MARKET,
         ),
         repository,
         normalizer,
@@ -45,6 +47,19 @@ def test_missing_instrument_does_not_publish():
         service.process(Mock(), data=make_data(), raw=make_raw())
 
     validation.validate_envelope.assert_called_once()
+    store.publish.assert_not_called()
+
+
+def test_securities_process_rejects_futures_contract_before_publish():
+    service, repository, _normalizer, _validation, store = make_service()
+    service.market_domain = MarketFeedDomain.SECURITIES_MARKET
+    repository.get_by_order_book_id.return_value = make_instrument(
+        instrument_type="FUTURES"
+    )
+
+    with pytest.raises(MarketTickValidationError, match="不属于当前行情域"):
+        service.process(Mock(), data=make_data(), raw=make_raw())
+
     store.publish.assert_not_called()
 
 
@@ -66,6 +81,7 @@ def test_valid_tick_is_validated_and_published():
             exchange_id="SHFE",
             symbol="AG2609",
             is_active=True,
+            instrument_type="FUTURES",
         ),
     )
     store.publish.assert_called_once_with(

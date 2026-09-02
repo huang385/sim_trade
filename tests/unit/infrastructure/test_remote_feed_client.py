@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.infrastructure.market_data.remote_feed_client import (
     RemoteFeedClient,
     RemoteMarketDataConfigurationError,
@@ -62,7 +63,10 @@ class FakeSdk:
 
 def make_config(**overrides):
     values = {
-        "remote_market_data_api_token": "private-token",
+        "futures_market_data_api_user": "futures-user",
+        "futures_market_data_api_token": "futures-private-token",
+        "securities_market_data_api_user": "securities-user",
+        "securities_market_data_api_token": "securities-private-token",
         "remote_market_data_mode": "lan",
         "remote_market_data_base_url": "",
         "remote_market_data_ca_file": "",
@@ -83,19 +87,19 @@ def test_sdk_client_is_created_from_settings_without_logging_credentials(caplog)
         create_remote_sdk_client(config, client_class=client_class)
 
     client_class.assert_called_once_with(
-        token="private-token",
+        token="futures-private-token",
         mode="lan",
         server_url="wss://market.example.test",
         ca_file="/safe/ca.pem",
     )
-    assert "private-token" not in caplog.text
+    assert "futures-private-token" not in caplog.text
     assert "market.example.test" not in caplog.text
 
 
 @pytest.mark.parametrize(
     "config",
     [
-        make_config(remote_market_data_api_token=""),
+        make_config(futures_market_data_api_token=""),
         make_config(remote_market_data_mode="", remote_market_data_base_url=""),
         make_config(remote_market_data_verify_ssl=False),
     ],
@@ -122,6 +126,38 @@ def test_missing_official_sdk_reports_exact_install_requirement(monkeypatch):
         match="ymm-live-data-sdk==0.8.5",
     ):
         create_remote_sdk_client(make_config())
+
+
+def test_securities_client_uses_only_securities_token():
+    client_class = Mock()
+    config = make_config()
+
+    create_remote_sdk_client(
+        config,
+        domain=MarketFeedDomain.SECURITIES_MARKET,
+        client_class=client_class,
+    )
+
+    assert client_class.call_args.kwargs["token"] == (
+        "securities-private-token"
+    )
+    assert "futures-private-token" not in client_class.call_args.kwargs.values()
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "securities_market_data_api_user",
+        "securities_market_data_api_token",
+    ],
+)
+def test_securities_credentials_fail_closed_when_incomplete(missing_field):
+    with pytest.raises(RemoteMarketDataConfigurationError):
+        create_remote_sdk_client(
+            make_config(**{missing_field: ""}),
+            domain=MarketFeedDomain.SECURITIES_MARKET,
+            client_class=Mock(),
+        )
 
 
 def test_batch_subscription_then_blocking_feed_listener_with_tick_copy():
@@ -314,4 +350,3 @@ def test_immediate_listen_failure_is_raised_and_client_is_closed():
         )
 
     assert sdk.closed is True
-

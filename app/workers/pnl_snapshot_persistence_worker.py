@@ -142,7 +142,7 @@ def build_worker() -> PnlSnapshotPersistenceWorker:
         pnl_store=pnl_store,
         market_tick_store=MarketTickStore(
             redis_client,
-            stream_name=settings.market_tick_stream_name,
+            stream_name=settings.futures_market_tick_stream_name,
         ),
         risk_store=RiskStore(redis_client),
     )

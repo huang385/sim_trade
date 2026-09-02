@@ -1,9 +1,10 @@
 import threading
 from collections.abc import Callable, Mapping
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 from app.core.config import Settings, settings
+from app.enums.market_feed_enums import MarketFeedDomain
 
 
 YMM_LIVE_DATA_SOURCE = "YMM_LIVE_DATA"
@@ -17,6 +18,38 @@ class RemoteMarketDataConfigurationError(ValueError):
 
 class RemoteMarketDataSdkUnavailableError(RuntimeError):
     """运行环境尚未安装官方YMM Live Data客户端SDK。"""
+
+
+@dataclass(frozen=True)
+class RemoteMarketDataCredentials:
+    """一个行情域独享的上游身份，禁止跨进程隐式共享。"""
+
+    api_user: str
+    api_token: str
+
+
+def market_feed_credentials(
+    config: Settings,
+    domain: MarketFeedDomain,
+) -> RemoteMarketDataCredentials:
+    """读取指定行情域的凭证，并在建立连接前失败关闭。"""
+
+    prefix = domain.value
+    if domain == MarketFeedDomain.FUTURES_MARKET:
+        api_user = config.futures_market_data_api_user.strip()
+        api_token = config.futures_market_data_api_token.strip()
+    else:
+        api_user = config.securities_market_data_api_user.strip()
+        api_token = config.securities_market_data_api_token.strip()
+    if not api_user:
+        raise RemoteMarketDataConfigurationError(
+            f"缺少{prefix}_DATA_API_USER"
+        )
+    if not api_token:
+        raise RemoteMarketDataConfigurationError(
+            f"缺少{prefix}_DATA_API_TOKEN"
+        )
+    return RemoteMarketDataCredentials(api_user=api_user, api_token=api_token)
 
 
 def _normalized_mode(value: str) -> str | None:
@@ -33,17 +66,17 @@ def _normalized_mode(value: str) -> str | None:
     return normalized
 
 
-def remote_sdk_client_kwargs(config: Settings = settings) -> dict[str, Any]:
+def remote_sdk_client_kwargs(
+    config: Settings = settings,
+    *,
+    domain: MarketFeedDomain = MarketFeedDomain.FUTURES_MARKET,
+) -> dict[str, Any]:
     """校验启动配置并返回官方构造器参数，不建立网络连接。"""
 
-    token = config.remote_market_data_api_token.strip()
+    credentials = market_feed_credentials(config, domain)
     mode = _normalized_mode(config.remote_market_data_mode)
     server_url = config.remote_market_data_base_url.strip() or None
     ca_file = config.remote_market_data_ca_file.strip() or None
-    if not token:
-        raise RemoteMarketDataConfigurationError(
-            "缺少REMOTE_MARKET_DATA_API_TOKEN"
-        )
     if mode is None and server_url is None:
         raise RemoteMarketDataConfigurationError(
             "REMOTE_MARKET_DATA_MODE和REMOTE_MARKET_DATA_BASE_URL至少配置一个"
@@ -54,7 +87,7 @@ def remote_sdk_client_kwargs(config: Settings = settings) -> dict[str, Any]:
         )
 
     return {
-        "token": token,
+        "token": credentials.api_token,
         "mode": mode,
         "server_url": server_url,
         "ca_file": ca_file,
@@ -64,6 +97,7 @@ def remote_sdk_client_kwargs(config: Settings = settings) -> dict[str, Any]:
 def create_remote_sdk_client(
     config: Settings = settings,
     *,
+    domain: MarketFeedDomain = MarketFeedDomain.FUTURES_MARKET,
     client_class=None,
 ):
     """使用公开构造器创建官方客户端，不记录地址、Token或会话信息。
@@ -72,7 +106,7 @@ def create_remote_sdk_client(
     包级全局init，避免测试或同进程其他组件共享隐式认证状态。
     """
 
-    kwargs = remote_sdk_client_kwargs(config)
+    kwargs = remote_sdk_client_kwargs(config, domain=domain)
     if client_class is None:
         client_class = load_remote_sdk_client_class()
 

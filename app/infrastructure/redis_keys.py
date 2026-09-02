@@ -9,12 +9,18 @@ ORDER_EVENT_DEAD_LETTER_STREAM = settings.order_dead_letter_stream
 
 # 全部活动订单编号集合，用于重建对账，禁止使用 KEYS 扫描订单详情。
 ACTIVE_ORDERS_ALL_KEY = "active_orders:all"
-# 行情订阅只关心仍有活动订单的合约，独立Set避免逐订单读取Hash。
-ACTIVE_ORDER_CONTRACTS_KEY = "active_order_contracts"
+# 两个行情域分别读取自己的活动订单合约，避免重复订阅同一合约。
+FUTURES_ACTIVE_ORDER_CONTRACTS_KEY = "active_order_contracts:futures"
+SECURITIES_ACTIVE_ORDER_CONTRACTS_KEY = "active_order_contracts:securities"
 
-MARKET_TICK_STREAM = settings.market_tick_stream_name
-MARKET_MATCHING_CONSUMER_GROUP = settings.market_matching_consumer_group
-MARKET_MATCHING_DEAD_LETTER_STREAM = settings.market_matching_dead_letter_stream
+FUTURES_MARKET_TICK_STREAM = settings.futures_market_tick_stream_name
+SECURITIES_MARKET_TICK_STREAM = settings.securities_market_tick_stream_name
+FUTURES_MATCHING_CONSUMER_GROUP = settings.futures_matching_consumer_group
+SECURITIES_MATCHING_CONSUMER_GROUP = settings.securities_matching_consumer_group
+FUTURES_MATCHING_DEAD_LETTER_STREAM = settings.futures_matching_dead_letter_stream
+SECURITIES_MATCHING_DEAD_LETTER_STREAM = (
+    settings.securities_matching_dead_letter_stream
+)
 PNL_CONSUMER_GROUP = settings.pnl_consumer_group
 PNL_DEAD_LETTER_STREAM = settings.pnl_dead_letter_stream
 PNL_DIRTY_POSITIONS_KEY = "pnl:dirty_positions"
@@ -48,10 +54,13 @@ PNL_WORKER_LEASE_KEY = "pnl:worker:lease"
 PNL_REALTIME_SNAPSHOT_SEQUENCE_KEY = "pnl:realtime:snapshot_sequence"
 PNL_ACCOUNT_REALTIME_VERSIONS_KEY = "pnl:realtime:account_versions"
 PNL_POSITION_REALTIME_VERSIONS_KEY = "pnl:realtime:position_versions"
-YMM_LIVE_DATA_STATUS_KEY = "market:source:ymm_live_data:status"
+FUTURES_MARKET_SOURCE_STATUS_KEY = settings.futures_market_source_status_key
+SECURITIES_MARKET_SOURCE_STATUS_KEY = (
+    settings.securities_market_source_status_key
+)
 # 下单前临时行情需求使用按成员过期的ZSET；成员包含账户和标准合约代码，
 # 行情Worker只读取仍未过期的代码并与订单、持仓订阅集合合并。
-MARKET_PRE_SUBSCRIPTIONS_KEY = "market:pre_subscriptions"
+FUTURES_MARKET_PRE_SUBSCRIPTIONS_KEY = "market:pre_subscriptions:futures"
 # 桌面/网页终端按WebSocket连接租约登记的行情需求。成员不包含用户凭据，
 # 过期需求由读取Lua原子清理，行情Worker只读取聚合后的标准合约代码。
 MARKET_CLIENT_SUBSCRIPTIONS_KEY = "market:client_subscriptions"
@@ -221,10 +230,26 @@ def market_latest_key(exchange_id: str, order_book_id: str) -> str:
     return f"market:latest:{normalized_exchange}:{normalized_order_book_id}"
 
 
-def market_matching_failure_key(message_id: str) -> str:
-    """返回行情撮合消息的失败次数键名。"""
+def futures_matching_failure_key(message_id: str) -> str:
+    return f"market_matching_failure:futures:{message_id}"
 
-    return f"market_matching_failure:{message_id}"
+
+def securities_matching_failure_key(message_id: str) -> str:
+    return f"market_matching_failure:securities:{message_id}"
+
+
+def futures_arrival_matching_failure_key(message_id: str) -> str:
+    return f"arrival_matching_failure:futures:{message_id}"
+
+
+def securities_arrival_matching_failure_key(message_id: str) -> str:
+    return f"arrival_matching_failure:securities:{message_id}"
+
+
+def market_matching_failure_key(message_id: str) -> str:
+    """默认期货撮合失败键；显式消费者应注入自己的命名空间。"""
+
+    return futures_matching_failure_key(message_id)
 
 
 def pnl_position_key(position_id: str) -> str:

@@ -21,6 +21,7 @@ from app.enums.reference_data_enums import (
 )
 from app.enums.auth_enums import TokenType, UserRole, UserStatus
 from app.enums.instrument_enums import InstrumentType
+from app.enums.market_feed_enums import MarketFeedDomain
 from app.enums.option_enums import (
     ExerciseStyle,
     MarginPriceMode,
@@ -57,6 +58,7 @@ __all__ = [
     "UserRole",
     "UserStatus",
     "InstrumentType",
+    "MarketFeedDomain",
     "OptionType",
     "ExerciseStyle",
     "SettlementType",

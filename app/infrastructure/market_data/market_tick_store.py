@@ -7,8 +7,8 @@ from typing import Any, Iterable
 from redis import Redis
 
 from app.infrastructure.redis_keys import (
-    MARKET_TICK_STREAM,
-    YMM_LIVE_DATA_STATUS_KEY,
+    FUTURES_MARKET_SOURCE_STATUS_KEY,
+    FUTURES_MARKET_TICK_STREAM,
     market_latest_key,
 )
 from app.schemas.market_tick_schema import MarketTick
@@ -109,10 +109,12 @@ class MarketTickStore:
         self,
         redis_client: Redis,
         *,
-        stream_name: str = MARKET_TICK_STREAM,
+        stream_name: str = FUTURES_MARKET_TICK_STREAM,
+        source_status_key: str = FUTURES_MARKET_SOURCE_STATUS_KEY,
     ):
         self.redis_client = redis_client
         self.stream_name = stream_name
+        self.source_status_key = source_status_key
         self._source_status_fields_cleaned = False
 
     @staticmethod
@@ -229,11 +231,11 @@ class MarketTickStore:
                 # 旧版本累计字段不会被 HSET 自动删除；新 Worker 首次写状态时
                 # 清理一次，避免运维人员误以为新逻辑仍在执行新旧行情过滤。
                 self.redis_client.hdel(
-                    YMM_LIVE_DATA_STATUS_KEY,
+                    self.source_status_key,
                     *self.OBSOLETE_SOURCE_STATUS_FIELDS,
                 )
             self.redis_client.hset(
-                YMM_LIVE_DATA_STATUS_KEY,
+                self.source_status_key,
                 mapping=mapping,
             )
             self._source_status_fields_cleaned = True
