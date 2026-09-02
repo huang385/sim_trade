@@ -225,3 +225,57 @@ def test_account_queries_reuse_preloaded_authorized_account():
     assert pnl.account_id == "A001"
     assert snapshot.account.account_id == "A001"
     account_repository.get_by_account_id.assert_not_called()
+
+
+def test_account_query_rejects_cross_day_redis_snapshot():
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    account = _account(now)
+    account.trading_day = now.date()
+    stale = {
+        "account_id": "A001",
+        "cumulative_unrealized_pnl": "1300",
+        "daily_position_pnl": "300",
+        "daily_close_pnl": "0",
+        "daily_commission": "0",
+        "daily_pnl": "300",
+        "equity": "101300",
+        "available_cash": "90000",
+        "risk_ratio": "0.1",
+        "updated_at": now.isoformat(),
+        "trading_day": "2026-08-31",
+    }
+    service = RealtimePnlQueryService(pnl_store=FakeStore(account=stale))
+
+    result = service.get_account(
+        SimpleNamespace(), "A001", account=account
+    )
+
+    assert result.daily_position_pnl == account.daily_position_pnl
+    assert result.data_source == "POSTGRES_SNAPSHOT"
+
+
+def test_position_query_rejects_cross_day_redis_snapshot():
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    position = _position(now, "P001")
+    stale = {
+        "position_id": "P001",
+        "account_id": "A001",
+        "exchange_id": "DCE",
+        "symbol": "JD2609",
+        "direction": "LONG",
+        "mark_price": "3500",
+        "cumulative_unrealized_pnl": "300",
+        "daily_position_pnl": "300",
+        "event_time": now.isoformat(),
+        "source_event_id": "OLD-TICK",
+        "updated_at": now.isoformat(),
+        "trading_day": "2026-08-31",
+    }
+    service = RealtimePnlQueryService(pnl_store=FakeStore(position=stale))
+
+    result = service.get_position(
+        SimpleNamespace(), "P001", position=position
+    )
+
+    assert result.daily_position_pnl == position.daily_position_pnl
+    assert result.data_source == "POSTGRES_SNAPSHOT"

@@ -456,6 +456,40 @@ def test_redis_recovery_failure_keeps_completed_database_batch(
         assert persisted.cache_status == "FAILED"
 
 
+def test_cache_recovery_scope_includes_cash_positions_without_daily_detail():
+    derivative = SimpleNamespace(
+        account_id="A-SETTLE",
+        exchange_id="DCE",
+        symbol="JD2609",
+        position_id="P-FUTURE",
+        expired_closed=False,
+    )
+    stock = SimpleNamespace(
+        account_id="A-SETTLE",
+        exchange_id="SSE",
+        symbol="600000",
+        position_id="P-STOCK",
+        total_volume=100,
+    )
+    closed_bond = SimpleNamespace(
+        account_id="A-SETTLE",
+        exchange_id="SSE",
+        symbol="110001",
+        position_id="P-BOND",
+        total_volume=0,
+    )
+
+    affected = DailySettlementService._merge_cache_affected_positions(
+        (derivative,), (stock, closed_bond)
+    )
+
+    assert {item[3] for item in affected} == {
+        "P-FUTURE", "P-STOCK", "P-BOND"
+    }
+    assert next(item for item in affected if item[3] == "P-STOCK")[4] is False
+    assert next(item for item in affected if item[3] == "P-BOND")[4] is True
+
+
 def _cash_schedule_row(product_code: str, instrument_type: str = "STOCK"):
     return {
         "trading_day": TRADING_DAY,

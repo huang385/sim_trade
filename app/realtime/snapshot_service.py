@@ -362,6 +362,30 @@ class SnapshotService:
             account_values, position_values = {}, {}
 
         if require_realtime_consistency:
+            account_by_id = {
+                account.account_id: account for account in accounts
+            }
+            position_by_id = {
+                position.position_id: position for position in positions
+            }
+            mismatched_accounts = [
+                account_id
+                for account_id, values in account_values.items()
+                if values
+                and not RealtimePnlQueryService._snapshot_matches_trading_day(
+                    values, account_by_id[account_id]
+                )
+            ]
+            mismatched_positions = [
+                position_id
+                for position_id, values in position_values.items()
+                if values
+                and not RealtimePnlQueryService._snapshot_matches_trading_day(
+                    values, position_by_id[position_id]
+                )
+            ]
+            if mismatched_accounts or mismatched_positions:
+                raise RedisError("WebSocket实时快照交易日不一致")
             # 有活动持仓时，账户和每条持仓都必须具有完整实时Hash。无持仓
             # 账户没有行情派生值，使用同一数据库快照中的资金事实是安全的。
             missing_positions = [

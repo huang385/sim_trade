@@ -30,11 +30,15 @@ def _session_with_active_position(*, dialect: str = "sqlite") -> Mock:
     db.get_bind.return_value = SimpleNamespace(
         dialect=SimpleNamespace(name=dialect)
     )
-    account = SimpleNamespace(id=1, account_id="A001", user_id="U001")
+    account = SimpleNamespace(
+        id=1, account_id="A001", user_id="U001",
+        trading_day=date(2026, 8, 4),
+    )
     position = SimpleNamespace(
         id=1,
         position_id="P001",
         account_id="A001",
+        trading_day=date(2026, 8, 4),
     )
     db.scalars.side_effect = [
         SimpleNamespace(all=lambda: [account]),
@@ -242,6 +246,29 @@ def test_strict_snapshot_rejects_complete_but_invalid_hash_fields():
     )
 
     with pytest.raises(RedisError, match="Hash不完整"):
+        _snapshot_service(store).build(
+            db,
+            {"A001"},
+            identity=RealtimeUserIdentity("U001", "USER"),
+            require_realtime_consistency=True,
+        )
+
+
+def test_strict_snapshot_rejects_cross_day_position_hash():
+    db = _session_with_active_position()
+    store = Mock()
+    position_hash = _complete_position_hash("3")
+    position_hash["trading_day"] = "2026-08-03"
+    store.get_accounts_with_positions_and_versions.return_value = (
+        {"A001": _complete_account_hash("3")},
+        {"P001": position_hash},
+        {"A001": "3"},
+        {"P001": "3"},
+        set(),
+        set(),
+    )
+
+    with pytest.raises(RedisError, match="交易日不一致"):
         _snapshot_service(store).build(
             db,
             {"A001"},
@@ -530,4 +557,3 @@ def test_strict_snapshot_without_exclusion_does_not_consult_created_times():
         )
 
     outbox_repository.list_latest_fact_created_times.assert_not_called()
-

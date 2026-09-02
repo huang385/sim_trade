@@ -53,6 +53,20 @@ class RealtimePnlQueryService:
         self.risk_repository = risk_repository or RiskRepository()
 
     @staticmethod
+    def _snapshot_matches_trading_day(values: dict[str, str], entity) -> bool:
+        """拒绝使用明确属于其他交易日的Redis派生快照。"""
+
+        if not values:
+            return False
+        cached_day = str(values.get("trading_day") or "").strip()
+        expected_day = getattr(entity, "trading_day", None)
+        # 兼容升级前不带trading_day的同日快照；一旦Redis明确携带日期，
+        # 必须与PostgreSQL权威事实一致。
+        if not cached_day or expected_day is None:
+            return True
+        return cached_day == expected_day.isoformat()
+
+    @staticmethod
     def _account_pnl_response(
         *,
         values: dict[str, str],
@@ -180,6 +194,10 @@ class RealtimePnlQueryService:
             values = self.pnl_store.get_account(normalized)
         except RedisError:
             values = {}
+        if account is not None and not self._snapshot_matches_trading_day(
+            values, account
+        ):
+            values = {}
         if values:
             return self._account_pnl_response(
                 values=values,
@@ -211,6 +229,10 @@ class RealtimePnlQueryService:
         try:
             values = self.pnl_store.get_position(normalized)
         except RedisError:
+            values = {}
+        if position is not None and not self._snapshot_matches_trading_day(
+            values, position
+        ):
             values = {}
         if values:
             return self._position_pnl_response(
@@ -281,6 +303,17 @@ class RealtimePnlQueryService:
         except RedisError:
             account_values = {}
             position_values = {}
+
+        if not self._snapshot_matches_trading_day(account_values, account):
+            account_values = {}
+        position_values = {
+            position.position_id: values
+            for position in positions
+            if (
+                values := position_values.get(position.position_id, {})
+            )
+            and self._snapshot_matches_trading_day(values, position)
+        }
 
         return AccountTradingSnapshotResponse(
             account=AccountResponse.model_validate(account),

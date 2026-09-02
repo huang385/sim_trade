@@ -2353,6 +2353,30 @@ class DailySettlementService:
             db.expunge(batch)
             return batch
 
+    @staticmethod
+    def _merge_cache_affected_positions(affected, cash_positions):
+        """把无逐笔结算明细的现金证券纳入日终缓存恢复范围。"""
+
+        by_position = {
+            str(item.position_id): (
+                item.account_id,
+                item.exchange_id,
+                item.symbol,
+                item.position_id,
+                item.expired_closed,
+            )
+            for item in affected
+        }
+        for position in cash_positions:
+            by_position[position.position_id] = (
+                position.account_id,
+                position.exchange_id,
+                position.symbol,
+                position.position_id,
+                position.total_volume <= 0,
+            )
+        return list(by_position.values())
+
     def _recover_redis(self, batch: DailySettlementBatch) -> tuple[str, str | None]:
         if not self.redis_recovery_enabled:
             return SettlementCacheStatus.PENDING.value, "Redis 恢复已由调用方禁用"
@@ -2397,8 +2421,23 @@ class DailySettlementService:
                     )
                 ).all()
                 affected_account_id_set = set(affected_account_ids)
+                # DailyPositionSettlement只记录期货/期权回放结果，现金证券日终
+                # 只做持仓数量和盈亏基准结转，因此不会出现在该表中。缓存恢复
+                # 必须显式纳入结算账户的全部股票/可转债持仓，否则Redis会继续
+                # 暴露上一交易日的持仓盈亏和事实版本。
+                cash_position_models = db.scalars(
+                    select(Position)
+                    .where(
+                        Position.account_id.in_(affected_account_ids),
+                        Position.instrument_type.in_(CASH_SECURITY_TYPES),
+                    )
+                    .order_by(Position.id)
+                ).all()
+                affected = self._merge_cache_affected_positions(
+                    affected, cash_position_models
+                )
                 affected_position_ids = {
-                    str(item.position_id) for item in affected
+                    str(item[3]) for item in affected
                 }
                 unexpected_new_positions = [
                     item.position_id
