@@ -32,6 +32,11 @@ class InstrumentCreate(BaseModel):
 
     # 品种代码，例如 RB、CU
     product_id: str | None = Field(default=None, max_length=64)
+    fund_type: str | None = Field(default=None, max_length=32)
+    market_tplus: int | None = Field(default=None, ge=0, le=1)
+    round_lot: int | None = Field(default=None, gt=0)
+    least_redeem: int | None = Field(default=None, gt=0)
+    reference_underlying_order_book_id: str | None = Field(default=None, max_length=64)
 
     # 市场类型，第一版固定期货
     market_type: MarketType = MarketType.FUTURES
@@ -72,10 +77,19 @@ class InstrumentCreate(BaseModel):
         if self.instrument_type not in {
             InstrumentType.STOCK,
             InstrumentType.CONVERTIBLE_BOND,
+            InstrumentType.ETF,
         }:
             return self
-        if self.market_type != MarketType.STOCK:
-            raise ValueError("现金证券 Instrument 的 market_type 必须为 STOCK")
+        expected_market = {
+            InstrumentType.STOCK: MarketType.STOCK,
+            InstrumentType.CONVERTIBLE_BOND: MarketType.BOND,
+            InstrumentType.ETF: MarketType.FUND,
+        }[self.instrument_type]
+        if self.market_type != expected_market:
+            raise ValueError(
+                f"{self.instrument_type.value} Instrument 的 market_type 必须为 "
+                f"{expected_market.value}"
+            )
         if self.contract_multiplier != Decimal("1"):
             raise ValueError("现金证券 Instrument 的 contract_multiplier 必须为 1")
         if any(
@@ -89,6 +103,12 @@ class InstrumentCreate(BaseModel):
             )
         ):
             raise ValueError("现金证券 Instrument 不能填写期权字段")
+        if self.instrument_type == InstrumentType.ETF and (
+            not self.fund_type
+            or self.market_tplus is None
+            or self.round_lot is None
+        ):
+            raise ValueError("ETF Instrument 必须提供 fund_type、market_tplus 和 round_lot")
         return self
 
 
@@ -106,6 +126,11 @@ class InstrumentResponse(BaseModel):
 
     instrument_name: str | None
     product_id: str | None
+    fund_type: str | None = None
+    market_tplus: int | None = None
+    round_lot: int | None = None
+    least_redeem: int | None = None
+    reference_underlying_order_book_id: str | None = None
     market_type: MarketType = MarketType.FUTURES
     instrument_type: InstrumentType = InstrumentType.FUTURES
     underlying_instrument_id: int | None
@@ -142,6 +167,9 @@ class InstrumentCatalogItem(BaseModel):
     exchange_id: str
     instrument_name: str | None
     product_id: str | None = None
+    fund_type: str | None = None
+    market_tplus: int | None = None
+    round_lot: int | None = None
     instrument_type: InstrumentType = InstrumentType.FUTURES
     underlying_order_book_id: str | None = None
     option_type: OptionType | None = None

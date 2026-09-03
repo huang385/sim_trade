@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.enums.instrument_enums import InstrumentType
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.enums.reference_data_enums import StockDailyTradingFactUpsertResult
 from app.models.instrument import Instrument
 from app.models.stock_daily_trading_fact import StockDailyTradingFact
@@ -70,11 +70,12 @@ class StockDailyTradingFactRepository:
         instrument = db.get(Instrument, instrument_id)
         if (
             instrument is None
-            or instrument.instrument_type not in {
-                InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value,
-            }
+            or instrument.instrument_type not in CASH_SECURITY_INSTRUMENT_TYPES
         ):
-            raise ValueError("股票逐日事实只能关联 STOCK Instrument")
+            raise ValueError(
+                "现金证券逐日事实只能关联 STOCK Instrument、"
+                "CONVERTIBLE_BOND Instrument 或 ETF Instrument"
+            )
 
         statement = insert(StockDailyTradingFact).values(
             instrument_id=instrument_id,

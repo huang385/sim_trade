@@ -10,6 +10,7 @@ from typing import Mapping
 from sqlalchemy.orm import Session
 
 from app.enums.order_enums import OrderStatus
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.repositories.order_repository import OrderRepository
 
@@ -32,10 +33,10 @@ class CashSecurityOrderEventResult:
 
 class CashSecurityOrderEventService:
     ACCEPT_EVENTS = frozenset({
-        "STOCK_ORDER_ACCEPTED", "CONVERTIBLE_BOND_ORDER_ACCEPTED",
+        "STOCK_ORDER_ACCEPTED", "CONVERTIBLE_BOND_ORDER_ACCEPTED", "ETF_ORDER_ACCEPTED",
     })
     CANCEL_EVENTS = frozenset({
-        "STOCK_ORDER_CANCELLED", "CONVERTIBLE_BOND_ORDER_CANCELLED",
+        "STOCK_ORDER_CANCELLED", "CONVERTIBLE_BOND_ORDER_CANCELLED", "ETF_ORDER_CANCELLED",
     })
     ORDER_STATUS_EVENTS = frozenset({"ORDER_PARTIALLY_FILLED", "ORDER_FILLED"})
     EVENT_TYPES = ACCEPT_EVENTS | CANCEL_EVENTS | ORDER_STATUS_EVENTS
@@ -62,7 +63,7 @@ class CashSecurityOrderEventService:
         if event_type not in cls.ORDER_STATUS_EVENTS:
             return False
         try:
-            return str(json.loads(fields.get("payload", "")).get("instrument_type", "")).upper() in {"STOCK", "CONVERTIBLE_BOND"}
+            return str(json.loads(fields.get("payload", "")).get("instrument_type", "")).upper() in CASH_SECURITY_INSTRUMENT_TYPES
         except (TypeError, json.JSONDecodeError):
             return False
 
@@ -83,7 +84,7 @@ class CashSecurityOrderEventService:
             raise CashSecurityOrderEventError("现金证券订单事件缺少定位字段")
         if payload.get("event_type") not in (None, event_type):
             raise CashSecurityOrderEventError("现金证券订单事件类型不一致")
-        if str(payload.get("instrument_type") or "").upper() not in {"STOCK", "CONVERTIBLE_BOND"}:
+        if str(payload.get("instrument_type") or "").upper() not in CASH_SECURITY_INSTRUMENT_TYPES:
             raise CashSecurityOrderEventError("现金证券订单事件合约类型不一致")
         # 阶段二已落库而尚未发出的事件没有 account_type；它们仍需能
         # 依据数据库 STOCK 订单安全重建索引。新事件则必须使用规范值。
@@ -105,7 +106,7 @@ class CashSecurityOrderEventService:
                 event_id, event_type, order_id, exchange_id, "", symbol, "ORDER_NOT_FOUND"
             )
         if (
-            order.instrument_type not in {"STOCK", "CONVERTIBLE_BOND"}
+            order.instrument_type not in CASH_SECURITY_INSTRUMENT_TYPES
             or order.account_id != str(payload["account_id"]).strip()
             or order.exchange_id != exchange_id
             or order.symbol != symbol

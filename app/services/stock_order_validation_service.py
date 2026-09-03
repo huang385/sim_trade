@@ -219,3 +219,96 @@ class ConvertibleBondTradingPolicy(StockTradingPolicy):
         self._validate_limits(request.limit_price, rule, fact)
         self._validate_common(request=request, instrument=instrument)
         return StockOrderReference(instrument=instrument, rule=rule, daily_fact=fact)
+
+
+class EtfTradingPolicy(StockTradingPolicy):
+    """ETF二级市场规则；逐合约T+属性由参考规则和持仓服务执行。"""
+
+    instrument_type = InstrumentType.ETF.value
+    market_type = "FUND"
+
+    def resolve_and_validate(self, db: Session, *, instrument, request, trading_day):
+        if instrument is None:
+            raise BusinessRuleError("ETF合约不存在", error_code="ETF_INSTRUMENT_NOT_FOUND")
+        if instrument.instrument_type != self.instrument_type:
+            raise BusinessRuleError(
+                "ETF接口只能交易 ETF Instrument",
+                error_code="ETF_INSTRUMENT_TYPE_INVALID",
+            )
+        if instrument.market_type != self.market_type:
+            raise BusinessRuleError(
+                "ETF合约市场类型不正确", error_code="ETF_MARKET_TYPE_INVALID"
+            )
+        if not instrument.is_active or not instrument.is_tradeable:
+            raise BusinessRuleError(
+                "ETF合约当前不可交易", error_code="ETF_INSTRUMENT_NOT_TRADEABLE"
+            )
+        try:
+            rule = self.rule_repository.resolve_for_trading_day(
+                db, instrument_id=instrument.id, trading_day=trading_day
+            )
+        except LookupError as exc:
+            raise BusinessRuleError(
+                "当前交易日不存在唯一ETF交易规则",
+                error_code="ETF_TRADING_RULE_UNAVAILABLE",
+            ) from exc
+        if (
+            instrument.market_tplus not in {0, 1}
+            or instrument.round_lot is None
+            or rule.settlement_days != instrument.market_tplus
+            or rule.buy_lot_size != instrument.round_lot
+        ):
+            raise BusinessRuleError(
+                "ETF合约属性与交易规则不一致",
+                error_code="ETF_TRADING_RULE_REFERENCE_MISMATCH",
+            )
+        fact = self.fact_repository.get(
+            db, instrument_id=instrument.id, trading_day=trading_day
+        )
+        if fact is None:
+            raise BusinessRuleError(
+                "当前交易日缺少ETF交易事实", error_code="ETF_DAILY_FACT_MISSING"
+            )
+        if fact.is_suspended or not fact.is_tradeable:
+            raise BusinessRuleError(
+                "ETF当前不可交易", error_code="ETF_DAILY_NOT_TRADEABLE"
+            )
+        self._validate_limits(request.limit_price, rule, fact)
+        self._validate_common(request=request, instrument=instrument)
+        return StockOrderReference(instrument=instrument, rule=rule, daily_fact=fact)
+
+    @staticmethod
+    def validate_buy(*, request: StockOrderCreateRequest, rule: StockTradingRule) -> None:
+        if rule.buy_lot_size <= 0:
+            raise BusinessRuleError("ETF买入单位无效", error_code="ETF_BUY_LOT_INVALID")
+        if request.volume % rule.buy_lot_size:
+            raise BusinessValidationError(
+                "ETF买入数量必须为整手份额的整数倍",
+                error_code="ETF_BUY_LOT_MISMATCH",
+            )
+
+    @staticmethod
+    def validate_sell(
+        *, request: StockOrderCreateRequest, rule: StockTradingRule,
+        position: Position | None,
+    ) -> None:
+        if position is None or position.direction != CASH_SECURITY_POSITION_DIRECTION:
+            raise BusinessRuleError(
+                "ETF卖出需要已有LONG持仓", error_code="ETF_LONG_POSITION_REQUIRED"
+            )
+        if request.volume > position.available_volume:
+            raise BusinessRuleError(
+                "ETF可卖份额不足", error_code="ETF_AVAILABLE_VOLUME_INSUFFICIENT"
+            )
+        lot = rule.sell_min_unit
+        if lot <= 0:
+            raise BusinessRuleError("ETF卖出单位无效", error_code="ETF_SELL_UNIT_INVALID")
+        order_remainder = request.volume % lot
+        available_remainder = position.available_volume % lot
+        if order_remainder and (
+            not rule.sell_odd_lot_allowed or order_remainder != available_remainder
+        ):
+            raise BusinessValidationError(
+                "ETF零份必须与整手合并或一次性全部卖出，不得拆分",
+                error_code="ETF_SELL_ODD_LOT_SPLIT",
+            )

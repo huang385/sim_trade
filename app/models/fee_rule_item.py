@@ -59,9 +59,9 @@ class FeeRuleItem(Base):
             name="ck_fee_rule_item_aggregation_scope_valid",
         ),
         CheckConstraint(
-            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND') "
+            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') "
             "AND offset_flag IS NULL) OR "
-            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') "
+            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') "
             "AND offset_flag IS NOT NULL)",
             name="ck_fee_rule_item_stock_offset_semantics",
         ),

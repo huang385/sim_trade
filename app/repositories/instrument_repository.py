@@ -230,6 +230,47 @@ class InstrumentRepository:
         return db.scalars(statement).all()
 
     @staticmethod
+    def search_tradeable_etfs(
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[Instrument]:
+        """按代码或名称搜索可交易ETF，不混入股票、债券或衍生品。"""
+
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        upper_query = escaped.upper()
+        contains = f"%{upper_query}%"
+        prefix = f"{upper_query}%"
+        order_book_id = func.upper(Instrument.order_book_id)
+        symbol = func.upper(Instrument.symbol)
+        instrument_name = func.upper(func.coalesce(Instrument.instrument_name, ""))
+        relevance = case(
+            (order_book_id == upper_query, 0),
+            (symbol == upper_query, 0),
+            (order_book_id.like(prefix, escape="\\"), 1),
+            (symbol.like(prefix, escape="\\"), 1),
+            (instrument_name.like(prefix, escape="\\"), 2),
+            else_=3,
+        )
+        statement = (
+            select(Instrument)
+            .where(
+                Instrument.instrument_type == "ETF",
+                Instrument.is_active.is_(True),
+                Instrument.is_tradeable.is_(True),
+                or_(
+                    order_book_id.like(contains, escape="\\"),
+                    symbol.like(contains, escape="\\"),
+                    instrument_name.like(contains, escape="\\"),
+                ),
+            )
+            .order_by(relevance, Instrument.exchange_id, Instrument.symbol)
+            .limit(limit)
+        )
+        return db.scalars(statement).all()
+
+    @staticmethod
     def upsert(
         db: Session,
         *,
@@ -257,6 +298,11 @@ class InstrumentRepository:
         data_source: str,
         synced_at: datetime,
         updated_at: datetime,
+        fund_type: str | None = None,
+        market_tplus: int | None = None,
+        round_lot: int | None = None,
+        least_redeem: int | None = None,
+        reference_underlying_order_book_id: str | None = None,
     ) -> None:
         statement = insert(Instrument).values(
             order_book_id=order_book_id,
@@ -264,6 +310,11 @@ class InstrumentRepository:
             exchange_id=exchange_id,
             instrument_name=instrument_name,
             product_id=product_id,
+            fund_type=fund_type,
+            market_tplus=market_tplus,
+            round_lot=round_lot,
+            least_redeem=least_redeem,
+            reference_underlying_order_book_id=reference_underlying_order_book_id,
             market_type=market_type,
             instrument_type=instrument_type,
             underlying_instrument_id=underlying_instrument_id,
@@ -291,6 +342,13 @@ class InstrumentRepository:
                 "order_book_id": statement.excluded.order_book_id,
                 "instrument_name": statement.excluded.instrument_name,
                 "product_id": statement.excluded.product_id,
+                "fund_type": statement.excluded.fund_type,
+                "market_tplus": statement.excluded.market_tplus,
+                "round_lot": statement.excluded.round_lot,
+                "least_redeem": statement.excluded.least_redeem,
+                "reference_underlying_order_book_id": (
+                    statement.excluded.reference_underlying_order_book_id
+                ),
                 "market_type": statement.excluded.market_type,
                 "instrument_type": statement.excluded.instrument_type,
                 "underlying_instrument_id": (

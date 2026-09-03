@@ -30,7 +30,7 @@ from app.services.stock_order_validation_service import (
 
 
 class CashSecurityOrderCancellationService:
-    """股票主动撤单：按 Order → Account → Position 的锁顺序释放资源。"""
+    """现金证券主动撤单：按 Order → Account → Position 的锁顺序释放资源。"""
 
     ACTIVE_STATUSES = {OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value}
     TERMINAL_STATUSES = {
@@ -49,6 +49,7 @@ class CashSecurityOrderCancellationService:
         outbox_repository: OutboxRepository | None = None,
         instrument_type: str = "STOCK",
         cancelled_event_type: str = "STOCK_ORDER_CANCELLED",
+        entry_enabled_setting: str = "stock_order_entry_enabled",
         time_provider: Callable[[], datetime] = utc_now,
     ) -> None:
         self.order_repository = order_repository or OrderRepository()
@@ -57,6 +58,7 @@ class CashSecurityOrderCancellationService:
         self.outbox_repository = outbox_repository or OutboxRepository()
         self.instrument_type = instrument_type
         self.cancelled_event_type = cancelled_event_type
+        self.entry_enabled_setting = entry_enabled_setting
         self.time_provider = time_provider
 
     @staticmethod
@@ -74,10 +76,10 @@ class CashSecurityOrderCancellationService:
         request: OrderCancelRequest,
         access_scope: AccountAccessScope,
     ):
-        if not settings.stock_order_entry_enabled:
+        if not getattr(settings, self.entry_enabled_setting):
             raise BusinessRuleError(
-                "股票订单受理尚未启用",
-                error_code="STOCK_ORDER_ENTRY_DISABLED",
+                f"{self.instrument_type}订单受理尚未启用",
+                error_code=f"{self.instrument_type}_ORDER_ENTRY_DISABLED",
             )
         try:
             normalized_order_id = order_id.strip()
@@ -92,7 +94,8 @@ class CashSecurityOrderCancellationService:
                 raise self._not_found(access_scope)
             if order.instrument_type != self.instrument_type:
                 raise ResourceConflictError(
-                    "该订单不是股票订单", error_code="STOCK_ORDER_REQUIRED"
+                    f"该订单不是{self.instrument_type}订单",
+                    error_code=f"{self.instrument_type}_ORDER_REQUIRED",
                 )
             account = (
                 self.account_repository.get_by_account_id_for_update(db, order.account_id)
@@ -105,8 +108,8 @@ class CashSecurityOrderCancellationService:
                 raise self._not_found(access_scope)
             if account.account_type not in {AccountType.STOCK.value, "SECURITIES_CASH"}:
                 raise DataAccessError(
-                    "股票订单关联的账户类型不一致",
-                    error_code="STOCK_ORDER_ACCOUNT_INCONSISTENT",
+                    f"{self.instrument_type}订单关联的账户类型不一致",
+                    error_code=f"{self.instrument_type}_ORDER_ACCOUNT_INCONSISTENT",
                 )
             if request.account_id.strip() != order.account_id:
                 raise ResourceConflictError(

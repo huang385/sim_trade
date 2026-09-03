@@ -229,6 +229,29 @@ def test_securities_worker_uses_independent_stream_without_derivative_engine():
     assert worker.matching_service.enabled is settings.stock_matching_enabled
 
 
+def test_securities_worker_gates_etf_matching_independently():
+    with (
+        patch.object(settings, "stock_matching_enabled", False),
+        patch.object(settings, "etf_matching_enabled", True),
+    ):
+        worker = build_matching_worker(MarketFeedDomain.SECURITIES_MARKET)
+
+    assert worker.matching_service.enabled is True
+    assert worker.matching_service.instrument_types == frozenset({"ETF"})
+
+
+def test_stock_matching_flag_does_not_implicitly_enable_etf():
+    with (
+        patch.object(settings, "stock_matching_enabled", True),
+        patch.object(settings, "etf_matching_enabled", False),
+    ):
+        worker = build_matching_worker(MarketFeedDomain.SECURITIES_MARKET)
+
+    assert worker.matching_service.instrument_types == frozenset(
+        {"STOCK", "CONVERTIBLE_BOND"}
+    )
+
+
 def test_arrival_consumers_have_independent_groups_and_failure_namespaces():
     futures = build_arrival_worker(MarketFeedDomain.FUTURES_MARKET, Mock())
     securities = build_arrival_worker(

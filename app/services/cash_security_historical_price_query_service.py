@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import BusinessRuleError, ResourceNotFoundError
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.models.instrument import Instrument
 from app.services.cash_security_price_adjustment_service import (
     AdjustmentMode,
@@ -32,7 +33,7 @@ class CashSecurityHistoricalPriceQueryService:
         ))
         if instrument is None:
             raise ResourceNotFoundError("Instrument does not exist")
-        if instrument.instrument_type not in {"STOCK", "CONVERTIBLE_BOND"}:
+        if instrument.instrument_type not in CASH_SECURITY_INSTRUMENT_TYPES:
             raise BusinessRuleError(
                 "Only cash securities support corporate-action-adjusted bars",
                 error_code="HISTORICAL_PRICE_PRODUCT_INVALID",

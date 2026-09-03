@@ -4,7 +4,7 @@ from typing import Sequence
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.enums.instrument_enums import InstrumentType
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.models.instrument import Instrument
 from app.models.stock_trading_rule import StockTradingRule
 
@@ -38,7 +38,7 @@ class StockTradingRuleRepository:
             select(Instrument)
             .where(
                 Instrument.id == instrument_id,
-                Instrument.instrument_type.in_((InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value)),
+                Instrument.instrument_type.in_(CASH_SECURITY_INSTRUMENT_TYPES),
             )
             .with_for_update()
         )
@@ -95,7 +95,10 @@ class StockTradingRuleRepository:
             instrument_id=rule.instrument_id,
         )
         if instrument is None:
-            raise ValueError("股票交易规则只能关联 STOCK Instrument")
+            raise ValueError(
+                "现金证券交易规则只能关联 STOCK Instrument、"
+                "CONVERTIBLE_BOND Instrument 或 ETF Instrument"
+            )
         if StockTradingRuleRepository.get_by_instrument_and_version(
             db,
             instrument_id=rule.instrument_id,

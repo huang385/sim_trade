@@ -49,8 +49,8 @@ class Trade(Base):
             name="ck_trade_commission_nonnegative",
         ),
         CheckConstraint(
-            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND') AND offset_flag IS NULL) OR "
-            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') AND offset_flag IS NOT NULL)",
+            "(instrument_type IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') AND offset_flag IS NULL) OR "
+            "(instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') AND offset_flag IS NOT NULL)",
             name="ck_trade_stock_offset_flag_semantics",
         ),
         Index("ix_trade_exchange_symbol", "exchange_id", "symbol"),

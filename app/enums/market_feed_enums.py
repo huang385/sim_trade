@@ -1,6 +1,9 @@
 from enum import Enum
 
-from app.enums.instrument_enums import InstrumentType
+from app.enums.instrument_enums import (
+    CASH_SECURITY_INSTRUMENT_TYPES,
+    InstrumentType,
+)
 
 
 class MarketFeedDomain(str, Enum):
@@ -19,12 +22,7 @@ FUTURES_MARKET_INSTRUMENT_TYPES = frozenset(
     }
 )
 
-SECURITIES_MARKET_INSTRUMENT_TYPES = frozenset(
-    {
-        InstrumentType.STOCK.value,
-        InstrumentType.CONVERTIBLE_BOND.value,
-    }
-)
+SECURITIES_MARKET_INSTRUMENT_TYPES = CASH_SECURITY_INSTRUMENT_TYPES
 
 
 def resolve_market_feed_domain(instrument_type: object) -> MarketFeedDomain:

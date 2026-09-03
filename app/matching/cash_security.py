@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.enums.order_enums import OrderDirection
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,7 @@ class CashSecurityMatchResult:
 class CashSecurityMatchingStrategy:
     """Match only against the valid best opposite quote, without settlement."""
 
-    supported_instrument_types = frozenset({"STOCK", "CONVERTIBLE_BOND"})
+    supported_instrument_types = CASH_SECURITY_INSTRUMENT_TYPES
 
     def match(self, order: CashSecurityOrderSnapshot, market: CashSecurityMarketSnapshot) -> CashSecurityMatchResult:
         if order.instrument_type not in self.supported_instrument_types:

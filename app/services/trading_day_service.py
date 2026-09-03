@@ -308,7 +308,7 @@ class TradingDayService:
 
         normalized_type = normalize_code(account_type)
         if normalized_type in {"STOCK", "SECURITIES_CASH"}:
-            instrument_types = ("STOCK", "CONVERTIBLE_BOND")
+            instrument_types = ("STOCK", "CONVERTIBLE_BOND", "ETF")
         elif normalized_type in {"FUTURES", "OPTION"}:
             instrument_types = ("FUTURES", "FUTURES_OPTION", "INDEX_OPTION")
         else:

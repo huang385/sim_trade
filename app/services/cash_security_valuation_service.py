@@ -9,7 +9,7 @@ from app.common.decimal_utils import quantize_money
 from app.common.time_utils import utc_now
 from app.core.config import settings
 from app.enums.account_enums import AccountRiskState
-from app.enums.instrument_enums import InstrumentType
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.infrastructure.cash_security_valuation_store import CashSecurityValuationStore
 from app.infrastructure.market_data.market_tick_store import MarketTickStore
 from app.infrastructure.realtime_pnl_store import RealtimePnlStore
@@ -23,7 +23,7 @@ from app.infrastructure.redis_keys import CASH_VALUATION_WORKER_LEASE_KEY
 from app.schemas.pnl_schema import AccountRealtimePnl, PositionRealtimePnl
 
 
-CASH_TYPES = (InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value)
+CASH_TYPES = tuple(sorted(CASH_SECURITY_INSTRUMENT_TYPES))
 CASH_ACCOUNT_TYPES = ("SECURITIES_CASH", "STOCK")
 ZERO = Decimal("0")
 

@@ -6,6 +6,8 @@ class MarketType(str, Enum):
 
     FUTURES = "FUTURES"
     STOCK = "STOCK"
+    BOND = "BOND"
+    FUND = "FUND"
     OPTION = "OPTION"
     CRYPTO = "CRYPTO"
 

@@ -23,7 +23,7 @@ from app.enums.daily_settlement_enums import (
     DailySettlementStage,
     SettlementCacheStatus,
 )
-from app.enums.instrument_enums import InstrumentType
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES, InstrumentType
 from app.enums.option_enums import MarginPriceMode, OptionType
 from app.enums.order_enums import PositionDetailStatus, PositionDirection
 from app.infrastructure.active_order_index import ActiveOrderIndex
@@ -90,10 +90,7 @@ from app.services.product_strategy_registry import (
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 RISK_QUANT = Decimal("0.00000001")
 ZERO = Decimal("0.000000")
-CASH_SECURITY_TYPES = {
-    InstrumentType.STOCK.value,
-    InstrumentType.CONVERTIBLE_BOND.value,
-}
+CASH_SECURITY_TYPES = CASH_SECURITY_INSTRUMENT_TYPES
 
 
 @dataclass(frozen=True)
@@ -110,6 +107,7 @@ class SettlementInstrument:
     underlying_instrument_id: int | None
     option_type: str | None
     strike_price: Decimal | None
+    market_tplus: int | None = None
     is_tradeable: bool = True
 
     @classmethod
@@ -127,6 +125,7 @@ class SettlementInstrument:
             underlying_instrument_id=item.underlying_instrument_id,
             option_type=item.option_type,
             strike_price=(Decimal(item.strike_price) if item.strike_price is not None else None),
+            market_tplus=item.market_tplus,
             is_tradeable=bool(item.is_tradeable),
         )
 
@@ -468,7 +467,7 @@ class DailySettlementService:
             }
             missing = product_keys - found
             if missing:
-                # 现金证券（STOCK/CONVERTIBLE_BOND）的交易时段按“市场+合约类型”
+                # 现金证券的交易时段按“市场+合约类型”
                 # 共用一行 product_code='CASH_SECURITY'，与下单侧时段读取约定一致。
                 # 合约表 product_id 为空时预检会回退成逐只 symbol 键而查不到，
                 # 这里再用通用键回查一次；命中的通用行一并进入下方时段校验。
@@ -1347,6 +1346,7 @@ class DailySettlementService:
                             position.position_id, (),
                         ),
                         trading_day=trading_day,
+                        market_tplus=instruments[position.order_book_id].market_tplus,
                     )
                     if replay_projection.authoritative:
                         # Never use the current aggregate as replay input.  It
@@ -2298,7 +2298,7 @@ class DailySettlementService:
                             "sum(frozen_volume) frozen FROM position_detail "
                             "GROUP BY position_id) d ON d.position_id = "
                             "p.position_id WHERE p.instrument_type NOT IN "
-                            "('STOCK', 'CONVERTIBLE_BOND') AND p.total_volume <> "
+                            "('STOCK', 'CONVERTIBLE_BOND', 'ETF') AND p.total_volume <> "
                             "coalesce(d.volume, 0) OR p.frozen_volume <> "
                             "coalesce(d.frozen, 0)"
                         )

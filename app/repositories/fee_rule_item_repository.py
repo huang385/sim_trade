@@ -5,6 +5,7 @@ from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
 from app.common.exceptions import DataAccessError
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.models.fee_rule_item import FeeRuleItem
 
 
@@ -98,7 +99,7 @@ class FeeRuleItemRepository:
     ) -> Sequence[FeeRuleItem]:
         """Resolve immutable fee components for a cash-security order."""
 
-        if instrument_type not in {"STOCK", "CONVERTIBLE_BOND"}:
+        if instrument_type not in CASH_SECURITY_INSTRUMENT_TYPES:
             raise ValueError("cash-security fee lookup requires a cash instrument")
         priority = case(
             (FeeRuleItem.instrument_id == instrument_id, 1),

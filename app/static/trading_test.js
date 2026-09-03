@@ -1047,7 +1047,7 @@ async function submitOrder(event) {
         volume: Number(formData.get("volume")),
     };
     const product = formData.get("product");
-    const isCashSecurity = product === "STOCK" || product === "CONVERTIBLE_BOND";
+    const isCashSecurity = ["STOCK", "CONVERTIBLE_BOND", "ETF"].includes(product);
     if (isCashSecurity) {
         payload.order_type = "LIMIT";
         delete payload.offset_flag;
@@ -1072,6 +1072,8 @@ async function submitOrder(event) {
             ? "/api/stock/orders"
             : product === "CONVERTIBLE_BOND"
                 ? "/api/convertible-bond/orders"
+                : product === "ETF"
+                    ? "/api/etf/orders"
                 : "/api/orders";
         const postOrder = () => apiFetch(endpoint, {
             method: "POST",
@@ -1129,7 +1131,7 @@ function updatePriceTypeForm() {
 }
 
 function updateProductForm() {
-    const isCashSecurity = ["STOCK", "CONVERTIBLE_BOND"].includes(
+    const isCashSecurity = ["STOCK", "CONVERTIBLE_BOND", "ETF"].includes(
         elements.orderProduct.value,
     );
     elements.offsetFlagField.classList.toggle("hidden", isCashSecurity);
@@ -1188,6 +1190,8 @@ async function cancelOrder(orderId, button) {
             ? `/api/stock/orders/${encodeURIComponent(orderId)}/cancel`
             : existing?.instrument_type === "CONVERTIBLE_BOND"
                 ? `/api/convertible-bond/orders/${encodeURIComponent(orderId)}/cancel`
+                : existing?.instrument_type === "ETF"
+                    ? `/api/etf/orders/${encodeURIComponent(orderId)}/cancel`
                 : `/api/orders/${encodeURIComponent(orderId)}/cancel`;
         const order = await apiFetch(
             endpoint,

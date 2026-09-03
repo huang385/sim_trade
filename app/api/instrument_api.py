@@ -59,6 +59,18 @@ def search_tradeable_stocks(
     return service.search_tradeable_stocks(db, query=q, limit=limit)
 
 
+@catalog_router.get("/etfs/search", response_model=list[InstrumentCatalogItem])
+def search_tradeable_etfs(
+    q: str = Query(min_length=2, max_length=64),
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db, scope="function"),
+    service: InstrumentService = Depends(get_instrument_service),
+):
+    """搜索可交易ETF，返回基金类型、T+属性和整手份额。"""
+
+    return service.search_tradeable_etfs(db, query=q, limit=limit)
+
+
 @catalog_router.get("", response_model=list[InstrumentCatalogItem])
 def list_tradeable_futures(
     db: Session = Depends(get_db, scope="function"),

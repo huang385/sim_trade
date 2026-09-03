@@ -1,10 +1,11 @@
-"""Tick coordinator for stock and convertible-bond cash orders only."""
+"""Tick coordinator for stock, convertible-bond and ETF cash orders."""
 
 from typing import Callable, Mapping
 
 from sqlalchemy.orm import Session
 
 from app.enums.order_enums import OrderStatus
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.infrastructure.active_order_index import ActiveOrderIndex
 from app.repositories.order_repository import OrderRepository
 from app.schemas.matching_schema import MarketTickMatchResult
@@ -24,7 +25,7 @@ class CashSecurityMarketTickMatchingService:
         OrderStatus.ACCEPTED.value,
         OrderStatus.PARTIALLY_FILLED.value,
     })
-    instrument_types = frozenset({"STOCK", "CONVERTIBLE_BOND"})
+    instrument_types = CASH_SECURITY_INSTRUMENT_TYPES
 
     def __init__(
         self,
@@ -35,6 +36,7 @@ class CashSecurityMarketTickMatchingService:
         matching_strategy: CashSecurityMatchingStrategy | None = None,
         settlement_service: CashSecuritySettlementService | None = None,
         enabled: bool = True,
+        instrument_types: frozenset[str] | set[str] | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.active_order_index = active_order_index
@@ -42,6 +44,11 @@ class CashSecurityMarketTickMatchingService:
         self.matching_strategy = matching_strategy or CashSecurityMatchingStrategy()
         self.settlement_service = settlement_service or CashSecuritySettlementService()
         self.enabled = enabled
+        self.instrument_types = frozenset(
+            CASH_SECURITY_INSTRUMENT_TYPES
+            if instrument_types is None
+            else instrument_types
+        )
 
     def process(self, *, stream_message_id: str, fields: Mapping[str, str]) -> MarketTickMatchResult:
         event = parse_market_tick_event(fields)

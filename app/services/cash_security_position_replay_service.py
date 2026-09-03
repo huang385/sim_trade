@@ -23,7 +23,7 @@ ZERO = Decimal("0")
 
 @dataclass
 class CashSecurityPositionReplayProjection:
-    """Replay result for one STOCK or CONVERTIBLE_BOND aggregate position."""
+    """Replay result for one aggregate cash-security position."""
 
     total_volume: int = 0
     today_volume: int = 0
@@ -48,6 +48,7 @@ class CashSecurityPositionReplayProjection:
         trades: Iterable,
         adjustments: Iterable,
         trading_day: date,
+        market_tplus: int | None = None,
     ) -> "CashSecurityPositionReplayProjection":
         """Build a projection without reading mutable Position quantities.
 
@@ -91,7 +92,11 @@ class CashSecurityPositionReplayProjection:
                 result.daily_pnl_base_cost = result.yesterday_pnl_base_cost
             day_trades, day_adjustments = events[day]
             for trade in sorted(day_trades, key=lambda item: (item.trade_time, item.id)):
-                result._apply_trade(trade, instrument_type=position.instrument_type)
+                result._apply_trade(
+                    trade,
+                    instrument_type=position.instrument_type,
+                    market_tplus=market_tplus,
+                )
             for adjustment in sorted(
                 day_adjustments,
                 key=lambda item: (
@@ -107,12 +112,21 @@ class CashSecurityPositionReplayProjection:
             prior_day = day
         return result
 
-    def _apply_trade(self, trade, *, instrument_type: str) -> None:
+    def _apply_trade(
+        self, trade, *, instrument_type: str, market_tplus: int | None
+    ) -> None:
+        from app.services.cash_security_position_service import (
+            CashSecurityPositionService,
+        )
+
+        settlement_days = CashSecurityPositionService.settlement_days(
+            instrument_type=instrument_type, market_tplus=market_tplus
+        )
         volume = int(trade.trade_volume)
         if trade.direction == "BUY":
             self.total_volume += volume
             self.today_volume += volume
-            if instrument_type == "STOCK":
+            if settlement_days == 1:
                 self.settlement_locked_volume += volume
             else:
                 self.available_volume += volume
@@ -127,11 +141,15 @@ class CashSecurityPositionReplayProjection:
                     "现金证券重放卖出数量超过可重放持仓",
                     error_code="CASH_SECURITY_REPLAY_SELL_VOLUME_INVALID",
                 )
-            if instrument_type == "STOCK":
+            if settlement_days == 1:
                 if volume > self.yesterday_volume:
                     raise DataAccessError(
-                        "股票重放卖出违反T+1",
-                        error_code="CASH_SECURITY_REPLAY_STOCK_T_PLUS_ONE",
+                        "现金证券重放卖出违反T+1",
+                        error_code=(
+                            "CASH_SECURITY_REPLAY_STOCK_T_PLUS_ONE"
+                            if instrument_type == "STOCK"
+                            else "CASH_SECURITY_REPLAY_ETF_T_PLUS_ONE"
+                        ),
                     )
                 yesterday_sold, today_sold = volume, 0
             else:
@@ -139,8 +157,8 @@ class CashSecurityPositionReplayProjection:
                 today_sold = volume - yesterday_sold
                 if today_sold > self.today_volume:
                     raise DataAccessError(
-                        "可转债重放卖出数量无来源",
-                        error_code="CASH_SECURITY_REPLAY_BOND_SELL_VOLUME_INVALID",
+                        "T+0现金证券重放卖出数量无来源",
+                        error_code="CASH_SECURITY_REPLAY_T_ZERO_SELL_VOLUME_INVALID",
                     )
             total_before = self.total_volume
             cost = (

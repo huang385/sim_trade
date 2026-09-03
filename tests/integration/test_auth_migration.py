@@ -97,8 +97,8 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
             revision = db.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()[0]
-            # 交易日历与现金产品交易时段迁移是当前 Head。
-            assert revision == "20260831_0041"
+            # ETF二级市场基础迁移是当前 Head。
+            assert revision == "20260903_0042"
             nullable = db.execute(
                 "SELECT is_nullable FROM information_schema.columns "
                 "WHERE table_schema = 'public' "
@@ -122,7 +122,7 @@ def test_empty_database_upgrades_to_head_and_rejects_irreversible_downgrade():
             # PostgreSQL wraps the downgrade chain in one transaction.  The
             # irreversible corporate-action boundary rolls the entire
             # downgrade chain back, so the database remains at the head.
-            assert revision == "20260831_0041"
+            assert revision == "20260903_0042"
             assert settlement_tables == 5
 
 
@@ -192,6 +192,54 @@ def test_option_migrations_enforce_underlying_type_and_rule_scope():
                 "'uq_fee_rule_item_scope_version')"
             ).fetchone()[0]
             assert nulls_not_distinct is True
+
+
+def test_etf_migration_enforces_fund_market_and_reference_attributes():
+    with _temporary_database() as database_name:
+        _run_alembic(database_name, "upgrade", "head")
+        now = datetime.now(timezone.utc)
+        statement = (
+            "INSERT INTO instrument ("
+            "order_book_id, symbol, exchange_id, market_type, instrument_type, "
+            "fund_type, market_tplus, round_lot, contract_multiplier, price_tick, "
+            "min_volume, max_volume, is_active, is_tradeable, data_source, "
+            "created_at, updated_at"
+            ") VALUES (%s, %s, 'SSE', %s, 'ETF', %s, %s, %s, 1, 0.001, "
+            "1, 1000000, true, true, 'TEST', %s, %s)"
+        )
+        with psycopg.connect(_admin_dsn(database=database_name)) as db:
+            db.execute(
+                statement,
+                (
+                    "510300.XSHG", "510300", "FUND", "StockIndex", 1, 100,
+                    now, now,
+                ),
+            )
+            db.commit()
+
+        with (
+            psycopg.connect(_admin_dsn(database=database_name)) as db,
+            pytest.raises(psycopg.errors.CheckViolation),
+        ):
+            db.execute(
+                statement,
+                (
+                    "513100.XSHG", "513100", "STOCK", "QDII", 0, 100,
+                    now, now,
+                ),
+            )
+
+        with (
+            psycopg.connect(_admin_dsn(database=database_name)) as db,
+            pytest.raises(psycopg.errors.CheckViolation),
+        ):
+            db.execute(
+                statement,
+                (
+                    "511010.XSHG", "511010", "FUND", "BondIndex", None, 100,
+                    now, now,
+                ),
+            )
 
 
 def test_existing_accounts_are_safely_backfilled_before_foreign_key():

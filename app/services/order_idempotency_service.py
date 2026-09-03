@@ -5,6 +5,7 @@ from decimal import Decimal
 from app.common.decimal_utils import quantize_money
 from app.common.exceptions import ResourceConflictError
 from app.enums.order_enums import OrderType
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.models.order import Order
 from app.schemas.order_schema import OrderCreateRequest, StockOrderCreateRequest
 
@@ -29,7 +30,7 @@ class OrderIdempotencyService:
             and existing_instrument_type != request_instrument_type
         ) or (
             request_instrument_type is None
-            and existing_instrument_type in {"STOCK", "CONVERTIBLE_BOND"}
+            and existing_instrument_type in CASH_SECURITY_INSTRUMENT_TYPES
         ):
             raise ResourceConflictError(
                 "client_order_id 已被不同产品类型的订单使用",

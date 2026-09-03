@@ -55,7 +55,7 @@ def _event_id() -> str:
 
 
 class CashSecurityOrderService:
-    """股票订单受理：仅冻结资源和持久化，绝不创建成交或进入撮合。"""
+    """现金证券订单受理：仅冻结资源和持久化，不直接创建成交。"""
 
     def __init__(
         self,
@@ -70,6 +70,7 @@ class CashSecurityOrderService:
         validation_service: StockTradingPolicy | None = None,
         instrument_type: str = "STOCK",
         accepted_event_type: str = "STOCK_ORDER_ACCEPTED",
+        entry_enabled_setting: str = "stock_order_entry_enabled",
         trading_day_service: TradingDayService | None = None,
         trading_day_provider: Callable[[], object] | None = None,
         time_provider: Callable[[], datetime] = utc_now,
@@ -84,16 +85,16 @@ class CashSecurityOrderService:
         self.validation_service = validation_service or StockTradingPolicy()
         self.instrument_type = instrument_type
         self.accepted_event_type = accepted_event_type
+        self.entry_enabled_setting = entry_enabled_setting
         self.trading_day_service = trading_day_service or get_trading_day_service()
         self.trading_day_provider = trading_day_provider
         self.time_provider = time_provider
 
-    @staticmethod
-    def _require_stock_account(account) -> None:
+    def _require_stock_account(self, account) -> None:
         if account.account_type not in {AccountType.STOCK.value, "SECURITIES_CASH"}:
             raise BusinessRuleError(
-                "股票订单只能使用 STOCK 账户",
-                error_code="STOCK_ACCOUNT_REQUIRED",
+                f"{self.instrument_type}订单只能使用证券现金账户",
+                error_code=f"{self.instrument_type}_ACCOUNT_REQUIRED",
             )
 
     @staticmethod
@@ -172,6 +173,10 @@ class CashSecurityOrderService:
                 "可转债合约不存在",
                 error_code="CONVERTIBLE_BOND_INSTRUMENT_NOT_FOUND",
             )
+        if self.instrument_type == "ETF":
+            raise BusinessRuleError(
+                "ETF合约不存在", error_code="ETF_INSTRUMENT_NOT_FOUND"
+            )
         raise BusinessRuleError("股票合约不存在", error_code="STOCK_INSTRUMENT_NOT_FOUND")
 
     def create_order(
@@ -181,10 +186,10 @@ class CashSecurityOrderService:
         request: StockOrderCreateRequest,
         access_scope: AccountAccessScope,
     ):
-        if not settings.stock_order_entry_enabled:
+        if not getattr(settings, self.entry_enabled_setting):
             raise BusinessRuleError(
-                "股票订单受理尚未启用",
-                error_code="STOCK_ORDER_ENTRY_DISABLED",
+                f"{self.instrument_type}订单受理尚未启用",
+                error_code=f"{self.instrument_type}_ORDER_ENTRY_DISABLED",
             )
         try:
             authorized = (
@@ -249,6 +254,11 @@ class CashSecurityOrderService:
                     raise BusinessRuleError(
                         "当前交易日缺少可转债手续费规则",
                         error_code="CONVERTIBLE_BOND_FEE_COMPONENT_MISSING",
+                    )
+                if self.instrument_type == "ETF":
+                    raise BusinessRuleError(
+                        "当前交易日缺少ETF手续费规则",
+                        error_code="ETF_FEE_COMPONENT_MISSING",
                     )
                 raise BusinessRuleError(
                     "当前交易日缺少股票手续费规则",

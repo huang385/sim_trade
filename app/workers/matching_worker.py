@@ -38,6 +38,7 @@ from app.workers.order_arrival_event_worker import OrderArrivalEventWorker
 from app.services.cash_security_market_tick_matching_service import CashSecurityMarketTickMatchingService
 from app.services.cash_security_settlement_service import CashSecuritySettlementService
 from app.enums.market_feed_enums import MarketFeedDomain
+from app.enums.instrument_enums import InstrumentType
 
 
 logger = logging.getLogger(__name__)
@@ -301,6 +302,16 @@ def build_matching_worker(domain: MarketFeedDomain) -> MatchingWorker:
         ),
     )
     active_order_index = ActiveOrderIndex(redis_client)
+    enabled_cash_types: set[str] = set()
+    if settings.stock_matching_enabled:
+        enabled_cash_types.update(
+            {
+                InstrumentType.STOCK.value,
+                InstrumentType.CONVERTIBLE_BOND.value,
+            }
+        )
+    if settings.etf_matching_enabled:
+        enabled_cash_types.add(InstrumentType.ETF.value)
     matching_service = (
         MarketTickMatchingService(
             session_factory=SessionLocal,
@@ -315,7 +326,8 @@ def build_matching_worker(domain: MarketFeedDomain) -> MatchingWorker:
             active_order_index=active_order_index,
             order_repository=OrderRepository(),
             settlement_service=CashSecuritySettlementService(),
-            enabled=settings.stock_matching_enabled,
+            enabled=bool(enabled_cash_types),
+            instrument_types=enabled_cash_types,
         )
     )
     return MatchingWorker(

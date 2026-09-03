@@ -81,19 +81,26 @@ class Instrument(Base):
         ),
         CheckConstraint(
             "(instrument_type <> 'STOCK' OR market_type = 'STOCK') AND "
-            "(instrument_type <> 'CONVERTIBLE_BOND' OR market_type = 'BOND')",
+            "(instrument_type <> 'CONVERTIBLE_BOND' OR market_type = 'BOND') AND "
+            "(instrument_type <> 'ETF' OR market_type = 'FUND')",
             name="ck_instrument_stock_market_type",
         ),
         CheckConstraint(
-            "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') OR contract_multiplier = 1",
+            "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') OR contract_multiplier = 1",
             name="ck_instrument_stock_multiplier_one",
         ),
         CheckConstraint(
-            "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND') OR ("
+            "instrument_type NOT IN ('STOCK', 'CONVERTIBLE_BOND', 'ETF') OR ("
             "underlying_instrument_id IS NULL AND option_type IS NULL AND "
             "strike_price IS NULL AND exercise_style IS NULL AND "
             "settlement_type IS NULL)",
             name="ck_instrument_stock_option_fields_empty",
+        ),
+        CheckConstraint(
+            "instrument_type <> 'ETF' OR (fund_type IS NOT NULL AND "
+            "market_tplus IS NOT NULL AND market_tplus IN (0, 1) AND "
+            "round_lot IS NOT NULL AND round_lot > 0)",
+            name="ck_instrument_etf_reference_fields",
         ),
         Index(
             "ix_instrument_underlying_type",
@@ -141,6 +148,16 @@ class Instrument(Base):
         String(64),
         nullable=True,
         index=True,
+    )
+
+    # ETF数据源属性。交易执行仍以版本化交易规则为准；这些字段保留YMM原始
+    # 事实，供规则生成、展示、审计和未来申购赎回模块使用。
+    fund_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    market_tplus: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    round_lot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    least_redeem: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reference_underlying_order_book_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
     )
 
     # 市场类型，第一版固定为 FUTURES

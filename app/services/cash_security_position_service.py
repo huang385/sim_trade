@@ -7,21 +7,38 @@ from app.common.decimal_utils import quantize_money
 
 
 class CashSecurityPositionService:
-    """Owns STOCK T+1 and CONVERTIBLE_BOND same-day availability semantics."""
+    """Owns per-product cash-security sell-availability semantics."""
 
     @staticmethod
-    def apply_buy(position, *, instrument_type: str, volume: int, turnover: Decimal) -> None:
+    def settlement_days(*, instrument_type: str, market_tplus: int | None = None) -> int:
+        if instrument_type == "STOCK":
+            return 1
+        if instrument_type == "CONVERTIBLE_BOND":
+            return 0
+        if instrument_type == "ETF" and market_tplus in {0, 1}:
+            return int(market_tplus)
+        raise DataAccessError(
+            "现金证券持仓产品类型或T+属性无效",
+            error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
+        )
+
+    @staticmethod
+    def apply_buy(
+        position,
+        *,
+        instrument_type: str,
+        volume: int,
+        turnover: Decimal,
+        market_tplus: int | None = None,
+    ) -> None:
         position.total_volume += volume
         position.today_volume += volume
-        if instrument_type == "STOCK":
+        if CashSecurityPositionService.settlement_days(
+            instrument_type=instrument_type, market_tplus=market_tplus
+        ) == 1:
             position.settlement_locked_volume += volume
-        elif instrument_type == "CONVERTIBLE_BOND":
-            position.available_volume += volume
         else:
-            raise DataAccessError(
-                "现金证券持仓产品类型无效",
-                error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
-            )
+            position.available_volume += volume
         position.position_cost = quantize_money(position.position_cost + turnover)
         # 0028 installed non-null zero buckets for historical rows.  A false
         # flag means those zeros are *unknown*, not an established allocation.
@@ -65,7 +82,13 @@ class CashSecurityPositionService:
         )
 
     @staticmethod
-    def apply_sell(position, *, instrument_type: str, volume: int) -> Decimal:
+    def apply_sell(
+        position,
+        *,
+        instrument_type: str,
+        volume: int,
+        market_tplus: int | None = None,
+    ) -> Decimal:
         if position.frozen_volume < volume or position.total_volume < volume:
             raise DataAccessError(
                 "现金证券卖出冻结事实不一致",
@@ -83,28 +106,30 @@ class CashSecurityPositionService:
         today_base = Decimal(
             getattr(position, "today_pnl_base_cost", Decimal("0"))
         )
-        if instrument_type == "STOCK":
-            # 股票遵循 T+1：卖出委托只能冻结可用昨仓，不能使用当日买入数量。
+        settlement_days = CashSecurityPositionService.settlement_days(
+            instrument_type=instrument_type, market_tplus=market_tplus
+        )
+        if settlement_days == 1:
+            # T+1证券只能卖出昨仓，不能使用当日买入数量。
             if position.yesterday_volume < volume:
                 raise DataAccessError(
-                    "股票卖出不能消耗当日锁定持仓",
-                    error_code="STOCK_T_PLUS_ONE_VIOLATION",
+                    "T+1现金证券卖出不能消耗当日锁定持仓",
+                    error_code=(
+                        "STOCK_T_PLUS_ONE_VIOLATION"
+                        if instrument_type == "STOCK"
+                        else "ETF_T_PLUS_ONE_VIOLATION"
+                    ),
                 )
             position.yesterday_volume -= volume
             yesterday_sold = volume
             today_sold = 0
-        elif instrument_type == "CONVERTIBLE_BOND":
-            # 可转债不受股票 T+1 限制，可使用今仓和昨仓中的可用数量。
+        else:
+            # T+0证券可使用今仓和昨仓中的可用数量。
             from_yesterday = min(position.yesterday_volume, volume)
             position.yesterday_volume -= from_yesterday
             position.today_volume -= volume - from_yesterday
             yesterday_sold = from_yesterday
             today_sold = volume - from_yesterday
-        else:
-            raise DataAccessError(
-                "现金证券持仓产品类型无效",
-                error_code="CASH_SECURITY_POSITION_INSTRUMENT_INVALID",
-            )
         cost = (
             position.position_cost
             if volume == total_before

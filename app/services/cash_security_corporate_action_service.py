@@ -39,7 +39,11 @@ from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
 ZERO = Decimal("0")
-CASH_TYPES = {InstrumentType.STOCK.value, InstrumentType.CONVERTIBLE_BOND.value}
+CASH_TYPES = {
+    InstrumentType.STOCK.value,
+    InstrumentType.CONVERTIBLE_BOND.value,
+    InstrumentType.ETF.value,
+}
 UNEXECUTED_ACTION_STATUSES = {
     CorporateActionStatus.DRAFT.value,
     CorporateActionStatus.CONFIRMED.value,

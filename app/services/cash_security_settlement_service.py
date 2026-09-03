@@ -13,6 +13,7 @@ from app.common.exceptions import BusinessRuleError, DataAccessError
 from app.common.time_utils import utc_now
 from app.enums.reference_data_enums import CommissionType
 from app.enums.order_enums import OrderDirection, OrderStatus
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.models.cash_security_order_fee_accumulator import CashSecurityOrderFeeAccumulator
 from app.models.cash_security_trade_fee_component import CashSecurityTradeFeeComponent
 from app.models.position import Position
@@ -30,7 +31,7 @@ from app.services.cash_security_position_service import CashSecurityPositionServ
 from app.services.realtime_fact_event_service import RealtimeFactEventService
 
 
-CASH_SECURITY_TYPES = frozenset({"STOCK", "CONVERTIBLE_BOND"})
+CASH_SECURITY_TYPES = CASH_SECURITY_INSTRUMENT_TYPES
 ACTIVE_STATUSES = frozenset({OrderStatus.ACCEPTED.value, OrderStatus.PARTIALLY_FILLED.value})
 
 
@@ -306,12 +307,16 @@ class CashSecuritySettlementService:
                     instrument_type=order.instrument_type,
                     volume=volume,
                     turnover=turnover,
+                    market_tplus=getattr(instrument, "market_tplus", None),
                 )
             elif order.direction == OrderDirection.SELL.value:
                 if order.frozen_position_volume < volume:
                     raise DataAccessError("现金证券卖出冻结事实不一致", error_code="CASH_SECURITY_SELL_FREEZE_INCONSISTENT")
                 cost = CashSecurityPositionService.apply_sell(
-                    position, instrument_type=order.instrument_type, volume=volume
+                    position,
+                    instrument_type=order.instrument_type,
+                    volume=volume,
+                    market_tplus=getattr(instrument, "market_tplus", None),
                 )
                 # 已实现盈亏按毛额记录。手续费单独计入 daily_commission /
                 # used_commission，且已经反映在现金变动中；这里再扣一次会导致

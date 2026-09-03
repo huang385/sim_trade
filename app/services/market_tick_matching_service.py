@@ -4,6 +4,7 @@ from typing import Callable, Mapping
 
 from sqlalchemy.orm import Session
 
+from app.enums.instrument_enums import CASH_SECURITY_INSTRUMENT_TYPES
 from app.enums.order_enums import (
     OffsetFlag,
     OrderDirection,
@@ -158,9 +159,9 @@ class MarketTickMatchingService:
         """Redis 只提供候选编号，是否活动必须以 PostgreSQL 为准。"""
 
         if order is not None:
-        # 股票和可转债由专用协调器处理；它们没有开平标志，绝不能进入此处的
-        # 期货/期权撮合路径，否则会按衍生品规则错误冻结或释放持仓。
-            if order.instrument_type in {"STOCK", "CONVERTIBLE_BOND"}:
+            # 现金证券由专用协调器处理；它们没有开平标志，绝不能进入此处的
+            # 期货/期权撮合路径，否则会按衍生品规则错误冻结或释放持仓。
+            if order.instrument_type in CASH_SECURITY_INSTRUMENT_TYPES:
                 return False
             self.product_registry.resolve(order.instrument_type)
 

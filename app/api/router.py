@@ -10,6 +10,7 @@ from app.api.fee_rule_api import router as fee_rule_router
 from app.api.order_api import router as order_router
 from app.api.stock_order_api import router as stock_order_router
 from app.api.convertible_bond_order_api import router as convertible_bond_order_router
+from app.api.etf_order_api import router as etf_order_router
 from app.api.trade_api import router as trade_router
 from app.api.position_api import router as position_router
 from app.api.pnl_api import router as pnl_router
@@ -47,6 +48,7 @@ api_router.include_router(fee_rule_router)
 api_router.include_router(order_router)
 api_router.include_router(stock_order_router)
 api_router.include_router(convertible_bond_order_router)
+api_router.include_router(etf_order_router)
 
 # 成交与持仓只读查询接口
 api_router.include_router(trade_router)

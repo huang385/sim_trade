@@ -14,7 +14,12 @@ class OrderArrivalEventWorker:
     """消费订单事实，并在所属行情域中触发一次即时撮合。"""
 
     ACCEPTED_EVENTS = frozenset(
-        {"ORDER_ACCEPTED", "STOCK_ORDER_ACCEPTED", "CONVERTIBLE_BOND_ORDER_ACCEPTED"}
+        {
+            "ORDER_ACCEPTED",
+            "STOCK_ORDER_ACCEPTED",
+            "CONVERTIBLE_BOND_ORDER_ACCEPTED",
+            "ETF_ORDER_ACCEPTED",
+        }
     )
     ACTIVE_STATUSES = frozenset({"ACCEPTED", "PARTIALLY_FILLED"})
 

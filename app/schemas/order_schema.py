@@ -96,6 +96,12 @@ class ConvertibleBondOrderCreateRequest(StockOrderCreateRequest):
     cash_security_instrument_type: ClassVar[str] = "CONVERTIBLE_BOND"
 
 
+class EtfOrderCreateRequest(StockOrderCreateRequest):
+    """ETF二级市场现金订单；数量单位为份，不包含申购赎回。"""
+
+    cash_security_instrument_type: ClassVar[str] = "ETF"
+
+
 class OrderCreateRequest(DerivativeOrderCreateRequest):
     """现有统一订单API的兼容名称，本阶段仍只接收衍生品请求。"""
 

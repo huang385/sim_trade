@@ -84,10 +84,17 @@ class InstrumentService:
         if request.instrument_type in {
             InstrumentType.STOCK,
             InstrumentType.CONVERTIBLE_BOND,
+            InstrumentType.ETF,
         }:
-            if request.market_type.value != "STOCK":
+            expected_market = {
+                InstrumentType.STOCK: "STOCK",
+                InstrumentType.CONVERTIBLE_BOND: "BOND",
+                InstrumentType.ETF: "FUND",
+            }[request.instrument_type]
+            if request.market_type.value != expected_market:
                 raise BusinessValidationError(
-                    "股票 Instrument 的 market_type 必须为 STOCK",
+                    f"{request.instrument_type.value} Instrument 的 market_type "
+                    f"必须为 {expected_market}",
                     error_code="STOCK_MARKET_TYPE_MISMATCH",
                 )
             if request.contract_multiplier != 1:
@@ -106,6 +113,13 @@ class InstrumentService:
                 exchange_id=request.exchange_id,
                 instrument_name=request.instrument_name,
                 product_id=request.product_id,
+                fund_type=request.fund_type,
+                market_tplus=request.market_tplus,
+                round_lot=request.round_lot,
+                least_redeem=request.least_redeem,
+                reference_underlying_order_book_id=(
+                    request.reference_underlying_order_book_id
+                ),
                 market_type=request.market_type.value,
                 instrument_type=request.instrument_type.value,
                 underlying_instrument_id=request.underlying_instrument_id,
@@ -288,6 +302,41 @@ class InstrumentService:
                 db,
                 query=normalized_query,
                 limit=limit,
+            )
+        ]
+
+    def search_tradeable_etfs(
+        self,
+        db: Session,
+        *,
+        query: str,
+        limit: int,
+    ) -> Sequence[InstrumentCatalogItem]:
+        """搜索ETF二级市场合约并返回其T+及交易单位属性。"""
+
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise BusinessValidationError(
+                "搜索关键词不能为空",
+                error_code="INSTRUMENT_SEARCH_QUERY_EMPTY",
+            )
+        return [
+            InstrumentCatalogItem(
+                order_book_id=item.order_book_id,
+                symbol=item.symbol,
+                exchange_id=item.exchange_id,
+                instrument_name=item.instrument_name,
+                product_id=item.product_id,
+                fund_type=item.fund_type,
+                market_tplus=item.market_tplus,
+                round_lot=item.round_lot,
+                instrument_type=item.instrument_type,
+                underlying_order_book_id=item.reference_underlying_order_book_id,
+                contract_multiplier=item.contract_multiplier,
+                price_tick=item.price_tick,
+            )
+            for item in self.repository.search_tradeable_etfs(
+                db, query=normalized_query, limit=limit
             )
         ]
 
