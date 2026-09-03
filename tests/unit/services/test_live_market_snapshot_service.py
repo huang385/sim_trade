@@ -17,6 +17,7 @@ def make_service(
     tick_generation: str = "7",
     ingest_type: str = "LIVE_CALLBACK",
     source: str = "YMM_LIVE_DATA",
+    last_error: str = "",
 ):
     redis_client = Mock()
     pipeline = redis_client.pipeline.return_value
@@ -35,6 +36,7 @@ def make_service(
             "status": status_value,
             "subscribed_codes": subscribed_codes,
             "subscription_generation": status_generation,
+            "last_error": last_error,
         },
         latest,
     ]
@@ -123,6 +125,35 @@ def test_old_generation_tick_is_used_when_contract_is_subscribed():
 
     assert event is not None
     assert event.stream_message_id == "123-0"
+
+
+def test_partial_subscription_failure_does_not_block_successful_contract():
+    service, tick = make_service(
+        status_value="DEGRADED",
+        last_error="SUBSCRIPTION_PARTIAL_FAILURE",
+    )
+
+    event = service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
+        symbol=tick.symbol,
+    )
+
+    assert event is not None
+
+
+@pytest.mark.parametrize("last_error", ["", "QUEUE_FULL", "SOURCE_SLOW_CONSUMER"])
+def test_source_level_degraded_state_still_fails_closed(last_error):
+    service, tick = make_service(
+        status_value="DEGRADED",
+        last_error=last_error,
+    )
+
+    assert service.get_matching_event(
+        exchange_id=tick.exchange_id,
+        order_book_id=tick.order_book_id,
+        symbol=tick.symbol,
+    ) is None
 
 
 def test_current_database_bootstrap_is_available_for_order_arrival():

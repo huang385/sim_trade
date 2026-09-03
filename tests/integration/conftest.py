@@ -408,6 +408,24 @@ def integration_context():
             )
             pipeline.delete(pnl_position_key(row.position_id))
         pipeline.execute()
+        # Outbox消费者可能已把测试订单投影为Redis活动订单。数据库删除不会
+        # 自动生成撤单事件，因此按测试创建的精确订单编号移除全部派生索引，
+        # 防止虚拟IT合约继续污染线上行情订阅集合。
+        active_order_index = ActiveOrderIndex(redis_client)
+        for order_id in order_ids:
+            detail = active_order_index.get_active_order(order_id)
+            if all(
+                detail.get(field)
+                for field in ("account_id", "exchange_id", "symbol")
+            ):
+                active_order_index.remove_active_order(
+                    order_id=order_id,
+                    account_id=detail["account_id"],
+                    exchange_id=detail["exchange_id"],
+                    symbol=detail["symbol"],
+                )
+            else:
+                active_order_index.remove_orphan_order_id(order_id)
         for row in position_rows:
             contract_key = pnl_contract_positions_key(
                 row.exchange_id,
@@ -420,7 +438,7 @@ def integration_context():
                 )
         # 测试可能在订单详情已删除后留下空的合约派生成员；使用生产代码的
         # 原子对账逻辑统一修剪，避免下一次行情Worker误订阅测试合约。
-        ActiveOrderIndex(redis_client).reconcile_active_contracts()
+        active_order_index.reconcile_active_contracts()
     except RedisError:
         # Redis不可用不应把只依赖PostgreSQL的测试改判失败；需要Redis的
         # 测试会在自身初始化阶段按项目规范明确skip。

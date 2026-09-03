@@ -84,8 +84,17 @@ class LiveMarketSnapshotService:
         )
         status, latest = pipeline.execute()
 
+        source_status = status.get("status")
+        # 单个无效合约会让Worker以DEGRADED报告“部分订阅失败”，但已经
+        # 成功订阅的其他合约仍持续收到实时Tick。此时按合约隔离可用性，
+        # 避免一个坏代码拖垮整个行情域。队列丢失、断线等源级异常仍然
+        # 失败关闭，不能借DEGRADED状态放行。
+        source_available = source_status == "RUNNING" or (
+            source_status == "DEGRADED"
+            and status.get("last_error") == "SUBSCRIPTION_PARTIAL_FAILURE"
+        )
         is_active_subscription = (
-            status.get("status") == "RUNNING"
+            source_available
             and normalized_order_book_id in self._subscribed_codes(status)
         )
         # 不再比较行情 Hash 上的订阅代次：合约仍在当前订阅列表、行情源
